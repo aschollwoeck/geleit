@@ -2,27 +2,16 @@
 //! captures the redirect on a localhost port. The real implementation (a loopback HTTP listener
 //! plus per-OS browser launch) lands in M7 (ACC-1 / ACC-2).
 
-use std::fmt;
-
 /// Error obtaining an OAuth authorization code.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum OAuthError {
     /// The loopback flow failed (listener / browser / transport).
+    #[error("oauth loopback error: {0}")]
     Backend(String),
     /// The user denied authorization, or the provider returned an error.
+    #[error("oauth authorization denied")]
     Denied,
 }
-
-impl fmt::Display for OAuthError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            OAuthError::Backend(msg) => write!(f, "oauth loopback error: {msg}"),
-            OAuthError::Denied => write!(f, "oauth authorization denied"),
-        }
-    }
-}
-
-impl std::error::Error for OAuthError {}
 
 /// Runs the desktop OAuth loopback flow and returns the authorization code.
 ///

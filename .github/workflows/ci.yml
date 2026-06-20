@@ -27,6 +27,21 @@ jobs:
       - name: Boundary (engine must not depend on UI)
         run: ./scripts/check-boundary.sh
 
+  supply-chain:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.9 # pinned for reproducibility; bump deliberately
+      - name: cargo deny check
+        run: cargo deny check
+
   mutants-diff:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest

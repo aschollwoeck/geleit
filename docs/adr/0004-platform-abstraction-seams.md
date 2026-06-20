@@ -29,10 +29,10 @@ Dependency direction is `app → engine → {core, platform}`; `geleit-platform`
 Cargo's no-cycle rule plus the boundary check (`scripts/check-boundary.sh`) keep it from
 depending on the UI crate.
 
-`geleit-platform` is **dependency-free**: error types are hand-rolled (`Display` +
-`std::error::Error`) rather than using `thiserror`, to preserve the M0 "zero third-party deps"
-state. `thiserror` and supply-chain CI (`cargo deny`/`audit`, guidelines §6) arrive together
-with the first real dependency in M1.
+`geleit-platform` was dependency-free in M0 (hand-rolled errors) to preserve the "zero
+third-party deps" state. **Updated (M1/S1.2):** `thiserror` is now adopted for the error types
+(guidelines §4), and the supply-chain gate (`cargo-deny`: advisories + licenses + bans +
+sources, guidelines §6) is wired into CI — so every dependency from here on is checked.
 
 ## Provisional API surfaces (revisit when the real impls land)
 These trait shapes are deliberately minimal for S0.5 and **will change** when the real

@@ -55,15 +55,19 @@ message in plaintext, and refresh — the whole stack proven end-to-end.
   spacing/density, layout & navigation shape, component look, iconography, motion). Defined
   before any UI is built; refined for rich content in M3. The canonical "what it looks like"
   (a top-level artifact, governed by the constitution; UI slice specs cite it + guidelines §13).
-- **S1.2** Local store schema (account-scoped from day one) + SQLite + migrations.
-- **S1.3** Connect to one IMAP account via manual config (ACC-3); credentials in OS keychain
+- **S1.2** **First-dependency setup:** supply-chain CI (`cargo deny`/`audit`, guidelines §6) +
+  adopt `thiserror` (migrate the hand-rolled errors in `geleit-platform`). Establishes the
+  dependency gate *before* real deps (rusqlite, async-imap, …) start landing. (Deferred here
+  from S0.2/S0.5 per plan.)
+- **S1.3** Local store schema (account-scoped from day one) + SQLite (`rusqlite`) + migrations.
+- **S1.4** Connect to one IMAP account via manual config (ACC-3); credentials in OS keychain
   (SEC-2); list folders (READ-6).
-- **S1.4** Naive sync of a folder's recent envelopes into the store (SYNC-1 basic; ACC-4 partial).
-- **S1.5** Fetch + MIME-parse (`mail-parser`) plaintext bodies into the store.
-- **S1.6** Minimal Slint shell built to `design.md`: folder list + virtualized message list
+- **S1.5** Naive sync of a folder's recent envelopes into the store (SYNC-1 basic; ACC-4 partial).
+- **S1.6** Fetch + MIME-parse (`mail-parser`) plaintext bodies into the store.
+- **S1.7** Minimal Slint shell built to `design.md`: folder list + virtualized message list
   (READ-1, READ-2), reading the local store only.
-- **S1.7** Reading pane: open a message in plaintext (READ-3); mark read/unread (READ-7).
-- **S1.8** Manual refresh action (SYNC-2).
+- **S1.8** Reading pane: open a message in plaintext (READ-3); mark read/unread (READ-7).
+- **S1.9** Manual refresh action (SYNC-2).
 
 ## M2 — Robust engine & store
 **Delivers:** SYNC-3, SYNC-4, SYNC-1†, SEC-1, SEC-3, OFF-1.

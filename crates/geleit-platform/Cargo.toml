@@ -6,8 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
-# Dependency-free by design (S0.5): hand-rolled errors keep M0 free of third-party crates.
-# thiserror + supply-chain CI arrive with the first real dependency in M1.
+# thiserror adopted in M1/S1.2 (guidelines §4), alongside the supply-chain gate (cargo-deny).
 
 [lints]
 workspace = true
+
+[dependencies]
+thiserror = "2.0.18"
