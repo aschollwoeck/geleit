@@ -77,6 +77,18 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE folder ADD COLUMN uid_validity INTEGER;
     ",
+    // 4 — attachment metadata (S3.5, view attachments). Bytes are not stored (yet); this is just
+    // name/type/size so the reading pane can list what's attached.
+    "
+    CREATE TABLE attachment (
+        id           INTEGER PRIMARY KEY,
+        message_id   INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+        filename     TEXT,
+        content_type TEXT NOT NULL,
+        size_bytes   INTEGER NOT NULL
+    );
+    CREATE INDEX attachment_message ON attachment(message_id);
+    ",
 ];
 
 /// An account row.
@@ -138,6 +150,14 @@ pub struct MessageHeader {
 pub struct StoredBody {
     pub plain: Option<String>,
     pub html: Option<String>,
+}
+
+/// Attachment metadata (name/type/size) — used both to store and to read back (S3.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    pub filename: Option<String>,
+    pub content_type: String,
+    pub size: i64,
 }
 
 /// The local store (one SQLite connection).
@@ -580,6 +600,43 @@ impl Store {
             .optional()?)
     }
 
+    /// Replace the stored attachment metadata for a message (atomic; idempotent on re-sync).
+    pub fn store_attachments(
+        &self,
+        message_id: i64,
+        attachments: &[Attachment],
+    ) -> Result<(), StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM attachment WHERE message_id = ?1", [message_id])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO attachment (message_id, filename, content_type, size_bytes) \
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for a in attachments {
+                stmt.execute((message_id, &a.filename, &a.content_type, a.size))?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The attachment metadata stored for a message (in insertion order).
+    pub fn attachments_for(&self, message_id: i64) -> Result<Vec<Attachment>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT filename, content_type, size_bytes FROM attachment \
+             WHERE message_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([message_id], |r| {
+            Ok(Attachment {
+                filename: r.get(0)?,
+                content_type: r.get(1)?,
+                size: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     #[cfg(test)]
     fn table_names(&self) -> Result<Vec<String>, StoreError> {
         let mut stmt = self
@@ -989,6 +1046,64 @@ mod tests {
             "plaintext open of an encrypted DB must fail"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn attachments_store_roundtrip_replace_and_cascade() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let fld = s.upsert_folder(acc, "INBOX").unwrap();
+        let mid = s
+            .upsert_message(
+                acc,
+                fld,
+                &NewMessage {
+                    uid: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(s.attachments_for(mid).unwrap().is_empty());
+
+        let atts = vec![
+            Attachment {
+                filename: Some("note.txt".to_owned()),
+                content_type: "text/plain".to_owned(),
+                size: 21,
+            },
+            Attachment {
+                filename: None,
+                content_type: "application/octet-stream".to_owned(),
+                size: 100,
+            },
+        ];
+        s.store_attachments(mid, &atts).unwrap();
+        assert_eq!(s.attachments_for(mid).unwrap(), atts);
+
+        // replace (re-sync) → no duplicates
+        s.store_attachments(
+            mid,
+            &[Attachment {
+                filename: Some("only.pdf".to_owned()),
+                content_type: "application/pdf".to_owned(),
+                size: 5,
+            }],
+        )
+        .unwrap();
+        let got = s.attachments_for(mid).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].filename.as_deref(), Some("only.pdf"));
+
+        // cascade on message delete (the hot sync path)
+        s.delete_messages_by_uid(fld, &[1]).unwrap();
+        assert!(
+            s.attachments_for(mid).unwrap().is_empty(),
+            "cascade on message delete"
+        );
+
+        // cascade on account delete
+        s.delete_account(acc).unwrap();
+        assert!(s.attachments_for(mid).unwrap().is_empty());
     }
 
     #[test]

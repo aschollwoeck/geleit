@@ -38,6 +38,9 @@ text of the message. The row you're reading is marked with a soft highlight and 
 Opening a message marks it as read, and its unread dot disappears. If you'd like to come back to it
 later, choose **Mark as unread** at the top of the reading area to bring the dot back.
 
+If the message has files attached, an **Attachments** list appears under the message showing each
+file's name and size. (Saving attachments to your computer is coming soon.)
+
 Some messages are written only in rich (HTML) formatting. For now those show a short note instead
 of the formatting — safe display of formatted mail is coming in a later version.
 

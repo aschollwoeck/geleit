@@ -2,7 +2,15 @@
 //! it stays unit- and mutation-tested. Turns raw RFC822 bytes into the plaintext/HTML body, a
 //! short snippet, and an attachment flag.
 
-use mail_parser::MessageParser;
+use mail_parser::{MessageParser, MimeHeaders};
+
+/// Metadata for one attachment (the bytes aren't stored yet — viewing only, READ-8).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Attachment {
+    pub filename: Option<String>,
+    pub content_type: String,
+    pub size: u64,
+}
 
 /// The parsed pieces of a message body we store.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -11,6 +19,7 @@ pub(crate) struct ParsedBody {
     pub html: Option<String>,
     pub snippet: Option<String>,
     pub has_attachments: bool,
+    pub attachments: Vec<Attachment>,
 }
 
 /// Parse a raw RFC822 message into its body parts. Returns an empty [`ParsedBody`] if the message
@@ -29,11 +38,26 @@ pub(crate) fn parse_body(raw: &[u8]) -> ParsedBody {
         .find(|p| p.is_text_html())
         .and_then(|p| p.text_contents().map(str::to_owned));
     let snippet = plain.as_deref().map(|t| make_snippet(t, 140));
+    let attachments: Vec<Attachment> = msg
+        .attachments()
+        .map(|part| Attachment {
+            filename: part.attachment_name().map(str::to_owned),
+            content_type: part.content_type().map_or_else(
+                || "application/octet-stream".to_owned(),
+                |ct| match ct.subtype() {
+                    Some(sub) => format!("{}/{}", ct.ctype(), sub),
+                    None => ct.ctype().to_owned(),
+                },
+            ),
+            size: part.len() as u64,
+        })
+        .collect();
     ParsedBody {
         plain,
         html,
         snippet,
-        has_attachments: msg.attachment_count() > 0,
+        has_attachments: !attachments.is_empty(),
+        attachments,
     }
 }
 
@@ -107,6 +131,17 @@ Content-Type: text/html; charset=utf-8\r\n\
         let html = b.html.as_deref().expect("html present");
         assert!(html.contains("real html"), "html was: {html:?}");
         assert!(!html.contains("leading plaintext"), "html was: {html:?}");
+    }
+
+    #[test]
+    fn extracts_attachment_metadata() {
+        let b = parse_body(MULTIPART);
+        assert!(b.has_attachments);
+        assert_eq!(b.attachments.len(), 1);
+        let a = &b.attachments[0];
+        assert_eq!(a.filename.as_deref(), Some("note.txt"));
+        assert_eq!(a.content_type, "text/plain");
+        assert!(a.size > 0, "size {}", a.size);
     }
 
     #[test]
