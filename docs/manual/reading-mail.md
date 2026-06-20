@@ -44,9 +44,11 @@ of the formatting — safe display of formatted mail is coming in a later versio
 ## Getting new mail
 
 Choose **Refresh** at the top of the message list to fetch new mail from your provider. While it
-works, the button reads *Refreshing…* — the app stays responsive the whole time, so you can keep
-reading. When it finishes, the list updates with anything new. If it can't reach your provider, a
-short message explains what to try; your existing mail stays put.
+works, the button reads *Refreshing…* and a quiet line shows what's happening — *Checking for new
+mail…*, then *Catching up…* with a count as older messages download in the background. The app
+stays responsive the whole time, so you can keep reading. When it finishes, the list updates with
+anything new. If it can't reach your provider, a short message explains what to try; your existing
+mail stays put.
 
 Everything you see is kept on your own device, so the list stays fast and works offline — refresh is
 the moment GeleitMail talks to your provider to catch up.

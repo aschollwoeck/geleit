@@ -56,7 +56,8 @@ slint::slint! {
         in property <string> r-date;
         in property <string> r-body;
         in property <bool> refreshing;
-        in property <string> status; // non-empty = error to show
+        in property <string> status; // non-empty = error to show (danger banner)
+        in property <string> sync-status; // non-empty = calm sync-progress line
         // add-account form
         in property <bool> needs-setup;
         in-out property <string> f-email;
@@ -263,6 +264,31 @@ slint::slint! {
                                 wrap: word-wrap;
                             }
                         }
+                    }
+                    // calm sync-progress line (distinct from the danger error banner above)
+                    if root.sync-status != "": Rectangle {
+                        height: 30px;
+                        background: Palette.surface;
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 8px;
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                y: 11px;
+                                border-radius: 4px;
+                                background: Palette.accent;
+                            }
+                            Text {
+                                text: root.sync-status;
+                                color: Palette.muted;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                        Rectangle { y: parent.height - 1px; height: 1px; background: Palette.divider; }
                     }
                     ListView {
                         for m in root.messages: Rectangle {
@@ -496,6 +522,7 @@ fn reload_all(
     messages: &VecModel<MessageItem>,
 ) {
     ui.set_status(SharedString::new()); // clear any stale main-view banner
+    ui.set_sync_status(SharedString::new());
     match store
         .list_accounts()
         .ok()
@@ -660,6 +687,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| "INBOX".to_owned());
             ui.set_refreshing(true);
             ui.set_status(SharedString::new());
+            ui.set_sync_status("Checking for new mail…".into());
 
             let weak = weak.clone();
             let db_path = db_path.clone();
@@ -676,6 +704,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = w.upgrade() {
                             ui.set_refreshing(false);
+                            ui.set_sync_status(SharedString::new());
                             ui.set_status(msg.into());
                         }
                     });
@@ -690,19 +719,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let p = progress.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = p.upgrade() {
-                            ui.set_status(format!("Catching up… {n}").into());
+                            ui.set_sync_status(format!("Catching up… {n}").into());
                         }
                     });
                 };
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let backfill = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     refresh::run_backfill(&db_path, &*secrets, &folder, 200, &mut on_batch)
                 }));
+                // On failure, keep a *calm* note (not the danger banner) — recent mail is already
+                // shown and backfill resumes next refresh.
+                let done_note: SharedString = match backfill {
+                    Ok(Ok(_)) => SharedString::new(),
+                    _ => "Couldn't finish catching up — will resume next refresh.".into(),
+                };
 
-                // Done: clear the status, show the full list, re-enable Refresh.
+                // Done: show the full list, re-enable Refresh, leave the calm note (if any).
                 let w = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = w.upgrade() {
                         ui.set_refreshing(false);
+                        ui.set_sync_status(done_note);
                         ui.set_status(SharedString::new());
                         ui.invoke_folder_selected(ui.get_selected_folder());
                     }
