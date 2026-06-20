@@ -10,7 +10,8 @@ Scaffold established in slice **S0.1**. See ADR-0002 (CI), ADR-0003 (crate struc
   `rusqlite` (bundled SQLite). Encryption at rest comes in M2.
 - **`geleit-engine`** — engine facade; depends on `geleit-core`, `geleit-platform`, `geleit-store`.
   Home of sync / MIME / search / transport / auth. The `imap` module connects over TLS
-  (`async-imap` + `tokio` + `rustls`/`ring`, ADR-0006) and lists/persists folders.
+  (`async-imap` + `tokio` + `rustls`/`ring`, ADR-0006), lists/persists folders, and syncs a
+  folder's recent envelopes; the pure `envelope` module decodes header bytes (mutation-tested).
 - **`geleit-app`** — binary entrypoint; depends on `geleit-engine` + `geleit-core`. Becomes the
   Slint shell (ADR-0001).
 

@@ -4,6 +4,7 @@
 //! search, transport, and auth subsystems. It depends on [`geleit_core`] and must never
 //! depend on UI code (constitution P4, ADR-0003).
 
+mod envelope;
 pub mod imap;
 
 use geleit_core::looks_like_email;

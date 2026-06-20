@@ -81,6 +81,33 @@ pub struct Folder {
     pub name: String,
 }
 
+/// A message envelope to insert/update. `date` is unix seconds; `uid` is the IMAP UID.
+#[derive(Debug, Clone, Default)]
+pub struct NewMessage {
+    pub uid: Option<i64>,
+    pub message_id: Option<String>,
+    pub subject: Option<String>,
+    pub from_name: Option<String>,
+    pub from_addr: Option<String>,
+    pub date: Option<i64>,
+    pub seen: bool,
+    pub has_attachments: bool,
+    pub snippet: Option<String>,
+}
+
+/// A message header as read back for listing (newest-first).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageHeader {
+    pub id: i64,
+    pub uid: Option<i64>,
+    pub subject: Option<String>,
+    pub from_name: Option<String>,
+    pub from_addr: Option<String>,
+    pub date: Option<i64>,
+    pub seen: bool,
+    pub has_attachments: bool,
+}
+
 /// The local store (one SQLite connection).
 pub struct Store {
     conn: Connection,
@@ -214,6 +241,79 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Insert or update a message envelope, keyed by `(account_id, folder_id, uid)`. On re-sync
+    /// the envelope fields and seen flag are refreshed; `flagged` is preserved (local state).
+    ///
+    /// NOTE: the envelope path always supplies `has_attachments=false`/`snippet=NULL`, so the
+    /// UPDATE refreshes them to empty. When S1.6 derives these from the body, drop them from this
+    /// UPDATE set (or `COALESCE`) so an envelope re-sync doesn't wipe body-derived data.
+    pub fn upsert_message(
+        &self,
+        account_id: i64,
+        folder_id: i64,
+        m: &NewMessage,
+    ) -> Result<i64, StoreError> {
+        self.conn.execute(
+            "INSERT INTO message \
+             (account_id, folder_id, uid, message_id, subject, from_name, from_addr, date, \
+              seen, flagged, has_attachments, snippet) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11) \
+             ON CONFLICT(account_id, folder_id, uid) DO UPDATE SET \
+               message_id = excluded.message_id, subject = excluded.subject, \
+               from_name = excluded.from_name, from_addr = excluded.from_addr, \
+               date = excluded.date, seen = excluded.seen, \
+               has_attachments = excluded.has_attachments, snippet = excluded.snippet",
+            (
+                account_id,
+                folder_id,
+                m.uid,
+                &m.message_id,
+                &m.subject,
+                &m.from_name,
+                &m.from_addr,
+                m.date,
+                m.seen,
+                m.has_attachments,
+                &m.snippet,
+            ),
+        )?;
+        match m.uid {
+            // On conflict the row is UPDATEd (not inserted), so look the id up by its unique key.
+            Some(uid) => Ok(self.conn.query_row(
+                "SELECT id FROM message WHERE account_id = ?1 AND folder_id = ?2 AND uid = ?3",
+                (account_id, folder_id, uid),
+                |r| r.get(0),
+            )?),
+            // A NULL uid never conflicts, so the row was just inserted.
+            None => Ok(self.conn.last_insert_rowid()),
+        }
+    }
+
+    /// Message headers for a folder, newest first (by date), up to `limit`.
+    pub fn messages_in_folder(
+        &self,
+        folder_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MessageHeader>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, uid, subject, from_name, from_addr, date, seen, has_attachments \
+             FROM message WHERE folder_id = ?1 ORDER BY date DESC, id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map((folder_id, limit), |r| {
+            Ok(MessageHeader {
+                id: r.get(0)?,
+                uid: r.get(1)?,
+                subject: r.get(2)?,
+                from_name: r.get(3)?,
+                from_addr: r.get(4)?,
+                date: r.get(5)?,
+                seen: r.get(6)?,
+                has_attachments: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     #[cfg(test)]
     fn table_names(&self) -> Result<Vec<String>, StoreError> {
         let mut stmt = self
@@ -335,6 +435,71 @@ mod tests {
         // same name under a different account is a distinct folder
         s.upsert_folder(b, "INBOX").unwrap();
         assert_eq!(s.folders_for_account(b).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn upsert_message_inserts_then_updates() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let fld = s.upsert_folder(acc, "INBOX").unwrap();
+        let m = NewMessage {
+            uid: Some(10),
+            subject: Some("Hi".to_owned()),
+            seen: false,
+            ..Default::default()
+        };
+        let id1 = s.upsert_message(acc, fld, &m).unwrap();
+        // re-sync same uid with seen flipped → same row, updated, not duplicated
+        let m2 = NewMessage {
+            uid: Some(10),
+            subject: Some("Hi".to_owned()),
+            seen: true,
+            ..Default::default()
+        };
+        let id2 = s.upsert_message(acc, fld, &m2).unwrap();
+        assert_eq!(id1, id2);
+        let msgs = s.messages_in_folder(fld, 50).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].seen);
+    }
+
+    #[test]
+    fn messages_in_folder_newest_first_and_scoped() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let sent = s.upsert_folder(acc, "Sent").unwrap();
+        for (uid, date, subj) in [(1, 100, "old"), (2, 300, "new"), (3, 200, "mid")] {
+            s.upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(uid),
+                    date: Some(date),
+                    subject: Some(subj.to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        s.upsert_message(
+            acc,
+            sent,
+            &NewMessage {
+                uid: Some(9),
+                subject: Some("elsewhere".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let subs: Vec<_> = s
+            .messages_in_folder(inbox, 50)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.subject.unwrap())
+            .collect();
+        assert_eq!(subs, ["new", "mid", "old"]); // date DESC
+        assert_eq!(s.messages_in_folder(sent, 50).unwrap().len(), 1); // folder-scoped
     }
 
     #[test]
