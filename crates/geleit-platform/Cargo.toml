@@ -1,0 +1,13 @@
+[package]
+name = "geleit-platform"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Dependency-free by design (S0.5): hand-rolled errors keep M0 free of third-party crates.
+# thiserror + supply-chain CI arrive with the first real dependency in M1.
+
+[lints]
+workspace = true

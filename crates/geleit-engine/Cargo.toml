@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 geleit-core = { path = "../geleit-core" }
+geleit-platform = { path = "../geleit-platform" }
 
 [lints]
 workspace = true
