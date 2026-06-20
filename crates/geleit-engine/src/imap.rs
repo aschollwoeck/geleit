@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use geleit_platform::secret::{SecretError, SecretStore};
-use geleit_store::{Store, StoreError};
+use geleit_store::{NewMessage, Store, StoreError};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, RootCertStore};
 use thiserror::Error;
@@ -53,11 +53,12 @@ pub enum ImapError {
 /// The `service` key under which IMAP passwords are stored in the [`SecretStore`].
 const SECRET_SERVICE: &str = "geleit-imap";
 
-/// Connect to the IMAP server, log in, list folders, and log out. Returns the folder names.
-pub async fn list_folders(
-    config: &ImapConfig,
-    secrets: &dyn SecretStore,
-) -> Result<Vec<String>, ImapError> {
+/// A logged-in IMAP session over the TLS stream.
+type ImapSession = async_imap::Session<tokio_rustls::client::TlsStream<TcpStream>>;
+
+/// Open a TLS connection and log in, returning a ready session. The password comes from the
+/// `SecretStore` seam and is never logged (P2).
+async fn connect(config: &ImapConfig, secrets: &dyn SecretStore) -> Result<ImapSession, ImapError> {
     // Fetch the password first: missing → fail before opening any socket.
     // NOTE: `SecretStore::get` is sync; the in-memory double is instant, but when the real
     // OS-keychain backend lands (libsecret/DBus) this should move behind `spawn_blocking` so it
@@ -78,11 +79,18 @@ pub async fn list_folders(
     let mut client = async_imap::Client::new(tls);
     let _greeting = client.read_response().await?.ok_or(ImapError::NoGreeting)?;
 
-    let mut session = client
+    client
         .login(&config.username, &password)
         .await
-        .map_err(|(err, _client)| err)?;
+        .map_err(|(err, _client)| ImapError::from(err))
+}
 
+/// Connect, list folders, and log out. Returns the folder names.
+pub async fn list_folders(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+) -> Result<Vec<String>, ImapError> {
+    let mut session = connect(config, secrets).await?;
     let mut folders = Vec::new();
     {
         let mut names = session.list(Some(""), Some("*")).await?;
@@ -90,10 +98,75 @@ pub async fn list_folders(
             folders.push(name?.name().to_string());
         }
     }
-    // Best-effort close: we already have the folders, so a transient LOGOUT failure shouldn't
-    // turn a successful result into an error.
-    let _ = session.logout().await;
+    let _ = session.logout().await; // best-effort: we already have the folders
     Ok(folders)
+}
+
+/// Map an IMAP FETCH result to a storable envelope. Network-side (the pure decode/format bits live
+/// in [`crate::envelope`]). `has_attachments`/`snippet` need the body (S1.6), so are left empty.
+fn fetch_to_new_message(f: &async_imap::types::Fetch) -> NewMessage {
+    let env = f.envelope();
+    let (from_name, from_addr) = env
+        .and_then(|e| e.from.as_ref())
+        .and_then(|addrs| addrs.first())
+        .map(|a| {
+            crate::envelope::address_parts(
+                a.name.as_deref(),
+                a.mailbox.as_deref(),
+                a.host.as_deref(),
+            )
+        })
+        .unwrap_or((None, None));
+    NewMessage {
+        uid: f.uid.map(i64::from),
+        message_id: env.and_then(|e| crate::envelope::decode_header(e.message_id.as_deref())),
+        subject: env.and_then(|e| crate::envelope::decode_header(e.subject.as_deref())),
+        from_name,
+        from_addr,
+        date: f.internal_date().map(|d| d.timestamp()),
+        seen: f
+            .flags()
+            .any(|fl| matches!(fl, async_imap::types::Flag::Seen)),
+        has_attachments: false,
+        snippet: None,
+    }
+}
+
+/// Fetch a folder's most recent envelopes (up to `limit`) and store them; returns how many were
+/// fetched. Naive — a recent window, not incremental (CONDSTORE/QRESYNC is M2).
+pub async fn sync_envelopes(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    store: &Store,
+    account_id: i64,
+    folder: &str,
+    limit: u32,
+) -> Result<usize, ImapError> {
+    let folder_id = store.upsert_folder(account_id, folder)?;
+    let mut session = connect(config, secrets).await?;
+    let mailbox = session.select(folder).await?;
+    let mut count = 0usize;
+    // NOTE: `store.upsert_message` is a synchronous SQLite write on the async path (as with
+    // `SecretStore::get` in `connect`). When driven from the UI it should run via `spawn_blocking`
+    // or a store actor; rusqlite's `Connection` is `!Sync`, so this future is `!Send` today
+    // (guidelines §5) — the integration slice will address it.
+    if let Some((start, end)) = crate::envelope::recent_window(mailbox.exists, limit) {
+        // The data items MUST be parenthesised for a multi-item FETCH (IMAP grammar).
+        let query = "(UID ENVELOPE FLAGS INTERNALDATE)";
+        let mut fetches = session.fetch(format!("{start}:{end}"), query).await?;
+        while let Some(fetch) = fetches.next().await {
+            let msg = fetch_to_new_message(&fetch?);
+            // Skip messages with no UID: they can't be de-duplicated on re-sync, so persisting
+            // them would create duplicates (P6). RFC 3501 requires UID when it is requested.
+            if msg.uid.is_none() {
+                continue;
+            }
+            store.upsert_message(account_id, folder_id, &msg)?;
+            count += 1;
+        }
+    }
+    let _ = session.logout().await; // best-effort
+    Ok(count)
 }
 
 /// Upsert the given folder names into the store under `account_id` (idempotent). Pure — no network.
@@ -266,5 +339,50 @@ mod tests {
         };
         let folders = list_folders(&cfg, &secrets).await.expect("connect + list");
         assert!(folders.iter().any(|f| f == "INBOX"), "folders: {folders:?}");
+    }
+
+    /// Append a known message to INBOX, sync envelopes, and assert it lands in the store.
+    /// Needs `--features dangerous-tls` + a running Dovecot; ignored in CI.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn live_sync_envelopes_from_dovecot() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let subject = "Geleit S1.5 envelope test";
+        let raw = format!(
+            "Subject: {subject}\r\nFrom: Tester <tester@example.com>\r\n\
+             Date: Tue, 01 Jul 2026 09:00:00 +0000\r\n\r\nhello\r\n"
+        );
+        {
+            let mut session = connect(&cfg, &secrets).await.expect("connect");
+            session
+                .append("INBOX", None, None, raw.as_bytes())
+                .await
+                .expect("append");
+            let _ = session.logout().await;
+        }
+
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("geleittest@localhost", None).unwrap();
+        let n = sync_envelopes(&cfg, &secrets, &store, acc, "INBOX", 50)
+            .await
+            .expect("sync");
+        assert!(n >= 1, "synced {n} messages");
+        let folder_id = store.upsert_folder(acc, "INBOX").unwrap();
+        let msgs = store.messages_in_folder(folder_id, 50).unwrap();
+        assert!(
+            msgs.iter().any(|m| m.subject.as_deref() == Some(subject)),
+            "subjects: {:?}",
+            msgs.iter().map(|m| m.subject.clone()).collect::<Vec<_>>()
+        );
     }
 }
