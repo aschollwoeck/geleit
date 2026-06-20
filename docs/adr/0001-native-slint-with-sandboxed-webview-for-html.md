@@ -1,9 +1,10 @@
 # ADR-0001: Native Slint UI with a sandboxed webview component for HTML email
 
 ## Status
-Proposed — **both gates PASSED**: S0.2 (HTML rendering, see
+**Accepted** (S0.4) — both M0 feasibility gates passed: S0.2 (safe HTML rendering, see
 `docs/technical/s0.2-html-spike-findings.md`) and S0.3 (virtualized 50k-row list, see
-`docs/technical/s0.3-list-spike-findings.md`). Final confirmation in **S0.4**.
+`docs/technical/s0.3-list-spike-findings.md`). The UI conventions that follow from this are in
+`guidelines.md` §13.
 
 ## Context
 - Constitution P4: **native, not a webview shell.** Lean, low-RAM, native feel is the brand.

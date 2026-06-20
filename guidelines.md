@@ -2,8 +2,8 @@
 
 The single written standard referenced by `constitution.md` P9. New code matches the
 surrounding code and these rules. Where a rule and the constitution conflict, the
-constitution wins. **UI-framework-specific sections are provisional until the framework is
-committed in M0** and are marked *(provisional — pending M0)*.
+constitution wins. The UI framework was committed to **Slint** in M0 (ADR-0001); the UI
+conventions in §13 are final.
 
 Status: **initial draft.** Refine as the codebase grows; amend deliberately, not silently.
 
@@ -144,11 +144,26 @@ extensive over the project's life, and is never deferred to a "docs later" phase
 - `main` stays buildable and test-green at all times.
 - Don't commit secrets, fixtures containing real mail, or generated artifacts.
 
-## 13. UI conventions *(provisional — pending M0)*
+## 13. UI conventions (Slint)
 
-- Assumed Slint pending the M0 decision. The UI crate holds **no business logic** — it renders
-  state from the engine and forwards intents back.
-- Calm/fast (P3): every interaction targets instant feedback from local state; long operations
-  show non-blocking progress, never a frozen UI.
-- Accessibility and keyboard navigation are first-class, not afterthoughts.
-- Finalize this section (widget patterns, state flow, theming) once the framework is committed.
+Framework committed to **Slint** in ADR-0001 (accepted after the M0 spikes S0.2/S0.3).
+
+- **No business logic in the UI.** The UI crate renders state from the engine and forwards user
+  intents back; all logic lives in the engine crates (§2). The engine is the source of truth.
+- **State flow.** The UI observes engine state (models/properties) and sends intents (actions)
+  to the engine. No engine call blocks the UI thread (P1); long work runs in the engine and its
+  results update the UI's models.
+- **Large lists** (messages, folders) use Slint's **virtualized `ListView`** bound to a model —
+  never instantiate per-row widgets eagerly (S0.3: this is what keeps 50k rows at ≥60fps with
+  data-only memory).
+- **HTML email renders only in the sandboxed webview component** (ADR-0001), never in the main
+  Slint scene. Before rendering, email HTML is **sanitized** (scripts/handlers removed, remote
+  refs neutralized) and **JavaScript is disabled** in the webview; remote content is blocked by
+  default (PRIV-1). Use a **CSS-aware sanitizer** that keeps safe inline CSS while stripping
+  remote `url(...)`/`@import` (S0.2 finding — a blanket style-strip ruins fidelity).
+- **Rendering backend.** Prefer the GPU (FemtoVG/OpenGL) backend; the software fallback works
+  but is slower (S0.3).
+- **Calm/fast (P3).** Every interaction targets instant feedback from local state; long
+  operations show non-blocking progress, never a frozen UI.
+- **Accessibility & keyboard navigation** are first-class, not afterthoughts.
+- **Theming.** Light/dark (APP-3) from a single set of theme tokens.
