@@ -89,6 +89,11 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX attachment_message ON attachment(message_id);
     ",
+    // 5 — In-Reply-To header for conversation threading (S3.4); links a reply to its parent's
+    // Message-ID.
+    "
+    ALTER TABLE message ADD COLUMN in_reply_to TEXT;
+    ",
 ];
 
 /// An account row.
@@ -122,6 +127,7 @@ pub struct Folder {
 pub struct NewMessage {
     pub uid: Option<i64>,
     pub message_id: Option<String>,
+    pub in_reply_to: Option<String>,
     pub subject: Option<String>,
     pub from_name: Option<String>,
     pub from_addr: Option<String>,
@@ -136,6 +142,8 @@ pub struct NewMessage {
 pub struct MessageHeader {
     pub id: i64,
     pub uid: Option<i64>,
+    pub message_id: Option<String>,
+    pub in_reply_to: Option<String>,
     pub subject: Option<String>,
     pub from_name: Option<String>,
     pub from_addr: Option<String>,
@@ -405,18 +413,19 @@ impl Store {
     ) -> Result<i64, StoreError> {
         self.conn.execute(
             "INSERT INTO message \
-             (account_id, folder_id, uid, message_id, subject, from_name, from_addr, date, \
-              seen, flagged, has_attachments, snippet) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11) \
+             (account_id, folder_id, uid, message_id, in_reply_to, subject, from_name, from_addr, \
+              date, seen, flagged, has_attachments, snippet) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12) \
              ON CONFLICT(account_id, folder_id, uid) DO UPDATE SET \
-               message_id = excluded.message_id, subject = excluded.subject, \
-               from_name = excluded.from_name, from_addr = excluded.from_addr, \
-               date = excluded.date, seen = excluded.seen",
+               message_id = excluded.message_id, in_reply_to = excluded.in_reply_to, \
+               subject = excluded.subject, from_name = excluded.from_name, \
+               from_addr = excluded.from_addr, date = excluded.date, seen = excluded.seen",
             (
                 account_id,
                 folder_id,
                 m.uid,
                 &m.message_id,
+                &m.in_reply_to,
                 &m.subject,
                 &m.from_name,
                 &m.from_addr,
@@ -445,20 +454,23 @@ impl Store {
         limit: i64,
     ) -> Result<Vec<MessageHeader>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, uid, subject, from_name, from_addr, date, seen, has_attachments, snippet \
+            "SELECT id, uid, message_id, in_reply_to, subject, from_name, from_addr, date, seen, \
+             has_attachments, snippet \
              FROM message WHERE folder_id = ?1 ORDER BY date DESC, id DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map((folder_id, limit), |r| {
             Ok(MessageHeader {
                 id: r.get(0)?,
                 uid: r.get(1)?,
-                subject: r.get(2)?,
-                from_name: r.get(3)?,
-                from_addr: r.get(4)?,
-                date: r.get(5)?,
-                seen: r.get(6)?,
-                has_attachments: r.get(7)?,
-                snippet: r.get(8)?,
+                message_id: r.get(2)?,
+                in_reply_to: r.get(3)?,
+                subject: r.get(4)?,
+                from_name: r.get(5)?,
+                from_addr: r.get(6)?,
+                date: r.get(7)?,
+                seen: r.get(8)?,
+                has_attachments: r.get(9)?,
+                snippet: r.get(10)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1104,6 +1116,27 @@ mod tests {
         // cascade on account delete
         s.delete_account(acc).unwrap();
         assert!(s.attachments_for(mid).unwrap().is_empty());
+    }
+
+    #[test]
+    fn message_id_and_in_reply_to_roundtrip() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let fld = s.upsert_folder(acc, "INBOX").unwrap();
+        s.upsert_message(
+            acc,
+            fld,
+            &NewMessage {
+                uid: Some(1),
+                message_id: Some("<b@x>".to_owned()),
+                in_reply_to: Some("<a@x>".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let h = &s.messages_in_folder(fld, 1).unwrap()[0];
+        assert_eq!(h.message_id.as_deref(), Some("<b@x>"));
+        assert_eq!(h.in_reply_to.as_deref(), Some("<a@x>"));
     }
 
     #[test]

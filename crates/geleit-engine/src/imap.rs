@@ -121,6 +121,7 @@ fn fetch_to_new_message(f: &async_imap::types::Fetch) -> NewMessage {
     NewMessage {
         uid: f.uid.map(i64::from),
         message_id: env.and_then(|e| crate::envelope::decode_header(e.message_id.as_deref())),
+        in_reply_to: env.and_then(|e| crate::envelope::decode_header(e.in_reply_to.as_deref())),
         subject: env.and_then(|e| crate::envelope::decode_header(e.subject.as_deref())),
         from_name,
         from_addr,
@@ -777,6 +778,50 @@ mod tests {
             present(&store).is_empty(),
             "deleted message removed locally"
         );
+    }
+
+    /// A synced reply has its `In-Reply-To` stored (the link threading needs). Needs Dovecot +
+    /// `--features dangerous-tls`.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn live_in_reply_to_stored() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let subject = "Geleit S3.4 reply test";
+        let raw = format!(
+            "Subject: {subject}\r\nFrom: T <t@example.com>\r\nMessage-ID: <reply-s34@x>\r\n\
+             In-Reply-To: <parent-s34@x>\r\n\r\na reply\r\n"
+        );
+        {
+            let mut session = connect(&cfg, &secrets).await.expect("connect");
+            session
+                .append("INBOX", None, None, raw.as_bytes())
+                .await
+                .expect("append");
+            let _ = session.logout().await;
+        }
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("geleittest@localhost", None).unwrap();
+        sync_folder_incremental(&cfg, &secrets, &store, acc, "INBOX", 50)
+            .await
+            .expect("sync");
+        let folder_id = store.upsert_folder(acc, "INBOX").unwrap();
+        let m = store
+            .messages_in_folder(folder_id, 50)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject.as_deref() == Some(subject))
+            .expect("message present");
+        assert_eq!(m.in_reply_to.as_deref(), Some("<parent-s34@x>"));
     }
 
     /// A synced message with an attachment has its attachment metadata stored. Needs Dovecot +

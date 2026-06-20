@@ -30,6 +30,9 @@ When you open GeleitMail you see three areas, left to right:
   shows when a message has an attachment.
 - **The reading area** on the right, where the message you pick opens.
 
+When several messages are part of the same back-and-forth, a small **conversation · N** marker shows
+how many messages are in that thread.
+
 ## Opening a message
 
 Click a message and it opens on the right, showing the subject, who it's from, the date, and the

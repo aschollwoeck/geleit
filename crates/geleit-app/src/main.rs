@@ -43,6 +43,7 @@ slint::slint! {
         date: string,
         unread: bool,
         attachment: bool,
+        thread-count: int, // messages in this conversation (1 = not threaded)
     }
 
     export component Main inherits Window {
@@ -351,6 +352,13 @@ slint::slint! {
                                         font-size: 12px;
                                         horizontal-alignment: right;
                                     }
+                                    // conversation size (READ-5) — shown only when threaded
+                                    if m.thread-count > 1: Text {
+                                        text: "conversation · " + m.thread-count;
+                                        color: Palette.accent-strong;
+                                        font-size: 11px;
+                                        horizontal-alignment: right;
+                                    }
                                 }
                             }
                             Rectangle {
@@ -496,11 +504,29 @@ slint::slint! {
 }
 
 fn load_messages(store: &Store, folder_id: i64) -> Vec<MessageItem> {
-    store
+    let headers = store
         .messages_in_folder(folder_id, 1000)
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    // Conversation size per message (READ-5): group by Message-ID / In-Reply-To.
+    let items: Vec<geleit_engine::thread::ThreadItem> = headers
         .iter()
-        .map(|h| {
+        .map(|h| geleit_engine::thread::ThreadItem {
+            message_id: h.message_id.as_deref(),
+            in_reply_to: h.in_reply_to.as_deref(),
+        })
+        .collect();
+    let mut thread_size = vec![1usize; headers.len()];
+    for grp in geleit_engine::thread::group(&items) {
+        for &i in &grp {
+            thread_size[i] = grp.len();
+        }
+    }
+
+    headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
             let vm = viewmodel::message_vm(h);
             MessageItem {
                 id: h.id as i32,
@@ -510,6 +536,7 @@ fn load_messages(store: &Store, folder_id: i64) -> Vec<MessageItem> {
                 date: vm.date.into(),
                 unread: vm.unread,
                 attachment: vm.attachment,
+                thread_count: thread_size[i] as i32,
             }
         })
         .collect()
