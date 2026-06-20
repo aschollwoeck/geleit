@@ -63,12 +63,15 @@ account-scoped from day one so unified inbox can be added later), but we do not 
 deferred features now. Shipping beats completeness.
 
 ### P8. Spec before build
-We are spec-driven. No code is written without an agreed spec for it. The chain is:
-`constitution` → `vision` → `roadmap` → per-milestone **spec** → per-milestone **plan** →
-per-milestone **tasks** → build.
+We are spec-driven. No code is written without an agreed spec for it. Milestones and their
+slices are defined in `roadmap.md`; the **slice** is the unit of planning and build. The chain
+is: `constitution` → `vision` → `roadmap` → per-slice **spec** → per-slice **plan** →
+per-slice **tasks** → build. Decisions and architecture that **span slices** are recorded as
+**ADRs** (`docs/adr/`) and referenced by the slice specs that depend on them — they are not
+duplicated into each slice.
 
-For each milestone we proceed **spec → plan → tasks**:
-- **spec** defines *what* the milestone delivers,
+For each slice we proceed **spec → plan → tasks**:
+- **spec** defines *what* the slice delivers (and its acceptance criteria where applicable),
 - **plan** defines *how* it is built,
 - **tasks** breaks the plan into concrete to-dos and **always records what is done vs. what
   is still to do**, derived from the spec and plan.
@@ -91,7 +94,7 @@ reviewed.** Following the per-slice build workflow in `guidelines.md`, each slic
 in order:
 1. the **source code** (per its spec and plan);
 2. **test cases** that verify it and double as **executable acceptance criteria for the user
-   stories** in the milestone spec;
+   stories** in the slice's spec;
 3. a **green run** of those tests (plus fmt, clippy `-D warnings`, and mutation testing on
    touched core crates);
 4. an update to the **extensive end-user manual** for any user-facing behavior;
