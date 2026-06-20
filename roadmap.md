@@ -1,117 +1,157 @@
 # GeleitMail — Roadmap (milestones & slices)
 
-How we get from nothing to the `vision.md` end state, governed by `constitution.md`.
+How we get from nothing to the `vision.md` end state, delivering the `stories.md` catalog,
+governed by `constitution.md`.
 
 **This is a living document.** Milestones are outcomes; **slices** are thin, end-to-end,
-verifiable steps toward a milestone — each slice should leave the project working. We expect
-to re-plan at every milestone boundary. Slices for *distant* milestones are provisional
-sketches. Per constitution P8, each milestone gets its own **spec → plan → tasks**, written
-just before we build it:
+verifiable steps toward a milestone — each slice should leave the project working. Milestones
+are **derived from the user stories** (`stories.md`): each lists the story IDs it delivers, so
+coverage is checkable. We expect to re-plan at every milestone boundary; slices for *distant*
+milestones are provisional. Per constitution P8, each milestone gets its own
+**spec → plan → tasks**, written just before we build it:
 
 ```
 specs/m0/spec.md    plan.md    tasks.md   # what · how · done-vs-todo (kept current)
 specs/m1/...
 ```
 
-**Build philosophy:** engine-first (the make-or-break core before any UI commitment),
-de-risk early (feasibility before foundations), each milestone a capability you can actually
-verify. Single-account, plain-IMAP development first so we are never *blocked* on OAuth
-approval — but the OAuth paperwork starts as a background track at M0 (weeks of lead time).
+**Build philosophy: vertical-slice-first.** Get a thin, usable path working end-to-end early
+(read one account in M1), *then* harden the engine (M2) and add breadth. This de-risks
+*integration* early and lets the real experience validate the design — rather than completing
+a headless engine before anything is visible. The make-or-break sync core is de-risked by
+designing its schema and sync model up front (M1 plan) and proving it via the slice, then
+hardening it in M2. UI framework is committed in M0 (via spikes).
+
+**Cross-platform:** primary dev OS is **Linux**; OS-divergent components (keychain, HTML
+renderer, OAuth loopback) sit behind platform-abstraction seams from M0, with full
+Windows/macOS/Linux packaging and validation at M8.
+
+**Provider auth note:** Microsoft basic auth is retired, so real Outlook accounts only work
+once OAuth lands (M7). Early milestones develop against a local IMAP server or a Gmail
+app-password account; OAuth app-registration paperwork starts at M0 (weeks of lead time).
 
 ---
 
 ## M0 — Foundations & feasibility
-**Outcome:** we commit to the native UI stack *with evidence*, on a working scaffold — or we
-pivot before building on sand.
+**Outcome:** commit to the native UI stack *with evidence*, on a working scaffold — or pivot
+before building on sand. *(Infrastructure — delivers no user stories directly.)*
 
-- **S0.1** Cargo workspace scaffold; crate skeleton; CI with fmt + clippy + test + `cargo mutants` wired.
+- **S0.1** Cargo workspace scaffold; UI-agnostic engine crates vs. a UI crate; CI with
+  `fmt --check` + `clippy -D warnings` + tests + `cargo mutants` wired.
 - **S0.2** Spike: render a real-world HTML email in a *sandboxed* component, remote content blocked.
 - **S0.3** Spike: virtualized message list rendering ~50k synthetic rows at 60fps in Slint.
-- **S0.4** Decision record (ADR): commit to Slint, or pivot — based on S0.2/S0.3 evidence.
-- **S0.5** *(parallel admin track)* begin Google + Microsoft OAuth app-registration paperwork.
+- **S0.4** ADR: commit to Slint, or pivot — based on S0.2/S0.3 evidence.
+- **S0.5** Platform-abstraction seams for keychain / HTML render / OAuth; Linux as primary dev OS.
+- **S0.6** *(parallel admin track)* begin Google + Microsoft OAuth app-registration paperwork.
 
-## M1 — Core engine (headless)
-**Outcome:** a headless tool that correctly syncs a real mailbox into an encrypted local store —
-the make-or-break core, proven, with no UI.
+## M1 — Thin slice: read one account
+**Delivers:** ACC-3, ACC-4*, SYNC-1*, SYNC-2, READ-1, READ-2, READ-3, READ-6, READ-7, SEC-2.
+**Outcome:** open the app, connect one IMAP account, see your folders and message list, read a
+message in plaintext, and refresh — the whole stack proven end-to-end.
 
 - **S1.1** Local store schema (account-scoped from day one) + SQLite + migrations.
-- **S1.2** Transparent encryption at rest via OS keychain (no master password).
-- **S1.3** Connect to one IMAP account (plain / app-password); list folders.
-- **S1.4** Sync message envelopes/headers for a folder, newest-first.
-- **S1.5** Progressive backfill of older messages in the background, batched.
-- **S1.6** Fetch full bodies + MIME parse (`mail-parser`) + store.
-- **S1.7** Incremental sync (CONDSTORE/QRESYNC): detect new / changed / deleted since last sync.
-- **S1.8** Gmail-specific handling (labels-as-folders, X-GM-EXT-1).
-- **S1.9** Sync integrity: resume after interruption, idempotent, provably no dupes/loss.
+- **S1.2** Connect to one IMAP account via manual config (ACC-3); credentials in OS keychain
+  (SEC-2); list folders (READ-6).
+- **S1.3** Naive sync of a folder's recent envelopes into the store (SYNC-1 basic; ACC-4 partial).
+- **S1.4** Fetch + MIME-parse (`mail-parser`) plaintext bodies into the store.
+- **S1.5** Minimal Slint shell: folder list + virtualized message list (READ-1, READ-2),
+  reading the local store only.
+- **S1.6** Reading pane: open a message in plaintext (READ-3); mark read/unread (READ-7).
+- **S1.7** Manual refresh action (SYNC-2).
 
-## M2 — Local search
-**Outcome:** fast queries against the synced store, offline.
+## M2 — Robust engine & store
+**Delivers:** SYNC-3, SYNC-4, SYNC-1†, SEC-1, SEC-3, OFF-1.
+**Outcome:** correct, robust, encrypted local sync — now that we can see what we're building.
 
-- **S2.1** Index synced messages into `tantivy`.
-- **S2.2** Incremental indexing as new mail arrives / changes.
-- **S2.3** Query API (sender / subject / body), fast.
-- **S2.4** Verified to work fully offline against the local index.
+- **S2.1** Encryption at rest via OS-keychain-held key (SEC-1); transparent unlock, no master password.
+- **S2.2** Incremental sync (CONDSTORE/QRESYNC): detect new / changed / deleted (SYNC-1 robust).
+- **S2.3** Progressive backfill of the full mailbox, newest-first, batched, in background (SYNC-3).
+- **S2.4** Gmail-specific handling (labels-as-folders, X-GM-EXT-1).
+- **S2.5** Non-blocking sync status / progress (SYNC-4).
+- **S2.6** Sync integrity: resume after interruption, idempotent, provably no dupes/loss (property tests).
+- **S2.7** Offline reading verified (OFF-1); wipe local data on account removal (SEC-3).
 
-## M3 — Read it (single-account UI)
-**Outcome:** you can actually read your mail in GeleitMail — calm and instant.
+## M3 — Rich, safe reading
+**Delivers:** READ-4, READ-5, READ-8, PRIV-1, PRIV-2, PRIV-3, PRIV-4.
+**Outcome:** read real HTML mail safely, in threads, with attachments.
 
-- **S3.1** Slint app shell (folder list · message list · reading pane) reading the local store only.
-- **S3.2** Virtualized message list, newest-first, read/unread state.
-- **S3.3** Reading pane: display a selected message (plain text first).
-- **S3.4** Folder navigation.
-- **S3.5** Offline reading verified; non-blocking background-sync indicator.
-- **S3.6** Calm/fast pass: interactions instant, nothing blocks on the network.
+- **S3.1** Integrate the sandboxed HTML renderer (from S0.2) into the reading pane (READ-4).
+- **S3.2** Block remote content by default (PRIV-1); no script execution (PRIV-4); hardening +
+  sandbox-escape tests.
+- **S3.3** Per-message / trusted-sender "load remote content" (PRIV-2); "trackers blocked" cue (PRIV-3).
+- **S3.4** Conversation threading — group messages into threads (READ-5).
+- **S3.5** Attachments: view and save (READ-8).
 
-## M4 — Safe rendering
-**Outcome:** HTML mail renders safely; nothing phones home.
+## M4 — Send
+**Delivers:** SEND-1…SEND-9, ACC-7.
+**Outcome:** full compose / reply / forward for one account.
 
-- **S4.1** Integrate the sandboxed HTML renderer (from S0.2) into the reading pane.
-- **S4.2** Block remote content by default; neutralize tracking.
-- **S4.3** Per-message "load remote content" opt-in (+ optional "blocked N trackers" cue).
-- **S4.4** Security hardening: no script execution, no outbound requests, sandbox-escape tests.
+- **S4.1** SMTP send (`lettre`); Sent-folder handling (SEND-8); outbox + retry.
+- **S4.2** Compose window — new message (SEND-1); MIME build (`mail-builder`).
+- **S4.3** Reply / reply-all / forward with correct quoting (SEND-2, SEND-3).
+- **S4.4** Attachments in compose (SEND-4).
+- **S4.5** Drafts: save and resume (SEND-5).
+- **S4.6** Basic formatting — bold, lists, links (SEND-6).
+- **S4.7** Per-account display name + signature, auto-included (SEND-7, ACC-7).
+- **S4.8** Address autocomplete from history (SEND-9).
 
-## M5 — Send it
-**Outcome:** full read + send for one account.
-
-- **S5.1** SMTP send (`lettre`).
-- **S5.2** Compose window (new message).
-- **S5.3** Reply / reply-all / forward (correct quoting; from the current account).
-- **S5.4** MIME build (`mail-builder`): attachments, correct encoding.
-- **S5.5** Outbox + Sent handling; retry on failure.
-
-## M6 — Organize it
+## M5 — Organize
+**Delivers:** ORG-1…ORG-7, SYNC-5.
 **Outcome:** manage your inbox, consistent with the server.
 
-- **S6.1** Local actions: archive, delete, read/unread, star, move.
-- **S6.2** Write-back sync: apply local actions to the server (IMAP).
-- **S6.3** Reconcile server-side changes; stay consistent (no dupes/loss).
-- **S6.4** Optimistic UI: instant locally, syncs in background, handles failures gracefully.
+- **S5.1** Local actions with optimistic UI: archive, delete→trash, move, star (ORG-1…ORG-4).
+- **S5.2** Write-back sync of actions to the server (SYNC-5); reconcile, no dupes/loss.
+- **S5.3** Empty trash / delete permanently (ORG-2).
+- **S5.4** Junk/Spam folder visible; move to/from junk (ORG-5).
+- **S5.5** Create / rename / delete folders (ORG-6).
+- **S5.6** Multi-select + bulk actions (ORG-7).
 
-## M7 — Many accounts + OAuth
-**Outcome:** the effortless-setup hook is real — add accounts in a click, switch between them.
+## M6 — Search
+**Delivers:** SEARCH-1, SEARCH-2, SEARCH-3, OFF-2.
+**Outcome:** fast search that works offline.
 
-- **S7.1** Gmail OAuth (loopback redirect; tokens in keychain).
-- **S7.2** Microsoft OAuth (gated on S0.5 approval).
-- **S7.3** Multiple accounts in store; sync scheduler handles N accounts concurrently.
-- **S7.4** Per-account switcher UI.
-- **S7.5** One-click add-account onboarding flow.
-- **S7.6** Generic IMAP manual-setup fallback.
+- **S6.1** Index synced messages into `tantivy`.
+- **S6.2** Incremental indexing as mail arrives / changes.
+- **S6.3** Search UI + query over sender / subject / body (SEARCH-1), near-instant (SEARCH-3).
+- **S6.4** Verified offline against the local index (SEARCH-2, OFF-2).
+
+## M7 — Multi-account + OAuth + onboarding
+**Delivers:** ACC-1, ACC-2, ACC-5, ACC-6, ACC-8, MULTI-1, MULTI-2, APP-1.
+**Outcome:** the effortless-setup hook is real — add Gmail/Outlook in a click, switch accounts.
+
+- **S7.1** Gmail OAuth (loopback redirect; tokens in keychain) (ACC-1).
+- **S7.2** Microsoft OAuth (gated on S0.6 approval) (ACC-2).
+- **S7.3** Token refresh + re-authentication without data loss (ACC-8).
+- **S7.4** Multiple accounts in store; sync scheduler handles N accounts (ACC-5); edit/remove (ACC-6).
+- **S7.5** Per-account switcher UI (MULTI-1); correct from-address on reply (MULTI-2).
+- **S7.6** One-click add-account onboarding flow (APP-1).
 
 ## M8 — Release
+**Delivers:** READ-9, APP-2, APP-3, APP-4, APP-5, APP-6, PRIV-5†.
 **Outcome:** the first releasable GeleitMail.
 
-- **S8.1** Encryption hardening + security review of crypto / OAuth / HTML paths.
-- **S8.2** Cross-platform builds + installers (Windows, macOS, Linux).
-- **S8.3** First-run/onboarding polish; error and edge-case states.
-- **S8.4** Final performance/calm pass (RAM, startup, large mailbox).
-- **S8.5** Beta with real accounts; fix; tag first release.
+- **S8.1** Keyboard navigation + shortcuts (READ-9, APP-6).
+- **S8.2** Light/dark theme (APP-3); settings / preferences (APP-4).
+- **S8.3** Calm/fast final pass (APP-2): RAM, startup, large-mailbox performance.
+- **S8.4** Cross-platform builds + installers — Windows, macOS, Linux (APP-5).
+- **S8.5** Security review of crypto / OAuth / HTML paths; confirm no telemetry (PRIV-5).
+- **S8.6** First-run polish, error/edge states; beta with real accounts; tag the first release.
 
 ---
 
 ## Beyond the first release (toward the full vision)
 Slices defined when we reach them.
 
-- **M9 — Unified inbox** (merged cross-account view; correct from-address on reply).
-- **M10 — Offline compose + reconciliation** (compose/file/flag offline, merge on reconnect).
-- **M11 — Power features** (instant search at scale + operators, rules/filters, snooze, notifications).
-- **Later** — mobile, then maybe web.
+- **Unified inbox** (MULTI-3) — merged cross-account view.
+- **Offline compose + reconciliation** (SEND-10/OFF-3, OFF-4).
+- **Power search** (SEARCH-4 operators, SEARCH-5 cross-account).
+- **Rules / filters** (ORG-8), **snooze** (ORG-9).
+- **Notifications** (NOTIF-1, NOTIF-2, NOTIF-3).
+- **Export / backup** (SEC-4), **self-update** (APP-7).
+- **Later platforms** — mobile, then maybe web.
+
+---
+
+## Story coverage
+Every story in `stories.md` maps to exactly one milestone above (or to "Beyond"). The only
+milestone with no stories is M0 (infrastructure). When a story moves, update both files.

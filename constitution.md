@@ -110,6 +110,9 @@ slice and accumulates — never deferred to a "docs later" phase.
   mail within seconds, backfill the rest quietly.
 - Multi-account ⇒ the storage schema and sync scheduler are **account-scoped from the first
   line of backend code**.
-- Native (P4) ⇒ UI leans Slint (decision finalized in the plan), HTML render is sandboxed.
-- Integrity (P6) ⇒ the IMAP sync engine and local store are the make-or-break core and are
-  built and hardened first, before any UI framework is committed to.
+- Native (P4) ⇒ UI leans Slint (decision finalized in M0 via feasibility spikes), HTML
+  render is sandboxed.
+- Integrity (P6) ⇒ the IMAP sync engine and local store are the make-or-break core: their
+  schema and sync model are designed up front, proven by a thin end-to-end vertical slice
+  (M1), then hardened (M2) before breadth is built on them. We build **value-first** — a
+  usable read path early — rather than completing a headless engine before any UI exists.
