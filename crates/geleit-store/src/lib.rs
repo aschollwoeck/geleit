@@ -71,6 +71,11 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE account ADD COLUMN imap_username TEXT;
     ALTER TABLE account ADD COLUMN imap_allow_invalid INTEGER NOT NULL DEFAULT 0;
     ",
+    // 3 — per-folder IMAP UIDVALIDITY (S2.3, incremental sync). NULL until first synced; a change
+    // means the server's UIDs are no longer valid and the folder must be re-fetched.
+    "
+    ALTER TABLE folder ADD COLUMN uid_validity INTEGER;
+    ",
 ];
 
 /// An account row.
@@ -460,6 +465,76 @@ impl Store {
         Ok(())
     }
 
+    /// Set a folder's IMAP UIDVALIDITY.
+    pub fn set_folder_uidvalidity(
+        &self,
+        folder_id: i64,
+        uid_validity: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE folder SET uid_validity = ?2 WHERE id = ?1",
+            (folder_id, uid_validity),
+        )?;
+        Ok(())
+    }
+
+    /// A folder's stored UIDVALIDITY, or `None` if it has never been synced.
+    pub fn folder_uidvalidity(&self, folder_id: i64) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT uid_validity FROM folder WHERE id = ?1",
+                [folder_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// All message UIDs stored in a folder (UID-less rows are skipped).
+    pub fn uids_in_folder(&self, folder_id: i64) -> Result<Vec<i64>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT uid FROM message WHERE folder_id = ?1 AND uid IS NOT NULL")?;
+        let rows = stmt.query_map([folder_id], |r| r.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Delete messages in a folder by UID (bodies cascade). No-op for an empty list; atomic.
+    pub fn delete_messages_by_uid(&self, folder_id: i64, uids: &[i64]) -> Result<(), StoreError> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare("DELETE FROM message WHERE folder_id = ?1 AND uid = ?2")?;
+            for &uid in uids {
+                stmt.execute((folder_id, uid))?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// UIDs of the most-recent `limit` messages in a folder that have **no** stored body yet —
+    /// the set a sync should (re)fetch bodies for, so an interrupted body fetch self-heals (P6).
+    pub fn uids_without_body(&self, folder_id: i64, limit: u32) -> Result<Vec<i64>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.uid FROM message m LEFT JOIN body b ON b.message_id = m.id \
+             WHERE m.folder_id = ?1 AND m.uid IS NOT NULL AND b.message_id IS NULL \
+             ORDER BY m.date DESC, m.id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map((folder_id, limit), |r| r.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Delete every message in a folder (e.g. on a UIDVALIDITY reset). Bodies cascade.
+    pub fn clear_folder(&self, folder_id: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM message WHERE folder_id = ?1", [folder_id])?;
+        Ok(())
+    }
+
     /// Set a message's local read state. (Writing this back to the server is M6 / SYNC-5.)
     pub fn set_seen(&self, message_id: i64, seen: bool) -> Result<(), StoreError> {
         self.conn.execute(
@@ -765,6 +840,55 @@ mod tests {
         // FK violation on the body insert → the whole transaction rolls back, nothing committed.
         assert!(s.store_body(999, Some("x"), None, None, false).is_err());
         assert!(s.body_for(999).unwrap().is_none());
+    }
+
+    #[test]
+    fn incremental_sync_store_methods() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let fld = s.upsert_folder(acc, "INBOX").unwrap();
+
+        // uidvalidity round-trip
+        assert_eq!(s.folder_uidvalidity(fld).unwrap(), None);
+        s.set_folder_uidvalidity(fld, 42).unwrap();
+        assert_eq!(s.folder_uidvalidity(fld).unwrap(), Some(42));
+
+        for uid in [10, 11, 12] {
+            s.upsert_message(
+                acc,
+                fld,
+                &NewMessage {
+                    uid: Some(uid),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let mut uids = s.uids_in_folder(fld).unwrap();
+        uids.sort_unstable();
+        assert_eq!(uids, vec![10, 11, 12]);
+
+        // delete by uid (and a body cascades)
+        let mid = s.message_id_by_uid(acc, fld, 11).unwrap().unwrap();
+        s.store_body(mid, Some("b"), None, None, false).unwrap();
+        s.delete_messages_by_uid(fld, &[11]).unwrap();
+        let mut uids = s.uids_in_folder(fld).unwrap();
+        uids.sort_unstable();
+        assert_eq!(uids, vec![10, 12]);
+        assert!(s.body_for(mid).unwrap().is_none()); // body cascaded
+        s.delete_messages_by_uid(fld, &[]).unwrap(); // empty no-op
+
+        // uids_without_body: messages 10 & 12 remain, neither has a body now
+        let mut missing = s.uids_without_body(fld, 50).unwrap();
+        missing.sort_unstable();
+        assert_eq!(missing, vec![10, 12]);
+        let mid10 = s.message_id_by_uid(acc, fld, 10).unwrap().unwrap();
+        s.store_body(mid10, Some("b"), None, None, false).unwrap();
+        assert_eq!(s.uids_without_body(fld, 50).unwrap(), vec![12]); // 10 now has a body
+
+        // clear folder
+        s.clear_folder(fld).unwrap();
+        assert!(s.uids_in_folder(fld).unwrap().is_empty());
     }
 
     #[test]

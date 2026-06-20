@@ -114,8 +114,7 @@ pub fn run_setup(
     let config = to_config(&settings);
     let synced = runtime()?.block_on(async {
         imap::sync_folders(&config, secrets, &store, account_id).await?;
-        imap::sync_envelopes(&config, secrets, &store, account_id, "INBOX", 200).await?;
-        imap::sync_bodies(&config, secrets, &store, account_id, "INBOX", 200).await?;
+        imap::sync_folder_incremental(&config, secrets, &store, account_id, "INBOX", 200).await?;
         Ok::<(), imap::ImapError>(())
     });
     if synced.is_err() {
@@ -147,8 +146,8 @@ pub fn run_refresh(db_path: &str, secrets: &dyn SecretStore, folder: &str) -> Re
     runtime()?
         .block_on(async {
             imap::sync_folders(&config, secrets, &store, account.id).await?;
-            imap::sync_envelopes(&config, secrets, &store, account.id, folder, 200).await?;
-            imap::sync_bodies(&config, secrets, &store, account.id, folder, 200).await?;
+            imap::sync_folder_incremental(&config, secrets, &store, account.id, folder, 200)
+                .await?;
             Ok::<(), imap::ImapError>(())
         })
         .map_err(|_| "Couldn't refresh — check your connection and try again.".to_owned())

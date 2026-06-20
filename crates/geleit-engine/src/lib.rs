@@ -7,6 +7,7 @@
 mod envelope;
 pub mod imap;
 mod mime;
+mod sync;
 
 use geleit_core::looks_like_email;
 use geleit_platform::secret::{SecretError, SecretStore};
