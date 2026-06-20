@@ -183,6 +183,34 @@ pub fn run_backfill(
         .map_err(|_| "Couldn't finish catching up — will resume next refresh.".to_owned())
 }
 
+/// Remove the (single) account from this device: delete its keychain password, then its local mail
+/// (folders/messages/bodies cascade). Idempotent if there's no account. Touches the keychain
+/// (D-Bus), so **run on a worker thread.**
+///
+/// Returns `Ok(true)` on a fully clean wipe, `Ok(false)` if the local mail was removed but the
+/// keychain password could **not** be cleared (so the caller can warn — SEC-3), `Err` if the mail
+/// wipe itself failed.
+pub fn run_remove_account(db_path: &str, secrets: &dyn SecretStore) -> Result<bool, String> {
+    let store = Store::open(db_path).map_err(|_| "Couldn't open the local mailbox.".to_owned())?;
+    let Some(account) = store
+        .list_accounts()
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
+        .into_iter()
+        .next()
+    else {
+        return Ok(true); // nothing to remove
+    };
+    // Forget the password (we still wipe the local mail even if this fails, but report it).
+    let password_cleared = match store.imap_settings(account.id) {
+        Ok(Some(settings)) => imap::delete_password(secrets, &settings.username).is_ok(),
+        _ => true, // no stored password to clear
+    };
+    store
+        .delete_account(account.id)
+        .map_err(|_| "Couldn't remove the account.".to_owned())?;
+    Ok(password_cleared)
+}
+
 #[cfg(test)]
 mod tests {
     use super::build_settings;
@@ -227,6 +255,63 @@ mod tests {
         assert!(build_settings("me@x.com", "h", "0", "u", false).is_err());
         assert!(build_settings("me@x.com", "h", "70000", "u", false).is_err());
         assert!(build_settings("me@x.com", "h", "abc", "u", false).is_err());
+    }
+
+    #[test]
+    fn run_remove_account_wipes_account_password_and_mail() {
+        use super::run_remove_account;
+        use geleit_engine::imap::{self, store_password};
+        use geleit_platform::secret::InMemorySecretStore;
+        use geleit_store::{ImapSettings, NewMessage, Store};
+
+        let path = std::env::temp_dir().join("geleit-remove-test.db");
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+
+        let secrets = InMemorySecretStore::new();
+        let settings = ImapSettings {
+            host: "h".to_owned(),
+            port: 993,
+            username: "user@x.com".to_owned(),
+            allow_invalid_certs: false,
+        };
+        {
+            let store = Store::open(path).unwrap();
+            let acc = store
+                .add_imap_account("user@x.com", None, &settings)
+                .unwrap();
+            let fld = store.upsert_folder(acc, "INBOX").unwrap();
+            let mid = store
+                .upsert_message(
+                    acc,
+                    fld,
+                    &NewMessage {
+                        uid: Some(1),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            store
+                .store_body(mid, Some("body"), None, None, false)
+                .unwrap();
+        }
+        store_password(&secrets, "user@x.com", b"pw").unwrap();
+        assert!(imap::has_password(&secrets, "user@x.com").unwrap());
+
+        assert!(
+            run_remove_account(path, &secrets).expect("remove"),
+            "fully clean wipe"
+        );
+
+        let store = Store::open(path).unwrap();
+        assert!(store.list_accounts().unwrap().is_empty(), "account gone");
+        assert!(
+            !imap::has_password(&secrets, "user@x.com").unwrap(),
+            "password gone"
+        );
+        // removing again is a no-op (idempotent), still reported clean
+        assert!(run_remove_account(path, &secrets).expect("remove again"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

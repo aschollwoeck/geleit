@@ -943,6 +943,35 @@ mod tests {
     }
 
     #[test]
+    fn offline_read_returns_synced_mail() {
+        // OFF-1: reading synced mail is a pure local-store operation — no network is involved, so
+        // it works offline. (The whole `Store` read API is network-free by construction.)
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let fld = s.upsert_folder(acc, "INBOX").unwrap();
+        let mid = s
+            .upsert_message(
+                acc,
+                fld,
+                &NewMessage {
+                    uid: Some(1),
+                    subject: Some("Offline subject".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.store_body(mid, Some("offline body"), None, Some("offline body"), false)
+            .unwrap();
+
+        let msgs = s.messages_in_folder(fld, 10).unwrap();
+        assert_eq!(msgs[0].subject.as_deref(), Some("Offline subject"));
+        assert_eq!(
+            s.body_for(mid).unwrap().unwrap().plain.as_deref(),
+            Some("offline body")
+        );
+    }
+
+    #[test]
     fn delete_account_cascades() {
         let s = Store::open_in_memory().unwrap();
         let acc = s.add_account("a@example.com", None).unwrap();
