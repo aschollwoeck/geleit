@@ -103,19 +103,22 @@ Status: **initial draft.** Refine as the codebase grows; amend deliberately, not
 
 ## 11. Slice implementation workflow (the build step)
 
-Once a milestone's **spec, plan, and tasks** are agreed (P8), each slice is built in this
-exact order (this is the "build" step of the chain; see constitution P10 for the commitment):
+Once a slice's **spec, plan, and tasks** are agreed (P8), it is built in this exact order
+(this is the "build" step of the chain; see constitution P10 for the commitment):
 
 1. **Build** — implement the slice's source code per its spec and plan, on its own branch (§12).
 2. **Acceptance tests** — write test cases that verify the slice. These **double as the
    executable acceptance criteria for the user stories** the slice serves: every affected
-   user story (from the milestone spec) maps to one or more tests, named/tagged so the mapping
+   user story (from the slice's spec) maps to one or more tests, named/tagged so the mapping
    is obvious (e.g. `acceptance_<story-id>_...`). Cover the happy path, failure modes, and the
-   integrity invariants (no mail loss/duplication) where relevant.
+   integrity invariants (no mail loss/duplication) where relevant. *A slice with no user story
+   (infrastructure or a throwaway spike) instead records measurable pass/fail criteria.*
 3. **Run** — run the suite; everything green: tests + `cargo fmt --check` + `clippy -D warnings`
    + `cargo mutants` on touched core crates. Red means not done.
 4. **End-user manual** — update the extensive end-user manual in `docs/manual/` for any
-   user-facing behavior the slice adds or changes. Plain language for private people, not engineers.
+   user-facing behavior the slice adds or changes. Plain language for private people, not
+   engineers. *A slice with no user-facing behavior (infrastructure or a throwaway spike)
+   omits this step — note the omission in the PR.*
 5. **Technical documentation** — update the extensive technical documentation in
    `docs/technical/`: architecture, data flow, decisions, how the slice works and why. This is
    *in addition to* in-code `///` docs and ADRs (§8), not a replacement.
@@ -133,8 +136,8 @@ extensive over the project's life, and is never deferred to a "docs later" phase
   the slice's completion gate.
 - A slice's PR is mergeable only when the full §11 workflow has passed: end-to-end and
   verifiable (P8), test-green (fmt + clippy `-D warnings` + tests + `cargo mutants` on touched
-  core crates), **manual and technical docs updated**, **code review addressed**, and the
-  milestone's `tasks.md` updated to mark the slice done.
+  core crates), **manual (where the slice is user-facing) and technical docs updated**,
+  **code review addressed**, and the slice's `tasks.md` updated to mark the slice done.
 - The PR description states *what* the slice delivers and links the milestone spec/plan; the
   diff is reviewed against the constitution and `guidelines.md` before merge.
 - Small, focused commits within the branch; imperative subject lines that say *why*.

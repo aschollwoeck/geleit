@@ -7,12 +7,14 @@ governed by `constitution.md`.
 verifiable steps toward a milestone — each slice should leave the project working. Milestones
 are **derived from the user stories** (`stories.md`): each lists the story IDs it delivers, so
 coverage is checkable. We expect to re-plan at every milestone boundary; slices for *distant*
-milestones are provisional. Per constitution P8, each milestone gets its own
-**spec → plan → tasks**, written just before we build it:
+milestones are provisional. Per constitution P8, **each slice** gets its own
+**spec → plan → tasks**, written just before we build it; decisions that span slices are
+recorded as ADRs (`docs/adr/`):
 
 ```
-specs/m0/spec.md    plan.md    tasks.md   # what · how · done-vs-todo (kept current)
-specs/m1/...
+specs/m0/s0.1-scaffold/{spec,plan,tasks}.md
+specs/m0/s0.2-html-spike/{spec,plan,tasks}.md
+docs/adr/NNNN-title.md                        # cross-slice decisions
 ```
 
 **Build philosophy: vertical-slice-first.** Get a thin, usable path working end-to-end early
