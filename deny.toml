@@ -24,6 +24,7 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "CC0-1.0",
+    "Zlib", # foldhash (via rusqlite) — permissive, MIT-compatible
 ]
 
 [bans]

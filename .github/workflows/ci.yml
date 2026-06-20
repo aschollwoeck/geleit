@@ -63,7 +63,7 @@ jobs:
           # Ensure the base branch exists as a tracking ref so the diff resolves.
           git fetch --no-tags origin "${{ github.base_ref }}"
           git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
-          cargo mutants --in-diff pr.diff --package geleit-core --package geleit-platform --package geleit-engine
+          cargo mutants --in-diff pr.diff --package geleit-core --package geleit-platform --package geleit-store --package geleit-engine
 
   mutants-nightly:
     if: github.event_name == 'schedule'

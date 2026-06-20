@@ -11,7 +11,7 @@
 set -euo pipefail
 
 UI_CRATE="geleit-app"
-ENGINE_CRATES=("geleit-core" "geleit-platform" "geleit-engine")
+ENGINE_CRATES=("geleit-core" "geleit-platform" "geleit-store" "geleit-engine")
 
 fail=0
 for crate in "${ENGINE_CRATES[@]}"; do

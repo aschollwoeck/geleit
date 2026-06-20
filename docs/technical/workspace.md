@@ -5,14 +5,17 @@ Scaffold established in slice **S0.1**. See ADR-0002 (CI), ADR-0003 (crate struc
 ## Crates
 - **`geleit-core`** — UI-agnostic domain types. No dependencies. Mutation-testing target.
 - **`geleit-platform`** — UI-agnostic trait seams for OS/external capabilities (keychain,
-  OAuth loopback, HTML render host) with testable doubles (ADR-0004). No third-party deps.
+  OAuth loopback, HTML render host) with testable doubles (ADR-0004).
+- **`geleit-store`** — the local SQLite store: account-scoped schema + migrations (ADR-0005).
+  `rusqlite` (bundled SQLite). Encryption at rest comes in M2.
 - **`geleit-engine`** — engine facade; depends on `geleit-core` + `geleit-platform`. Future home
-  of store / sync / MIME / search / transport / auth.
+  of sync / MIME / search / transport / auth (and will use `geleit-store`).
 - **`geleit-app`** — binary entrypoint; depends on `geleit-engine` + `geleit-core`. Becomes the
   Slint shell (ADR-0001).
 
-Direction: `app → engine → {core, platform}`. The reverse is impossible (Cargo's no-cycle rule);
-a CI check (`scripts/check-boundary.sh`) asserts core/platform/engine never depend on the UI crate.
+Direction: `app → engine → {core, platform, store}`. The reverse is impossible (Cargo's no-cycle
+rule); a CI check (`scripts/check-boundary.sh`) asserts the engine-side crates never depend on
+the UI crate.
 
 ## Toolchain
 Rust **1.96.0** stable (pinned in `rust-toolchain.toml`), edition 2021. `unsafe_code` is
