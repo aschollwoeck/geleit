@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/geleit-core",
     "crates/geleit-platform",
+    "crates/geleit-store",
     "crates/geleit-engine",
     "crates/geleit-app",
 ]
