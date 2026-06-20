@@ -100,12 +100,17 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 **Delivers:** READ-4, READ-5, READ-8, PRIV-1, PRIV-2, PRIV-3, PRIV-4.
 **Outcome:** read real HTML mail safely, in threads, with attachments.
 
+- **S3.4** ✅ Conversation threading — detect conversations + count (READ-5). *(Full thread view: follow-up.)*
+- **S3.5** ✅ Attachments: **view** name/type/size (READ-8 view half). *(Save-to-disk: follow-up.)*
 - **S3.1** Integrate the sandboxed HTML renderer (from S0.2) into the reading pane (READ-4).
 - **S3.2** Block remote content by default (PRIV-1); no script execution (PRIV-4); hardening +
   sandbox-escape tests.
 - **S3.3** Per-message / trusted-sender "load remote content" (PRIV-2); "trackers blocked" cue (PRIV-3).
-- **S3.4** Conversation threading — group messages into threads (READ-5).
-- **S3.5** Attachments: view and save (READ-8).
+
+> S3.1–S3.3 are the sandboxed-**webview** work (wry-in-Slint). The **security** (sanitization,
+> no-script, no-remote) is verifiable automatically (S0.2 oracle + `ammonia`); the **visual fidelity**
+> of rendered mail needs a real display + human eyes — the one place "build + self-verify" needs the
+> maintainer. Done verifiably first: S3.4, S3.5.
 
 ## M4 — Send
 **Delivers:** SEND-1…SEND-9, ACC-7.
