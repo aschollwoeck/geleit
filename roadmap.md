@@ -91,7 +91,7 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
   flag-change sync deferred to M6 with write-back, to avoid clobbering local read-state.)*
 - **S2.4** ✅ Progressive backfill of the full mailbox, newest-first, batched, in background (SYNC-3).
 - **S2.5** Gmail-specific handling (labels-as-folders, X-GM-EXT-1). *(Needs a real Gmail account to verify.)*
-- **S2.6** Non-blocking sync status / progress (SYNC-4). *(Partly seeded by the S2.4 "Catching up…" line.)*
+- **S2.6** ✅ Non-blocking sync status / progress (SYNC-4) — calm progress strip, distinct from errors.
 - **S2.7** ✅ Sync integrity: idempotent, resumable, provably no dupes/loss (proptest).
 - **S2.8** ✅ Offline reading verified (OFF-1); wipe local data on account removal (SEC-3).
 - **(follow-up)** `zeroize` secret + key buffers where practical (§9; ADR-0004/0008).
