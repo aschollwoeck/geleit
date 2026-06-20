@@ -33,6 +33,9 @@ gates every future slice PR**. Everything else in the project builds on this sli
 - The full crate set (only the skeleton proving the boundary).
 - Cross-platform CI matrix (Linux only now; Windows/macOS at M8).
 - Mutation-testing **threshold** tuning (configured and runnable now; thresholds later).
+- **Supply-chain CI** (`cargo deny` / `cargo audit`, guidelines §6) — **deferred** to the first
+  slice that introduces a third-party dependency (early M1). Inert now: the scaffold has zero
+  third-party dependencies, so there is nothing to audit yet.
 
 ## Acceptance criteria (measurable)
 

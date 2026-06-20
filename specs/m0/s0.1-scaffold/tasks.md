@@ -18,7 +18,8 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] AC3 `cargo fmt --all --check` clean; `cargo clippy --workspace -- -D warnings` clean
 - [x] AC4 `cargo mutants --package geleit-core` runs and reports (13 mutants, 13 caught)
 - [x] AC5 boundary holds (engine/core cannot depend on app — cycle + cargo-tree check)
-- [~] AC6 CI passes on green and fails on a deliberately broken commit (verify on the PR)
+- [x] AC6 CI passes on green (PR #5) and fails on a deliberately broken commit (verified via
+      throwaway PR #6 — lint-test failed on a clippy violation; PR closed, branch deleted)
 - [x] AC7 ADR-0003 recorded
 
 ## Document
@@ -27,6 +28,8 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [x] (No end-user manual — infrastructure slice)
 
 ## Ship
-- [ ] Code review of the slice diff (guidelines §11)
-- [ ] Update this tasks file to all-done
+- [x] Code review of the slice diff (guidelines §11) — 2 finder agents; fixes applied:
+      hardened `check-boundary.sh` (pipefail/SIGPIPE false-negatives), `mutants-diff`
+      base-ref fetch; `cargo deny`/`audit` (§6) deferred to M1 (recorded in spec out-of-scope)
+- [x] Update this tasks file to all-done
 - [ ] PR merged (one-slice-one-PR, §12)

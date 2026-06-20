@@ -45,6 +45,8 @@ jobs:
       - name: Mutants (PR diff, report-only)
         continue-on-error: true # thresholds not gated yet (S0.1 spec)
         run: |
+          # Ensure the base branch exists as a tracking ref so the diff resolves.
+          git fetch --no-tags origin "${{ github.base_ref }}"
           git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
           cargo mutants --in-diff pr.diff --package geleit-core --package geleit-engine
 
