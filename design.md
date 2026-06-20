@@ -87,12 +87,17 @@ Semantic tokens (use these names, not raw hex, in the UI). Accent at full satura
 | `accent-quiet` | `#E2F1F0` | `#1E3A39` | selected-row / chip tint bg |
 | `danger` | `#CF5B45` | `#E08066` | destructive/error **fills & icons** |
 | `danger-strong` | `#B3472E` | `#ECA893` | destructive/error **text** (AA) |
+| `success` | `#2E9E63` | `#5CC98C` | success **fills & icons** |
+| `success-strong` | `#1E7A47` | `#7FD8A6` | success **text** (AA) |
+| `warning` | `#D99A3C` | `#E0B05A` | warning **fills & icons** |
+| `warning-strong` | `#8F5E16` | `#E6C079` | warning **text** (AA) |
 | `divider` | `#E3EAEC` | `#2A3438` | hairline separators |
 | `focus` | `#1C7E7B` | `#7FD8D4` | focus ring |
 
-- Full `accent`/`danger` are **fills, not text** (both fail AA as text on light surfaces); use
-  `accent-strong`/`danger-strong` for colored text. `accent-strong` text must not sit on
-  `accent-quiet` (≈4.2:1) — keep accent-strong text on `surface`/`bg`.
+- Full `accent`/`danger`/`success`/`warning` are **fills, not text** (they fail AA as text on
+  light surfaces); use the matching `*-strong` for colored text. `accent-strong` text must not
+  sit on `accent-quiet` (≈4.2:1) — keep `*-strong` text on `surface`/`bg`. **Info** state reuses
+  `accent`/`accent-strong` (no separate token).
 - The app follows the OS light/dark setting by default (APP-3), with a manual override.
 
 ## 5. Spacing, density, shape
@@ -143,6 +148,67 @@ the skeleton shimmer. No bouncing, no long sequences (that reads as gimmicky / A
 - **Hit targets ≥ 40×40px** (comfortable for regular people).
 - **Never color alone** to convey state (unread = dot + weight; errors = icon + text).
 - Honor OS light/dark (APP-3) and reduced-motion.
+
+## 10. Feedback & messages
+How the app tells you something happened — quiet and reassuring (P3), never blocking (P1). Four
+surfaces, each with one job.
+
+**Surfaces**
+- **Toast** — bottom-centre, on `toast-surface` (a dark slate, same in both themes) with
+  `on-toast` text and an `accent` **Undo** link; `md` radius, soft shadow. One at a time
+  (queue), auto-dismiss ~5s, pause on hover/focus, dismissible. Confirms reversible actions:
+  *Archived · Undo*, *Deleted · Undo*, *Moved · Undo*, *Sent*.
+- **Inline** — directly under the field/control that's wrong: `danger-strong` text + a small
+  danger icon. For input/validation errors (e.g. account setup). Never colour alone.
+- **Banner** — a slim strip at the top of the relevant pane, tinted by severity, with an icon
+  and optional action; dismissible or self-resolving; non-blocking. For connection/sync state
+  and contextual notices.
+- **Dialog** — centred, on `surface`; **only** for irreversible confirmations (empty trash,
+  delete forever, remove account): a plain question, a confirm button (`danger-strong` for
+  destructive), a cancel. Used rarely.
+
+**When to use which**
+- Reversible destructive (archive / delete→trash / move): act immediately (optimistic, P1) →
+  **toast with Undo**; no dialog.
+- Irreversible (empty trash / delete forever / remove account): **dialog**.
+- Success: a **toast only when the result isn't already visible** (Sent; a row that disappears).
+  No toast for in-place changes (read/unread, star).
+- Connection/sync problems: **banner**, calm; reads keep working and sync retries in the
+  background — never a popup.
+- Input errors: **inline**, at the field.
+
+**Connectivity & sync (local-first)**
+A quiet status in the list header or a slim banner — *"You're offline — showing your saved mail"*
+(info), *"Couldn't sync — will retry"* (warning). It never blocks reading (P1) and resolves
+itself when the connection returns; no user action needed.
+
+**Tone** (extends Voice & copy below)
+- Success = the action's own verb, past tense: Send → "Sent", Archive → "Archived".
+- Error = what happened + how to fix, in the app's voice, no apology, not techy:
+  *"That password didn't work — check it and try again,"* not *"Auth failed (401)."*
+- Offline = reassuring, not alarming.
+- An action keeps its name through the flow (the **Send** button produces a "Sent" toast).
+
+**Accessibility**
+- Messages post to an ARIA live region — toasts `polite`, errors `assertive`.
+- Errors and irreversible dialogs **never auto-dismiss**; toasts stay long enough to use Undo and
+  pause on hover/focus; Undo is keyboard-reachable.
+- Never colour alone — always icon + text.
+
+**Feedback tokens** (banner tints + toast; core state colours are in §4)
+
+| Token | Light | Dark | Use |
+|---|---|---|---|
+| `toast-surface` | `#263238` | `#263238` | toast background (both themes) |
+| `on-toast` | `#F2F5F6` | `#F2F5F6` | toast text |
+| `info-quiet` | `#E2F1F0` | `#1E3A39` | info banner bg (= `accent-quiet`) |
+| `warning-quiet` | `#FBF0DC` | `#2A2412` | warning banner bg |
+| `danger-quiet` | `#FBE9E4` | `#33211C` | error banner bg |
+
+Banner **message text uses `text`** (always AA on the light tint); the severity colour
+(`*-strong`) is used only for the **icon and any action link**. Don't set body text in a
+`*-strong` colour on its own `*-quiet` tint — e.g. `accent-strong` on `info-quiet` ≈ 4.2:1,
+below AA for normal text.
 
 ## Voice & copy (interface words are design material)
 Plain, kind, sentence case, active voice — **never techy**. Name things by what the user controls

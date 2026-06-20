@@ -24,6 +24,12 @@
         --danger-strong: #b3472e;
         --divider: #e3eaec;
         --focus: #1c7e7b;
+        --success: #2e9e63;
+        --warning-strong: #8f5e16;
+        --info-quiet: #e2f1f0;
+        --warning-quiet: #fbf0dc;
+        --toast-surface: #263238;
+        --on-toast: #f2f5f6;
         --r-sm: 6px;
         --r-md: 10px;
         --r-lg: 14px;
@@ -46,6 +52,7 @@
         padding: 20px;
       }
       .window {
+        position: relative;
         width: 1240px;
         height: 780px;
         background: var(--bg);
@@ -56,6 +63,24 @@
         overflow: hidden;
         border: 1px solid var(--divider);
       }
+      /* offline status banner (info) */
+      .banner {
+        display: flex; align-items: center; gap: 8px;
+        padding: 8px 16px; font-size: 13px;
+        background: var(--info-quiet); color: var(--text);
+        border-bottom: 1px solid var(--divider);
+      }
+      .banner .ico { color: var(--accent-strong); font-weight: 700; }
+      .banner .x { margin-left: auto; color: var(--text-faint); cursor: pointer; }
+      /* toast (reversible-action confirmation + undo) */
+      .toast {
+        position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%);
+        background: var(--toast-surface); color: var(--on-toast);
+        border-radius: var(--r-md); padding: 11px 18px; font-size: 14px;
+        box-shadow: var(--sh-2); display: flex; align-items: center; gap: 18px; z-index: 10;
+      }
+      .toast .ok { color: var(--success); font-weight: 700; }
+      .toast a { color: #56c4c0; font-weight: 600; text-decoration: none; }
 
       /* ---- left rail ---- */
       .rail { display: flex; flex-direction: column; padding: 16px 12px; gap: 4px; }
@@ -186,6 +211,10 @@
             <div class="icon-btn">⟳</div>
           </div>
         </div>
+        <div class="banner">
+          <span class="ico">⊘</span> You're offline — showing your saved mail
+          <span class="x">✕</span>
+        </div>
         <div class="rows">
           <div class="row selected unread">
             <div class="dot"></div>
@@ -271,6 +300,9 @@
           </div>
         </div>
       </section>
+
+      <!-- TOAST: reversible-action confirmation with undo -->
+      <div class="toast"><span class="ok">✓</span> Archived <a href="#">Undo</a></div>
     </div>
   </body>
 </html>
