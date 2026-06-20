@@ -51,11 +51,11 @@ before building on sand. *(Infrastructure — delivers no user stories directly.
 **Outcome:** open the app, connect one IMAP account, see your folders and message list, read a
 message in plaintext, and refresh — the whole stack proven end-to-end, live-verified against Dovecot.
 
-> **Carried forward (the `*` items — the dev bridge):** account setup is via **environment config**,
-> not a UI (real account-setup UI is **M7**); the keychain is the **seam + in-memory double**, not a
-> real OS backend yet (SEC-2 backend → M2/M7); read-state is **local only** (server write-back →
-> M6); the folder list doesn't live-update after refresh (→ next launch / M2). These are deliberate,
-> documented deferrals, not gaps in the slices that shipped.
+> **Carried forward (the `*` items):** S1.10 added an in-app **Add-account** form (manual IMAP), so
+> account setup no longer needs env vars; OAuth + provider auto-config remain **M7**. The keychain is
+> still the **seam + in-memory double** — credentials don't persist across restarts (SEC-2 backend →
+> M2). Read-state is **local only** (server write-back → M6); the folder list doesn't live-update
+> after refresh (→ next launch / M2). Deliberate, documented deferrals — not gaps in what shipped.
 
 - **S1.1** **Visual design language** → `design.md` (type, color/theme tokens for light+dark,
   spacing/density, layout & navigation shape, component look, iconography, motion). Defined
@@ -74,6 +74,8 @@ message in plaintext, and refresh — the whole stack proven end-to-end, live-ve
   (READ-1, READ-2), reading the local store only.
 - **S1.8** Reading pane: open a message in plaintext (READ-3); mark read/unread (READ-7).
 - **S1.9** Manual refresh action (SYNC-2).
+- **S1.10** Add-account screen (manual IMAP config) — completes the in-app side of ACC-3: create an
+  account from the UI, persist its IMAP settings, first sync. *(Credential persistence still M2.)*
 
 ## M2 — Robust engine & store
 **Delivers:** SYNC-3, SYNC-4, SYNC-1†, SEC-1, SEC-3, OFF-1.

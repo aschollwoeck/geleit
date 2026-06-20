@@ -1,6 +1,26 @@
 # Reading your mail
 
-> Early days: GeleitMail can show and open your synced mail. Writing messages arrives shortly.
+> Early days: GeleitMail can add an account, show and open your mail, and refresh. Writing
+> messages arrives shortly.
+
+## Adding your account
+
+The first time you open GeleitMail, it asks you to add an account. Fill in:
+
+- **Email** — your address (e.g. `you@example.com`).
+- **Display name** — optional, how your name should read.
+- **IMAP server** and **Port** — your provider's incoming-mail server (often `imap.<provider>`
+  on port `993`). Your provider's help pages list these.
+- **Username** — usually your full email address.
+- **Password** — your mail password (some providers ask you to create an *app password* for other
+  mail apps).
+
+Choose **Connect**. GeleitMail signs in, downloads your inbox, and shows your mail. Your details
+stay on your own device.
+
+> One early limitation: your password isn't stored between runs yet, so after you quit and reopen,
+> your mail is still here but you'll be asked for your password again the first time you Refresh.
+> Secure password storage in your system keychain is coming soon.
 
 When you open GeleitMail you see three areas, left to right:
 

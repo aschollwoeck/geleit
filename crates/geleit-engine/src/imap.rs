@@ -180,6 +180,12 @@ pub fn store_password(
     Ok(())
 }
 
+/// Whether a password is currently available for `username` (e.g. set this session). Lets the UI
+/// prompt for a re-entry after a restart without attempting a doomed connection.
+pub fn has_password(secrets: &dyn SecretStore, username: &str) -> Result<bool, ImapError> {
+    Ok(secrets.get(SECRET_SERVICE, username)?.is_some())
+}
+
 /// Fetch full bodies for a folder's recent window, MIME-parse them, and store each body (matched
 /// to its already-synced message by UID; run [`sync_envelopes`] first). Returns how many bodies
 /// were stored. `BODY.PEEK[]` is used so reading a body here does not set `\Seen`.
