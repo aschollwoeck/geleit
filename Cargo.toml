@@ -7,7 +7,7 @@ members = [
 ]
 # Throwaway feasibility spikes are standalone crates, kept out of the workspace so
 # `cargo build --workspace`, clippy, and CI never touch them (guidelines §11).
-exclude = ["spikes/s0.2-html-render"]
+exclude = ["spikes/s0.2-html-render", "spikes/s0.3-list-render"]
 
 [workspace.package]
 edition = "2021"

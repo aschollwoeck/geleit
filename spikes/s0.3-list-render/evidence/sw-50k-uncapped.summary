@@ -1,0 +1,1 @@
+rows=50000 perf=refresh_full_speed,console backend=winit-software fps_min=57 fps_max=58 deepest_row=49988 rss_kb=38832

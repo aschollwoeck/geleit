@@ -1,0 +1,1 @@
+rows=50000 perf=refresh_lazy,console backend=gpu fps_min=64 fps_max=65 deepest_row=39991 rss_kb=111284
