@@ -1,9 +1,10 @@
 //! `geleit-store` — the local SQLite store, the source of truth for the experience
 //! (constitution P1). This crate owns the **account-scoped schema** and its migrations.
 //!
-//! Plain SQLite for now; **encryption at rest is M2** (SEC-1) and will wrap the connection open,
-//! not the schema, so nothing here changes for it. UI-agnostic (ADR-0003); SQLite is bundled
-//! (`rusqlite` `bundled` feature) so there is no system dependency.
+//! **Encryption at rest** (SEC-1, ADR-0008): the app opens via [`Store::open_encrypted`] (SQLCipher
+//! — `rusqlite`'s bundled-sqlcipher with vendored OpenSSL, so there's still no system dependency);
+//! the key is applied with `PRAGMA key` at open and the whole DB is ciphertext on disk. `open` /
+//! `open_in_memory` stay unencrypted for tests/dev. UI-agnostic (ADR-0003).
 
 use rusqlite::{Connection, OptionalExtension};
 use thiserror::Error;
@@ -145,12 +146,30 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open (or create) a store at `path`, enabling foreign keys and applying migrations.
+    /// Open (or create) an **unencrypted** store at `path` (tests / dev). The app uses
+    /// [`open_encrypted`](Self::open_encrypted).
     pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self, StoreError> {
         Self::init(Connection::open(path)?)
     }
 
-    /// Open an in-memory store (tests / ephemeral use).
+    /// Open (or create) an **encrypted** store at `path`, unlocked with `key` (SQLCipher; SEC-1,
+    /// ADR-0008). `key` is raw bytes (32 expected). A wrong key surfaces as an error on first read.
+    pub fn open_encrypted<P: AsRef<std::path::Path>>(
+        path: P,
+        key: &[u8],
+    ) -> Result<Self, StoreError> {
+        let conn = Connection::open(path)?;
+        // SQLCipher: the key must be set before any other operation. Use the raw-key form
+        // (`x'..'`) so the bytes are the key directly, not run through key derivation.
+        // The hex is always valid SQL (64 chars of [0-9a-f]), so this PRAGMA can't fail at
+        // prepare-time and surface the key inside a `SqlInputError`; a wrong key fails later on the
+        // first read (in `migrate`), whose SQL carries no key (P2).
+        let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        conn.execute_batch(&format!("PRAGMA key = \"x'{hex}'\";"))?;
+        Self::init(conn)
+    }
+
+    /// Open an in-memory store (tests / ephemeral use). Unencrypted.
     pub fn open_in_memory() -> Result<Self, StoreError> {
         Self::init(Connection::open_in_memory()?)
     }
@@ -940,6 +959,36 @@ mod tests {
         };
         s.update_imap_settings(acc, &updated).unwrap();
         assert_eq!(s.imap_settings(acc).unwrap(), Some(updated));
+    }
+
+    #[test]
+    fn encryption_roundtrips_and_rejects_wrong_key_and_plaintext() {
+        let path = std::env::temp_dir().join("geleit-encryption-test.db");
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+        let key = [7u8; 32];
+        let wrong = [9u8; 32];
+
+        {
+            let s = Store::open_encrypted(path, &key).unwrap();
+            s.add_account("a@example.com", None).unwrap();
+        }
+        // same key → data is there
+        {
+            let s = Store::open_encrypted(path, &key).unwrap();
+            assert_eq!(s.list_accounts().unwrap().len(), 1);
+        }
+        // wrong key → cannot open (proves it's actually encrypted)
+        assert!(
+            Store::open_encrypted(path, &wrong).is_err(),
+            "wrong key must fail"
+        );
+        // opening it unencrypted → also fails (the file is ciphertext, not a plaintext DB)
+        assert!(
+            Store::open(path).and_then(|s| s.list_accounts()).is_err(),
+            "plaintext open of an encrypted DB must fail"
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

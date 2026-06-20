@@ -13,6 +13,7 @@ geleit-platform = { version = "0.0.0", path = "../geleit-platform" }
 slint = "1.16.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 tokio = { version = "1", features = ["rt", "net", "time"] }
+getrandom = "0.4.3"
 
 [features]
 # Forwarded to the engine for self-signed dev servers; never enable in a release build.
