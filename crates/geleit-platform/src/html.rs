@@ -2,24 +2,13 @@
 //! sandboxed webview component (ADR-0001, guidelines §13). The engine sanitizes; the host
 //! renders. The real implementation (wry/WebKitGTK et al.) lands in M3/M4 in the UI crate.
 
-use std::fmt;
-
 /// Error rendering HTML in the host.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RenderError {
     /// The underlying render host failed.
+    #[error("html render host error: {0}")]
     Host(String),
 }
-
-impl fmt::Display for RenderError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RenderError::Host(msg) => write!(f, "html render host error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for RenderError {}
 
 /// Displays pre-sanitized email HTML in the sandboxed webview.
 ///

@@ -1,0 +1,37 @@
+# cargo-deny configuration (guidelines §6). Run: `cargo deny check`.
+# Gates every dependency on security advisories, license compatibility, bans, and source.
+
+[advisories]
+version = 2
+yanked = "deny"
+# In schema v2, vulnerability + unsound advisories always fail; unmaintained + notice only warn.
+# So an unmaintained dependency warns but does NOT fail CI (intentional — RustSec unmaintained
+# notices are noisy). Revisit if we want to gate it.
+# ignore = []  # add advisory IDs here only with a written justification
+
+[licenses]
+version = 2
+# MIT-compatible permissive licenses for an MIT-licensed project — a forward-looking set so new
+# deps don't churn this file. `cargo deny check` may warn "license not encountered" for entries
+# not yet used by any dependency; that is informational and does not fail the check. Extend
+# deliberately; never add a copyleft/incompatible license without a decision.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CC0-1.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Our internal crates are path deps (no version req); don't flag them as wildcards.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

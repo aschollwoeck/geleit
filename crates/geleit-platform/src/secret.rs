@@ -3,25 +3,15 @@
 //! Services (macOS), Credential Manager (Windows).
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::Mutex;
 
 /// Error from a [`SecretStore`] operation.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SecretError {
     /// The backend failed or was unavailable (e.g. the keychain is locked).
+    #[error("secret store backend error: {0}")]
     Backend(String),
 }
-
-impl fmt::Display for SecretError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SecretError::Backend(msg) => write!(f, "secret store backend error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for SecretError {}
 
 /// Stores and retrieves secrets keyed by `(service, account)`.
 ///
