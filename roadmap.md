@@ -86,14 +86,15 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 
 - **S2.1** ✅ Real OS keychain backend (SEC-2) — `OsSecretStore` over the Secret Service; the app
   uses it, so passwords persist across restarts. *(macOS/Windows stores enabled at M8 packaging.)*
-- **S2.2** Encryption at rest via the keychain-held key (SEC-1); transparent unlock, no master password.
-- **S2.3** Incremental sync (CONDSTORE/QRESYNC): detect new / changed / deleted (SYNC-1 robust).
-- **S2.4** Progressive backfill of the full mailbox, newest-first, batched, in background (SYNC-3).
-- **S2.5** Gmail-specific handling (labels-as-folders, X-GM-EXT-1).
-- **S2.6** Non-blocking sync status / progress (SYNC-4).
-- **S2.7** Sync integrity: resume after interruption, idempotent, provably no dupes/loss (property tests).
-- **S2.8** Offline reading verified (OFF-1); wipe local data on account removal (SEC-3).
-- **(follow-up)** `zeroize` secret buffers where practical (§9; ADR-0004) — fold into S2.2.
+- **S2.2** ✅ Encryption at rest (SEC-1) — SQLCipher, key in the keychain, transparent unlock (ADR-0008).
+- **S2.3** ✅ Incremental sync: detect new / deleted, UIDVALIDITY-safe (SYNC-1 robust). *(Server→local
+  flag-change sync deferred to M6 with write-back, to avoid clobbering local read-state.)*
+- **S2.4** ✅ Progressive backfill of the full mailbox, newest-first, batched, in background (SYNC-3).
+- **S2.5** Gmail-specific handling (labels-as-folders, X-GM-EXT-1). *(Needs a real Gmail account to verify.)*
+- **S2.6** Non-blocking sync status / progress (SYNC-4). *(Partly seeded by the S2.4 "Catching up…" line.)*
+- **S2.7** ✅ Sync integrity: idempotent, resumable, provably no dupes/loss (proptest).
+- **S2.8** ✅ Offline reading verified (OFF-1); wipe local data on account removal (SEC-3).
+- **(follow-up)** `zeroize` secret + key buffers where practical (§9; ADR-0004/0008).
 
 ## M3 — Rich, safe reading
 **Delivers:** READ-4, READ-5, READ-8, PRIV-1, PRIV-2, PRIV-3, PRIV-4.
