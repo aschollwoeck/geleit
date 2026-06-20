@@ -20,3 +20,7 @@ mod tests {
         assert!(can_use_account("user@example.com"));
     }
 }
+
+fn _unused_demo() {
+    let broken = 42;
+}
