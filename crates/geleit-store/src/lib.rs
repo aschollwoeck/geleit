@@ -106,6 +106,14 @@ pub struct MessageHeader {
     pub date: Option<i64>,
     pub seen: bool,
     pub has_attachments: bool,
+    pub snippet: Option<String>,
+}
+
+/// A stored message body (plaintext and/or HTML).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredBody {
+    pub plain: Option<String>,
+    pub html: Option<String>,
 }
 
 /// The local store (one SQLite connection).
@@ -241,12 +249,11 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Insert or update a message envelope, keyed by `(account_id, folder_id, uid)`. On re-sync
-    /// the envelope fields and seen flag are refreshed; `flagged` is preserved (local state).
-    ///
-    /// NOTE: the envelope path always supplies `has_attachments=false`/`snippet=NULL`, so the
-    /// UPDATE refreshes them to empty. When S1.6 derives these from the body, drop them from this
-    /// UPDATE set (or `COALESCE`) so an envelope re-sync doesn't wipe body-derived data.
+    /// Insert or update a message envelope, keyed by `(account_id, folder_id, uid)`. On re-sync the
+    /// envelope fields and seen flag are refreshed. `flagged`, `has_attachments`, and `snippet` are
+    /// **not** overwritten on conflict: `flagged` is local state and the other two are body-derived
+    /// (owned by `store_body`), so an envelope-only re-sync must not wipe them. They are set only on
+    /// first insert (to defaults).
     pub fn upsert_message(
         &self,
         account_id: i64,
@@ -261,8 +268,7 @@ impl Store {
              ON CONFLICT(account_id, folder_id, uid) DO UPDATE SET \
                message_id = excluded.message_id, subject = excluded.subject, \
                from_name = excluded.from_name, from_addr = excluded.from_addr, \
-               date = excluded.date, seen = excluded.seen, \
-               has_attachments = excluded.has_attachments, snippet = excluded.snippet",
+               date = excluded.date, seen = excluded.seen",
             (
                 account_id,
                 folder_id,
@@ -296,7 +302,7 @@ impl Store {
         limit: i64,
     ) -> Result<Vec<MessageHeader>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, uid, subject, from_name, from_addr, date, seen, has_attachments \
+            "SELECT id, uid, subject, from_name, from_addr, date, seen, has_attachments, snippet \
              FROM message WHERE folder_id = ?1 ORDER BY date DESC, id DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map((folder_id, limit), |r| {
@@ -309,9 +315,67 @@ impl Store {
                 date: r.get(5)?,
                 seen: r.get(6)?,
                 has_attachments: r.get(7)?,
+                snippet: r.get(8)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The store-row id of a message identified by its IMAP UID, or `None`.
+    pub fn message_id_by_uid(
+        &self,
+        account_id: i64,
+        folder_id: i64,
+        uid: i64,
+    ) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM message WHERE account_id = ?1 AND folder_id = ?2 AND uid = ?3",
+                (account_id, folder_id, uid),
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Store a message's body and update its `snippet`/`has_attachments`, atomically. Idempotent.
+    pub fn store_body(
+        &self,
+        message_id: i64,
+        plain: Option<&str>,
+        html: Option<&str>,
+        snippet: Option<&str>,
+        has_attachments: bool,
+    ) -> Result<(), StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO body (message_id, plain, html) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(message_id) DO UPDATE SET plain = excluded.plain, html = excluded.html",
+            (message_id, plain, html),
+        )?;
+        tx.execute(
+            "UPDATE message SET snippet = ?2, has_attachments = ?3 WHERE id = ?1",
+            (message_id, snippet, has_attachments),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The stored body for a message, or `None` if no body is stored yet.
+    pub fn body_for(&self, message_id: i64) -> Result<Option<StoredBody>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT plain, html FROM body WHERE message_id = ?1",
+                [message_id],
+                |r| {
+                    Ok(StoredBody {
+                        plain: r.get(0)?,
+                        html: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     #[cfg(test)]
@@ -500,6 +564,107 @@ mod tests {
             .collect();
         assert_eq!(subs, ["new", "mid", "old"]); // date DESC
         assert_eq!(s.messages_in_folder(sent, 50).unwrap().len(), 1); // folder-scoped
+    }
+
+    #[test]
+    fn store_body_writes_body_and_updates_message() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let fld = s.upsert_folder(acc, "INBOX").unwrap();
+        let mid = s
+            .upsert_message(
+                acc,
+                fld,
+                &NewMessage {
+                    uid: Some(7),
+                    subject: Some("Hi".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(s.message_id_by_uid(acc, fld, 7).unwrap(), Some(mid));
+        assert!(s.body_for(mid).unwrap().is_none());
+
+        s.store_body(
+            mid,
+            Some("plain text"),
+            Some("<p>html</p>"),
+            Some("plain text"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            s.body_for(mid).unwrap(),
+            Some(StoredBody {
+                plain: Some("plain text".to_owned()),
+                html: Some("<p>html</p>".to_owned()),
+            })
+        );
+        let hdr = &s.messages_in_folder(fld, 1).unwrap()[0];
+        assert!(hdr.has_attachments);
+
+        // re-store updates the same body row (no duplicate)
+        s.store_body(mid, Some("v2"), None, Some("v2"), false)
+            .unwrap();
+        assert_eq!(
+            s.body_for(mid).unwrap(),
+            Some(StoredBody {
+                plain: Some("v2".to_owned()),
+                html: None,
+            })
+        );
+        assert!(!s.messages_in_folder(fld, 1).unwrap()[0].has_attachments);
+    }
+
+    #[test]
+    fn envelope_resync_preserves_body_derived_fields() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let fld = s.upsert_folder(acc, "INBOX").unwrap();
+        let mid = s
+            .upsert_message(
+                acc,
+                fld,
+                &NewMessage {
+                    uid: Some(1),
+                    subject: Some("first".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.store_body(mid, Some("p"), None, Some("preview"), true)
+            .unwrap();
+        // envelope-only re-sync (no body fields) must not wipe snippet/has_attachments
+        s.upsert_message(
+            acc,
+            fld,
+            &NewMessage {
+                uid: Some(1),
+                subject: Some("updated".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let h = &s.messages_in_folder(fld, 1).unwrap()[0];
+        assert_eq!(h.subject.as_deref(), Some("updated")); // envelope field refreshed
+        assert!(h.has_attachments); // body-derived: preserved
+        assert_eq!(h.snippet.as_deref(), Some("preview")); // body-derived: preserved
+    }
+
+    #[test]
+    fn store_body_for_unknown_message_fails_cleanly() {
+        let s = Store::open_in_memory().unwrap();
+        // FK violation on the body insert → the whole transaction rolls back, nothing committed.
+        assert!(s.store_body(999, Some("x"), None, None, false).is_err());
+        assert!(s.body_for(999).unwrap().is_none());
+    }
+
+    #[test]
+    fn message_id_by_uid_absent_is_none() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let fld = s.upsert_folder(acc, "INBOX").unwrap();
+        assert_eq!(s.message_id_by_uid(acc, fld, 999).unwrap(), None);
     }
 
     #[test]
