@@ -415,6 +415,16 @@ async fn fetch_bodies_for(
             parsed.snippet.as_deref(),
             parsed.has_attachments,
         )?;
+        let attachments: Vec<geleit_store::Attachment> = parsed
+            .attachments
+            .iter()
+            .map(|a| geleit_store::Attachment {
+                filename: a.filename.clone(),
+                content_type: a.content_type.clone(),
+                size: a.size as i64,
+            })
+            .collect();
+        store.store_attachments(message_id, &attachments)?;
     }
     Ok(())
 }
@@ -766,6 +776,59 @@ mod tests {
         assert!(
             present(&store).is_empty(),
             "deleted message removed locally"
+        );
+    }
+
+    /// A synced message with an attachment has its attachment metadata stored. Needs Dovecot +
+    /// `--features dangerous-tls`.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn live_attachment_metadata_stored() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let subject = "Geleit S3.5 attachment test";
+        let raw = format!(
+            "Subject: {subject}\r\nFrom: T <t@example.com>\r\nMIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=\"B\"\r\n\r\n\
+             --B\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nsee attached\r\n\
+             --B\r\nContent-Type: text/plain; name=\"report.txt\"\r\n\
+             Content-Disposition: attachment; filename=\"report.txt\"\r\n\r\nthe report body\r\n--B--\r\n"
+        );
+        {
+            let mut session = connect(&cfg, &secrets).await.expect("connect");
+            session
+                .append("INBOX", None, None, raw.as_bytes())
+                .await
+                .expect("append");
+            let _ = session.logout().await;
+        }
+
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("geleittest@localhost", None).unwrap();
+        sync_folder_incremental(&cfg, &secrets, &store, acc, "INBOX", 50)
+            .await
+            .expect("sync");
+        let folder_id = store.upsert_folder(acc, "INBOX").unwrap();
+        let m = store
+            .messages_in_folder(folder_id, 50)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject.as_deref() == Some(subject))
+            .expect("message present");
+        let atts = store.attachments_for(m.id).unwrap();
+        assert!(
+            atts.iter()
+                .any(|a| a.filename.as_deref() == Some("report.txt") && a.size > 0),
+            "attachment metadata stored: {atts:?}"
         );
     }
 

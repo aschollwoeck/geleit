@@ -57,10 +57,46 @@ pub fn body_display(body: Option<&StoredBody>) -> String {
     }
 }
 
+/// A one-line attachment label for the reading pane: `"name · 12.3 KB"`.
+pub fn attachment_label(filename: Option<&str>, size: u64) -> String {
+    format!("{} · {}", filename.unwrap_or("(unnamed)"), human_size(size))
+}
+
+/// Human-readable byte size (B / KB / MB, 1 decimal above 1 KB).
+fn human_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{body_display, format_date, message_vm};
+    use super::{attachment_label, body_display, format_date, human_size, message_vm};
     use geleit_store::{MessageHeader, StoredBody};
+
+    #[test]
+    fn human_size_units() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1024), "1.0 KB");
+        assert_eq!(human_size(1536), "1.5 KB");
+        assert_eq!(human_size(1024 * 1024), "1.0 MB");
+    }
+
+    #[test]
+    fn attachment_label_with_and_without_name() {
+        assert_eq!(
+            attachment_label(Some("note.txt"), 2048),
+            "note.txt · 2.0 KB"
+        );
+        assert_eq!(attachment_label(None, 10), "(unnamed) · 10 B");
+    }
 
     fn header() -> MessageHeader {
         MessageHeader {

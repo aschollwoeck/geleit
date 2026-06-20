@@ -55,6 +55,7 @@ slint::slint! {
         in property <string> r-sender;
         in property <string> r-date;
         in property <string> r-body;
+        in property <[string]> r-attachments;
         in property <bool> refreshing;
         in property <string> status; // non-empty = error to show (danger banner)
         in property <string> sync-status; // non-empty = calm sync-progress line
@@ -401,6 +402,22 @@ slint::slint! {
                             wrap: word-wrap;
                         }
                     }
+                    // attachments (view only — saving comes later)
+                    if root.r-attachments.length > 0: VerticalLayout {
+                        spacing: 4px;
+                        Rectangle { height: 1px; background: Palette.divider; }
+                        Text {
+                            text: "Attachments";
+                            color: Palette.muted;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+                        for a in root.r-attachments: HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "[paperclip]"; color: Palette.muted; font-size: 13px; }
+                            Text { text: a; color: Palette.text; font-size: 13px; overflow: elide; }
+                        }
+                    }
                 }
             }
         }
@@ -628,6 +645,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(_) => "(Could not load this message.)".to_owned(),
             };
             ui.set_r_body(body.into());
+            let labels: Vec<SharedString> = store
+                .attachments_for(item.id.into())
+                .unwrap_or_default()
+                .iter()
+                .map(|a| viewmodel::attachment_label(a.filename.as_deref(), a.size as u64).into())
+                .collect();
+            ui.set_r_attachments(ModelRc::new(VecModel::from(labels)));
             if item.unread {
                 let _ = store.set_seen(item.id.into(), true);
                 flip_unread(&model, item.id, false); // in place — keeps scroll
