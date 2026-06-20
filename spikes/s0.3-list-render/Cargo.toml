@@ -1,0 +1,9 @@
+[package]
+name = "s0_3_list_render"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Throwaway spike — not part of the workspace, not held to guidelines.
+[dependencies]
+slint = "1.16.1"

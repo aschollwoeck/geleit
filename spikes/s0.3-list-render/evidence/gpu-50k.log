@@ -1,0 +1,34 @@
+[spike] building model with 50000 rows
+Slint: Build config: release; Backend: FemtoVG renderer with OpenGL backend
+average frames per second: 67 details from last frame: [0 layers created]
+[spike] scroll y=639860px topRow=9997 deepestRow=9997 span=3199300
+average frames per second: 65 details from last frame: [0 layers created]
+[spike] scroll y=1279720px topRow=19995 deepestRow=19995 span=3199300
+average frames per second: 65 details from last frame: [0 layers created]
+average frames per second: 64 details from last frame: [0 layers created]
+[spike] scroll y=1919583px topRow=29993 deepestRow=29993 span=3199300
+average frames per second: 65 details from last frame: [0 layers created]
+[spike] scroll y=2559440px topRow=39991 deepestRow=39991 span=3199300
+	Command being timed: "/home/paradise/Documents/projects/geleit/spikes/s0.3-list-render/target/release/s0_3_list_render"
+	User time (seconds): 3.84
+	System time (seconds): 0.08
+	Percent of CPU this job got: 64%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:06.09
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 111284
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 12362
+	Voluntary context switches: 681
+	Involuntary context switches: 108
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 8
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

@@ -1,9 +1,9 @@
 # ADR-0001: Native Slint UI with a sandboxed webview component for HTML email
 
 ## Status
-Proposed — **S0.2 (HTML rendering) gate PASSED** (see
-`docs/technical/s0.2-html-spike-findings.md`); pending **S0.3** (virtualized list) and final
-confirmation in **S0.4**.
+Proposed — **both gates PASSED**: S0.2 (HTML rendering, see
+`docs/technical/s0.2-html-spike-findings.md`) and S0.3 (virtualized 50k-row list, see
+`docs/technical/s0.3-list-spike-findings.md`). Final confirmation in **S0.4**.
 
 ## Context
 - Constitution P4: **native, not a webview shell.** Lean, low-RAM, native feel is the brand.
@@ -27,8 +27,10 @@ This decision is confirmed only if both hold:
   Caveats carried to M3/M4: the JS engine is on by default (must be explicitly disabled — wry has
   no toggle) and a CSS-aware sanitizer is needed for fidelity. Credible WKWebView/WebView2 path.
   Details: `docs/technical/s0.2-html-spike-findings.md`.
-- **S0.3 (list):** Slint renders ~50,000 message rows scrolling at **≥60fps with bounded
-  memory**.
+- **S0.3 (list): ✅ PASSED** (release build, full-list traversal) — Slint's virtualized
+  `ListView` scrolls 50,000 rows at **64–65fps** (deep rows actually rendered; display vsync is
+  ~75Hz), with memory cost equal to the row data alone (~335 B/row). The software fallback is
+  near-smooth too (~57fps). Details: `docs/technical/s0.3-list-spike-findings.md`.
 
 If a gate fails, revisit: fallback to embedding Servo/Verso, or a broader pivot.
 
