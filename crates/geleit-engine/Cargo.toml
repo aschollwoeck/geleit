@@ -12,6 +12,7 @@ futures = "0.3.32"
 geleit-core = { path = "../geleit-core" }
 geleit-platform = { path = "../geleit-platform" }
 geleit-store = { path = "../geleit-store" }
+mail-parser = "0.11.3"
 rustls = { version = "0.23.40", default-features = false, features = ["ring", "std", "logging"] }
 rustls-pki-types = "1.14.1"
 thiserror = "2.0.18"

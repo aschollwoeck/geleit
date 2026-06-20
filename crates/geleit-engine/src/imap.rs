@@ -169,6 +169,54 @@ pub async fn sync_envelopes(
     Ok(count)
 }
 
+/// Fetch full bodies for a folder's recent window, MIME-parse them, and store each body (matched
+/// to its already-synced message by UID; run [`sync_envelopes`] first). Returns how many bodies
+/// were stored. `BODY.PEEK[]` is used so reading a body here does not set `\Seen`.
+pub async fn sync_bodies(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    store: &Store,
+    account_id: i64,
+    folder: &str,
+    limit: u32,
+) -> Result<usize, ImapError> {
+    let folder_id = store.upsert_folder(account_id, folder)?;
+    let mut session = connect(config, secrets).await?;
+    let mailbox = session.select(folder).await?;
+    let mut count = 0usize;
+    // NOTE (guidelines §5): both `mime::parse_body` (CPU-bound) and `store.*` (sync SQLite) run on
+    // the async executor thread here; the integration slice should move them behind `spawn_blocking`
+    // / a store actor, and add a max-body-size guard before parsing (whole body held in memory).
+    if let Some((start, end)) = crate::envelope::recent_window(mailbox.exists, limit) {
+        let mut fetches = session
+            .fetch(format!("{start}:{end}"), "(UID BODY.PEEK[])")
+            .await?;
+        while let Some(fetch) = fetches.next().await {
+            let fetch = fetch?;
+            let (Some(uid), Some(raw)) = (fetch.uid.map(i64::from), fetch.body()) else {
+                continue; // need both a UID (to match) and a body section
+            };
+            let Some(message_id) = store.message_id_by_uid(account_id, folder_id, uid)? else {
+                continue; // envelope not synced yet — skip (sync_envelopes first)
+            };
+            if store.body_for(message_id)?.is_some() {
+                continue; // already have this body — don't re-download/re-parse
+            }
+            let parsed = crate::mime::parse_body(raw);
+            store.store_body(
+                message_id,
+                parsed.plain.as_deref(),
+                parsed.html.as_deref(),
+                parsed.snippet.as_deref(),
+                parsed.has_attachments,
+            )?;
+            count += 1;
+        }
+    }
+    let _ = session.logout().await; // best-effort
+    Ok(count)
+}
+
 /// Upsert the given folder names into the store under `account_id` (idempotent). Pure — no network.
 pub fn persist_folders(
     store: &Store,
@@ -384,5 +432,59 @@ mod tests {
             "subjects: {:?}",
             msgs.iter().map(|m| m.subject.clone()).collect::<Vec<_>>()
         );
+    }
+
+    /// Append a multipart message (plaintext + attachment), sync envelopes then bodies, and assert
+    /// the body, snippet, and attachment flag are stored. Needs `--features dangerous-tls` + Dovecot.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn live_sync_bodies_from_dovecot() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let subject = "Geleit S1.6 body test";
+        let raw = format!(
+            "Subject: {subject}\r\nFrom: Tester <tester@example.com>\r\n\
+             MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"B\"\r\n\r\n\
+             --B\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nBody in plain text.\r\n\
+             --B\r\nContent-Type: text/plain; name=\"a.txt\"\r\n\
+             Content-Disposition: attachment; filename=\"a.txt\"\r\n\r\nfile\r\n--B--\r\n"
+        );
+        {
+            let mut session = connect(&cfg, &secrets).await.expect("connect");
+            session
+                .append("INBOX", None, None, raw.as_bytes())
+                .await
+                .expect("append");
+            let _ = session.logout().await;
+        }
+
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("geleittest@localhost", None).unwrap();
+        sync_envelopes(&cfg, &secrets, &store, acc, "INBOX", 50)
+            .await
+            .expect("sync envelopes");
+        let n = sync_bodies(&cfg, &secrets, &store, acc, "INBOX", 50)
+            .await
+            .expect("sync bodies");
+        assert!(n >= 1, "stored {n} bodies");
+
+        let folder_id = store.upsert_folder(acc, "INBOX").unwrap();
+        let msgs = store.messages_in_folder(folder_id, 50).unwrap();
+        let m = msgs
+            .iter()
+            .find(|m| m.subject.as_deref() == Some(subject))
+            .expect("message present");
+        assert!(m.has_attachments, "expected attachment flag");
+        let body = store.body_for(m.id).unwrap().expect("body stored");
+        assert!(body.plain.unwrap().contains("Body in plain text"));
     }
 }
