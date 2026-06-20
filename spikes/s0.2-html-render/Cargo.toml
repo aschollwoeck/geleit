@@ -1,0 +1,11 @@
+[package]
+name = "s0_2_html_render"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Throwaway spike — not part of the workspace, not held to guidelines.
+[dependencies]
+ammonia = "4.1.2"
+tao = "0.35.3"
+wry = "0.55.1"

@@ -5,6 +5,9 @@ members = [
     "crates/geleit-engine",
     "crates/geleit-app",
 ]
+# Throwaway feasibility spikes are standalone crates, kept out of the workspace so
+# `cargo build --workspace`, clippy, and CI never touch them (guidelines §11).
+exclude = ["spikes/s0.2-html-render"]
 
 [workspace.package]
 edition = "2021"

