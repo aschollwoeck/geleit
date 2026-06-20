@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use geleit_engine::imap;
-use geleit_platform::secret::InMemorySecretStore;
+use geleit_platform::os_secret::OsSecretStore;
 use geleit_store::Store;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
@@ -453,8 +453,8 @@ fn reload_all(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = std::env::var("GELEIT_DB").unwrap_or_else(|_| "geleit.db".to_owned());
     let store = Rc::new(Store::open(&db)?);
-    // Session-shared secret store (in-memory; real OS keychain is SEC-2). Send+Sync → workers share it.
-    let secrets = Arc::new(InMemorySecretStore::new());
+    // Secret store backed by the OS keychain (S2.1). Send+Sync → shared across the UI + workers.
+    let secrets = Arc::new(OsSecretStore::new());
 
     let ui = Main::new()?;
     let folders_model = Rc::new(VecModel::<SharedString>::default());
@@ -577,7 +577,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::thread::spawn(move || {
                 // Nothing !Send crosses: only `weak` + plain data + the Arc secrets (Send+Sync).
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    refresh::run_refresh(&db_path, &secrets, &folder)
+                    refresh::run_refresh(&db_path, &*secrets, &folder)
                 }))
                 .unwrap_or_else(|_| Err("Couldn't refresh — something went wrong.".to_owned()));
                 let _ = slint::invoke_from_event_loop(move || {
@@ -635,7 +635,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     refresh::run_setup(
                         &db_path,
-                        &secrets,
+                        &*secrets,
                         &email,
                         display.as_deref(),
                         settings,

@@ -78,16 +78,22 @@ message in plaintext, and refresh — the whole stack proven end-to-end, live-ve
   account from the UI, persist its IMAP settings, first sync. *(Credential persistence still M2.)*
 
 ## M2 — Robust engine & store
-**Delivers:** SYNC-3, SYNC-4, SYNC-1†, SEC-1, SEC-3, OFF-1.
+**Delivers:** SEC-2, SEC-1, SEC-3, SYNC-3, SYNC-4, SYNC-1†, OFF-1.
 **Outcome:** correct, robust, encrypted local sync — now that we can see what we're building.
 
-- **S2.1** Encryption at rest via OS-keychain-held key (SEC-1); transparent unlock, no master password.
-- **S2.2** Incremental sync (CONDSTORE/QRESYNC): detect new / changed / deleted (SYNC-1 robust).
-- **S2.3** Progressive backfill of the full mailbox, newest-first, batched, in background (SYNC-3).
-- **S2.4** Gmail-specific handling (labels-as-folders, X-GM-EXT-1).
-- **S2.5** Non-blocking sync status / progress (SYNC-4).
-- **S2.6** Sync integrity: resume after interruption, idempotent, provably no dupes/loss (property tests).
-- **S2.7** Offline reading verified (OFF-1); wipe local data on account removal (SEC-3).
+Re-planned at the M1→M2 boundary: the **real OS keychain** moved first (it persists credentials —
+the S1.10 gap — and holds the at-rest key the next slice needs).
+
+- **S2.1** ✅ Real OS keychain backend (SEC-2) — `OsSecretStore` over the Secret Service; the app
+  uses it, so passwords persist across restarts. *(macOS/Windows stores enabled at M8 packaging.)*
+- **S2.2** Encryption at rest via the keychain-held key (SEC-1); transparent unlock, no master password.
+- **S2.3** Incremental sync (CONDSTORE/QRESYNC): detect new / changed / deleted (SYNC-1 robust).
+- **S2.4** Progressive backfill of the full mailbox, newest-first, batched, in background (SYNC-3).
+- **S2.5** Gmail-specific handling (labels-as-folders, X-GM-EXT-1).
+- **S2.6** Non-blocking sync status / progress (SYNC-4).
+- **S2.7** Sync integrity: resume after interruption, idempotent, provably no dupes/loss (property tests).
+- **S2.8** Offline reading verified (OFF-1); wipe local data on account removal (SEC-3).
+- **(follow-up)** `zeroize` secret buffers where practical (§9; ADR-0004) — fold into S2.2.
 
 ## M3 — Rich, safe reading
 **Delivers:** READ-4, READ-5, READ-8, PRIV-1, PRIV-2, PRIV-3, PRIV-4.

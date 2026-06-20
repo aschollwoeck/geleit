@@ -14,4 +14,7 @@ exclude_globs = [
     "**/imap.rs",
     "**/geleit-app/src/main.rs",
     "**/geleit-app/src/refresh.rs",
+    # os_secret.rs is external keychain glue (Secret Service); verified by a live #[ignore] test,
+    # which mutants doesn't run — survivors would be spurious. InMemorySecretStore stays covered.
+    "**/geleit-platform/src/os_secret.rs",
 ]
