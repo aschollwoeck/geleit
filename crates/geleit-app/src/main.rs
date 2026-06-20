@@ -7,13 +7,13 @@ mod viewmodel;
 use std::rc::Rc;
 
 use geleit_store::Store;
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 // TODO (design polish, later slices): real line-icon for the attachment marker (design.md §7,
 // currently "[paperclip]"), bundle the Hanken Grotesk font (§3), per-account avatar initial + a
 // folder hover state, and the selected-message guide edge (arrives with selection in S1.8).
 slint::slint! {
-    import { ListView } from "std-widgets.slint";
+    import { ListView, ScrollView } from "std-widgets.slint";
 
     // Soft-daylight tokens from design.md.
     global Palette {
@@ -23,11 +23,13 @@ slint::slint! {
         out property <color> text: #1f2a2e;
         out property <color> muted: #5e7177;
         out property <color> accent: #2e9e9b;
+        out property <color> accent-strong: #1c7e7b;
         out property <color> accent-quiet: #e2f1f0;
         out property <color> divider: #e3eaec;
     }
 
     struct MessageItem {
+        id: int,
         sender: string,
         subject: string,
         snippet: string,
@@ -41,7 +43,14 @@ slint::slint! {
         in property <[string]> folders;
         in property <int> selected-folder;
         in property <[MessageItem]> messages;
+        in property <int> selected-message; // selected message id (0 = none)
+        in property <string> r-subject;
+        in property <string> r-sender;
+        in property <string> r-date;
+        in property <string> r-body;
         callback folder-selected(int);
+        callback message-selected(MessageItem);
+        callback mark-unread(int);
 
         preferred-width: 1100px;
         preferred-height: 720px;
@@ -115,7 +124,14 @@ slint::slint! {
                     ListView {
                         for m in root.messages: Rectangle {
                             height: 72px;
-                            background: Palette.surface;
+                            background: m.id == root.selected-message ? Palette.accent-quiet : Palette.surface;
+                            // selection guide edge (design.md signature)
+                            Rectangle {
+                                x: 0;
+                                width: 3px;
+                                visible: m.id == root.selected-message;
+                                background: Palette.accent;
+                            }
                             HorizontalLayout {
                                 padding: 12px;
                                 spacing: 10px;
@@ -172,20 +188,49 @@ slint::slint! {
                                 height: 1px;
                                 background: Palette.divider;
                             }
+                            TouchArea { clicked => { root.message-selected(m); } }
                         }
                     }
                 }
             }
 
-            // ---- READING PANE (placeholder until S1.8) ----
+            // ---- READING PANE ----
             Rectangle {
                 background: Palette.surface-reading;
                 Rectangle { x: 0; width: 3px; background: Palette.accent; } // guide edge
-                VerticalLayout {
+                if root.selected-message == 0: VerticalLayout {
                     padding: 28px;
+                    Text { text: "Select a message to read it."; color: Palette.muted; }
+                }
+                if root.selected-message != 0: VerticalLayout {
+                    padding: 28px;
+                    spacing: 10px;
                     Text {
-                        text: "Select a message to read it.";
+                        text: root.r-subject;
+                        color: Palette.text;
+                        font-size: 21px;
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: root.r-sender + "  ·  " + root.r-date;
                         color: Palette.muted;
+                        font-size: 13px;
+                    }
+                    TouchArea {
+                        height: 22px;
+                        clicked => { root.mark-unread(root.selected-message); }
+                        HorizontalLayout {
+                            alignment: start;
+                            Text { text: "Mark as unread"; color: Palette.accent-strong; font-size: 13px; }
+                        }
+                    }
+                    ScrollView {
+                        Text {
+                            text: root.r-body;
+                            color: Palette.text;
+                            wrap: word-wrap;
+                        }
                     }
                 }
             }
@@ -201,6 +246,7 @@ fn load_messages(store: &Store, folder_id: i64) -> Vec<MessageItem> {
         .map(|h| {
             let vm = viewmodel::message_vm(h);
             MessageItem {
+                id: h.id as i32,
                 sender: vm.sender.into(),
                 subject: vm.subject.into(),
                 snippet: vm.snippet.into(),
@@ -210,6 +256,20 @@ fn load_messages(store: &Store, folder_id: i64) -> Vec<MessageItem> {
             }
         })
         .collect()
+}
+
+/// Flip one row's `unread` flag in place — preserves the list scroll position and avoids
+/// re-querying the whole folder on every read toggle.
+fn flip_unread(model: &VecModel<MessageItem>, id: i32, unread: bool) {
+    for i in 0..model.row_count() {
+        if let Some(mut row) = model.row_data(i) {
+            if row.id == id {
+                row.unread = unread;
+                model.set_row_data(i, row);
+                break;
+            }
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -238,21 +298,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_selected_folder(0);
 
     let store = Rc::new(store);
-    let initial = folder_ids
-        .first()
-        .map(|&fid| load_messages(&store, fid))
-        .unwrap_or_default();
-    ui.set_messages(ModelRc::new(VecModel::from(initial)));
+    let folder_ids = Rc::new(folder_ids);
 
-    let weak = ui.as_weak();
-    let store_cb = store.clone();
-    ui.on_folder_selected(move |idx| {
-        let (Some(ui), Some(&fid)) = (weak.upgrade(), folder_ids.get(idx as usize)) else {
-            return;
-        };
-        ui.set_selected_folder(idx);
-        ui.set_messages(ModelRc::new(VecModel::from(load_messages(&store_cb, fid))));
-    });
+    let initial_folder = folder_ids.first().copied().unwrap_or(-1);
+    let messages = Rc::new(VecModel::from(load_messages(&store, initial_folder)));
+    ui.set_messages(ModelRc::from(messages.clone()));
+
+    // folder click → load that folder's list; clear the open message
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let fids = folder_ids.clone();
+        let model = messages.clone();
+        ui.on_folder_selected(move |idx| {
+            let (Some(ui), Some(&fid)) = (weak.upgrade(), fids.get(idx as usize)) else {
+                return;
+            };
+            ui.set_selected_folder(idx);
+            ui.set_selected_message(0);
+            model.set_vec(load_messages(&store, fid));
+        });
+    }
+
+    // message click → open it in the reading pane and mark it read
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let model = messages.clone();
+        ui.on_message_selected(move |item| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_selected_message(item.id);
+            ui.set_r_subject(item.subject.clone());
+            ui.set_r_sender(item.sender.clone());
+            ui.set_r_date(item.date.clone());
+            let body = match store.body_for(item.id.into()) {
+                Ok(b) => viewmodel::body_display(b.as_ref()),
+                Err(_) => "(Could not load this message.)".to_owned(),
+            };
+            ui.set_r_body(body.into());
+            if item.unread {
+                let _ = store.set_seen(item.id.into(), true);
+                flip_unread(&model, item.id, false); // in place — keeps scroll
+            }
+        });
+    }
+
+    // "Mark as unread" → flip read state locally and update the row in place
+    {
+        let store = store.clone();
+        let model = messages.clone();
+        ui.on_mark_unread(move |id| {
+            let _ = store.set_seen(id.into(), false);
+            flip_unread(&model, id, true);
+        });
+    }
 
     ui.run()?;
     Ok(())

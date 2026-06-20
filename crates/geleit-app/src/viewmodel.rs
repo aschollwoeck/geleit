@@ -2,7 +2,7 @@
 //! unit- and mutation-tested; `main.rs` converts these into Slint model items.
 
 use chrono::DateTime;
-use geleit_store::MessageHeader;
+use geleit_store::{MessageHeader, StoredBody};
 
 /// Display-ready fields for one message-list row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,10 +44,23 @@ pub fn format_date(secs: Option<i64>) -> String {
     }
 }
 
+/// The plaintext to show in the reading pane, with honest placeholders when there's no plaintext.
+/// HTML rendering is M3, so HTML-only messages get a note rather than raw/escaped markup.
+pub fn body_display(body: Option<&StoredBody>) -> String {
+    match body {
+        None => "(Body not downloaded yet.)".to_owned(),
+        Some(b) => match (&b.plain, &b.html) {
+            (Some(plain), _) => plain.clone(),
+            (None, Some(_)) => "(HTML message — safe rendering arrives in M3.)".to_owned(),
+            (None, None) => "(No text content.)".to_owned(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{format_date, message_vm};
-    use geleit_store::MessageHeader;
+    use super::{body_display, format_date, message_vm};
+    use geleit_store::{MessageHeader, StoredBody};
 
     fn header() -> MessageHeader {
         MessageHeader {
@@ -95,6 +108,30 @@ mod tests {
         assert!(vm.attachment);
         assert_eq!(vm.subject, "Hi");
         assert_eq!(vm.snippet, "preview");
+    }
+
+    #[test]
+    fn body_display_cases() {
+        assert_eq!(body_display(None), "(Body not downloaded yet.)");
+        assert_eq!(
+            body_display(Some(&StoredBody {
+                plain: Some("hello".to_owned()),
+                html: Some("<p>hi</p>".to_owned()),
+            })),
+            "hello"
+        );
+        assert!(body_display(Some(&StoredBody {
+            plain: None,
+            html: Some("<p>hi</p>".to_owned()),
+        }))
+        .contains("HTML message"));
+        assert_eq!(
+            body_display(Some(&StoredBody {
+                plain: None,
+                html: None,
+            })),
+            "(No text content.)"
+        );
     }
 
     #[test]
