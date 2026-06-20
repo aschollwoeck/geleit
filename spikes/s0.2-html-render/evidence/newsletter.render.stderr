@@ -1,0 +1,5 @@
+[spike] file=/home/paradise/Documents/projects/geleit/spikes/s0.2-html-render/fixtures/newsletter.html mode=sanitize in_bytes=1235 out_bytes=774 contains_script=false contains_http=false
+[spike] window initialised, rendering…
+[spike] IPC-FROM-PAGE: init-script-ran
+[spike] auto-exit
+[spike] auto-exit

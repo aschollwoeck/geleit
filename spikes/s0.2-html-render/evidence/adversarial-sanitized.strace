@@ -1,0 +1,73 @@
+61713 connect(4, {sa_family=AF_UNIX, sun_path="/run/user/1000/wayland-0"}, 27) = -1 ENOENT (No such file or directory)
+61713 connect(4, {sa_family=AF_UNIX, sun_path=@"/tmp/.X11-unix/X0"}, 20) = 0
+61713 connect(6, {sa_family=AF_UNIX, sun_path="/run/user/1000/bus"}, 110) = 0
+61713 connect(8, {sa_family=AF_UNIX, sun_path=@"/tmp/.X11-unix/X0"}, 20) = 0
+61713 connect(8, {sa_family=AF_UNIX, sun_path="/run/user/1000/at-spi/bus_0"}, 29) = 0
+61713 connect(10, {sa_family=AF_UNIX, sun_path="/run/user/1000/bus"}, 20) = 0
+61717 connect(11, {sa_family=AF_UNIX, sun_path=@"/tmp/.X11-unix/X0"}, 20) = 0
+61713 connect(12, {sa_family=AF_UNIX, sun_path="/run/user/1000/bus"}, 20) = 0
+61722 +++ exited with 0 +++
+61721 +++ exited with 0 +++
+61724 +++ exited with 0 +++
+61728 +++ exited with 0 +++
+61730 connect(26, {sa_family=AF_UNIX, sun_path="/home/paradise/.cache/ibus/dbus-nUI10TYB"}, 110) = 0
+61713 connect(32, {sa_family=AF_UNIX, sun_path="/run/dbus/system_bus_socket"}, 110) = 0
+61729 connect(7, {sa_family=AF_UNIX, sun_path="/run/dbus/system_bus_socket"}, 110) = 0
+61729 connect(15, {sa_family=AF_UNIX, sun_path="/run/user/1000/bus"}, 110) = 0
+61731 +++ exited with 0 +++
+61730 +++ exited with 0 +++
+61758 connect(14, {sa_family=AF_UNIX, sun_path="/run/user/1000/at-spi/bus_0"}, 110) = 0
+61758 connect(17, {sa_family=AF_UNIX, sun_path="/run/dbus/system_bus_socket"}, 110) = 0
+61774 +++ exited with 0 +++
+61773 +++ exited with 0 +++
+61723 +++ exited with 0 +++
+61720 +++ exited with 0 +++
+61765 +++ exited with 0 +++
+61732 +++ exited with 0 +++
+61727 +++ exited with 0 +++
+61716 +++ exited with 0 +++
+61715 +++ exited with 0 +++
+61735 +++ exited with 0 +++
+61734 +++ exited with 0 +++
+61726 +++ exited with 0 +++
+61725 +++ exited with 0 +++
+61718 +++ exited with 0 +++
+61717 +++ exited with 0 +++
+61714 +++ exited with 0 +++
+61719 +++ exited with 0 +++
+61713 +++ exited with 0 +++
+61751 +++ exited with 0 +++
+61750 +++ exited with 0 +++
+61749 +++ exited with 0 +++
+61748 +++ exited with 0 +++
+61747 +++ exited with 0 +++
+61752 +++ exited with 0 +++
+61744 +++ exited with 0 +++
+61741 +++ exited with 0 +++
+61740 +++ exited with 0 +++
+61738 +++ exited with 0 +++
+61780 +++ exited with 0 +++
+61771 +++ exited with 0 +++
+61769 +++ exited with 0 +++
+61770 +++ exited with 0 +++
+61754 +++ exited with 0 +++
+61729 +++ exited with 0 +++
+61768 +++ exited with 0 +++
+61764 +++ exited with 0 +++
+61762 +++ exited with 0 +++
+61763 +++ exited with 0 +++
+61761 +++ exited with 0 +++
+61760 +++ exited with 0 +++
+61767 +++ exited with 0 +++
+61759 +++ exited with 0 +++
+61756 +++ exited with 0 +++
+61755 +++ exited with 0 +++
+61746 +++ exited with 0 +++
+61739 +++ exited with 0 +++
+61743 +++ exited with 0 +++
+61758 +++ exited with 0 +++
+61742 +++ exited with 0 +++
+61779 +++ exited with 0 +++
+61745 +++ exited with 0 +++
+61757 +++ exited with 0 +++
+61733 +++ exited with 0 +++

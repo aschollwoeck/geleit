@@ -1,7 +1,9 @@
 # ADR-0001: Native Slint UI with a sandboxed webview component for HTML email
 
 ## Status
-Proposed — to be confirmed by the M0 feasibility spikes (roadmap S0.2, S0.3).
+Proposed — **S0.2 (HTML rendering) gate PASSED** (see
+`docs/technical/s0.2-html-spike-findings.md`); pending **S0.3** (virtualized list) and final
+confirmation in **S0.4**.
 
 ## Context
 - Constitution P4: **native, not a webview shell.** Lean, low-RAM, native feel is the brand.
@@ -20,9 +22,11 @@ Proposed — to be confirmed by the M0 feasibility spikes (roadmap S0.2, S0.3).
 
 ## Validation gates (M0 spikes)
 This decision is confirmed only if both hold:
-- **S0.2 (HTML):** the sandboxed component renders a real-world HTML email corpus with the
-  privacy invariant **zero outbound network requests** when remote content is blocked, **no
-  script execution**, and a credible macOS/Windows sandboxing path.
+- **S0.2 (HTML): ✅ PASSED** — wry/WebKitGTK rendered the corpus; the sanitized adversarial
+  email made **zero** outbound connections (raw leaked to 3 hosts), via pre-render sanitization.
+  Caveats carried to M3/M4: the JS engine is on by default (must be explicitly disabled — wry has
+  no toggle) and a CSS-aware sanitizer is needed for fidelity. Credible WKWebView/WebView2 path.
+  Details: `docs/technical/s0.2-html-spike-findings.md`.
 - **S0.3 (list):** Slint renders ~50,000 message rows scrolling at **≥60fps with bounded
   memory**.
 
