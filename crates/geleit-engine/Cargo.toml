@@ -7,8 +7,22 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+async-imap = { version = "0.11.2", default-features = false, features = ["runtime-tokio"] }
+futures = "0.3.32"
 geleit-core = { path = "../geleit-core" }
 geleit-platform = { path = "../geleit-platform" }
+geleit-store = { path = "../geleit-store" }
+rustls = { version = "0.23.40", default-features = false, features = ["ring", "std", "logging"] }
+rustls-pki-types = "1.14.1"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "logging"] }
+webpki-roots = "1.0.8"
+
+[features]
+# Compiles in the dev-only "accept any server certificate" path (for the local self-signed
+# Dovecot). NOT enabled by default, so release/CI builds physically cannot bypass TLS validation.
+dangerous-tls = []
 
 [lints]
 workspace = true

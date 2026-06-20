@@ -1,0 +1,7 @@
+# cargo-mutants configuration.
+#
+# Exclude the IMAP module: it is network/TLS integration code verified by the `#[ignore]`d live
+# test against a local Dovecot (run with `--ignored`), which `cargo mutants` does not execute —
+# so mutants there survive spuriously, not because the code is untested. The reusable logic it
+# relies on (e.g. `Store::upsert_folder`) lives in `geleit-store` and stays mutation-tested.
+exclude_globs = ["**/imap.rs"]
