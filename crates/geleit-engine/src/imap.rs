@@ -187,6 +187,13 @@ pub fn has_password(secrets: &dyn SecretStore, username: &str) -> Result<bool, I
     Ok(secrets.get(SECRET_SERVICE, username)?.is_some())
 }
 
+/// Remove a stored IMAP password (e.g. on account removal, SEC-3). Idempotent — deleting an absent
+/// secret succeeds (the `SecretStore` contract).
+pub fn delete_password(secrets: &dyn SecretStore, username: &str) -> Result<(), ImapError> {
+    secrets.delete(SECRET_SERVICE, username)?;
+    Ok(())
+}
+
 /// Fetch full bodies for a folder's recent window, MIME-parse them, and store each body (matched
 /// to its already-synced message by UID; run [`sync_envelopes`] first). Returns how many bodies
 /// were stored. `BODY.PEEK[]` is used so reading a body here does not set `\Seen`.

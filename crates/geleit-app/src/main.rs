@@ -67,12 +67,14 @@ slint::slint! {
         in-out property <string> f-pass;
         in property <bool> setup-busy;
         in property <string> setup-error;
+        private property <bool> confirm-remove;
         callback folder-selected(int);
         callback message-selected(MessageItem);
         callback mark-unread(int);
         callback refresh();
         callback connect();
         callback reload();
+        callback remove-account();
 
         preferred-width: 1100px;
         preferred-height: 720px;
@@ -118,6 +120,81 @@ slint::slint! {
                                 color: Palette.text;
                                 vertical-alignment: center;
                                 font-weight: i == root.selected-folder ? 600 : 400;
+                            }
+                        }
+                    }
+
+                    Rectangle { vertical-stretch: 1; } // push the footer to the bottom
+
+                    // ---- REMOVE ACCOUNT (destructive → confirm first) ----
+                    if !root.confirm-remove: TouchArea {
+                        height: 30px;
+                        clicked => {
+                            root.confirm-remove = true;
+                        }
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            Text {
+                                text: "Remove account";
+                                color: Palette.muted;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                    if root.confirm-remove: VerticalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Remove this account's local copy from this device? Your mail stays on the server.";
+                            color: Palette.text;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                height: 32px;
+                                border-radius: 8px;
+                                background: Palette.surface;
+                                border-width: 1px;
+                                border-color: Palette.danger-strong;
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: "Remove";
+                                        color: Palette.danger-strong;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                TouchArea {
+                                    clicked => {
+                                        root.remove-account();
+                                        root.confirm-remove = false;
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                height: 32px;
+                                border-radius: 8px;
+                                background: Palette.surface;
+                                border-width: 1px;
+                                border-color: Palette.divider;
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: "Cancel";
+                                        color: Palette.text;
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                TouchArea {
+                                    clicked => {
+                                        root.confirm-remove = false;
+                                    }
+                                }
                             }
                         }
                     }
@@ -691,6 +768,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.invoke_reload(); // show the mail
                         }
                         Err(msg) => ui.set_setup_error(msg.into()),
+                    }
+                });
+            });
+        });
+    }
+
+    // Remove account → wipe local data + keychain password on a worker, then show the setup form.
+    {
+        let weak = ui.as_weak();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        ui.on_remove_account(move || {
+            let weak = weak.clone();
+            let db_path = db_path.clone();
+            let secrets = secrets.clone();
+            std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    refresh::run_remove_account(&db_path, &*secrets)
+                }))
+                .unwrap_or_else(|_| Err("Couldn't remove the account.".to_owned()));
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    match result {
+                        Ok(password_cleared) => {
+                            ui.invoke_reload(); // no account → Add-account form
+                                                // surface on the form (the main-view `status` banner is now hidden)
+                            ui.set_setup_error(if password_cleared {
+                                SharedString::new()
+                            } else {
+                                "Account removed, but the saved password couldn't be cleared from \
+                                 the keychain."
+                                    .into()
+                            });
+                        }
+                        Err(msg) => ui.set_status(msg.into()),
                     }
                 });
             });

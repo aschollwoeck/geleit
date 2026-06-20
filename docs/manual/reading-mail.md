@@ -50,3 +50,15 @@ short message explains what to try; your existing mail stays put.
 
 Everything you see is kept on your own device, so the list stays fast and works offline — refresh is
 the moment GeleitMail talks to your provider to catch up.
+
+## Reading offline
+
+Because your mail lives on your own device, you can read everything you've synced with no internet
+connection. Refresh is the only thing that needs the network; the rest keeps working offline.
+
+## Removing an account
+
+To make GeleitMail forget an account on this device, choose **Remove account** at the bottom of the
+folder list and confirm. This deletes the local copy of that account's mail and its saved password
+from your system keychain. **Your mail stays safe on the server** — removing the account here only
+clears the copy on this device, and you can add the account again any time to re-download it.
