@@ -235,6 +235,101 @@ pub async fn sync_bodies(
     Ok(count)
 }
 
+/// Incrementally sync one folder: reconcile local vs. server UIDs, delete what's gone on the
+/// server, and fetch envelopes+bodies for **new** UIDs (the most-recent `limit`; older backfill is
+/// S2.4). A UIDVALIDITY change clears the folder first (the server's UIDs are no longer valid).
+/// Returns how many new messages were stored. (Server→local flag changes are M6, with write-back.)
+pub async fn sync_folder_incremental(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    store: &Store,
+    account_id: i64,
+    folder: &str,
+    limit: u32,
+) -> Result<usize, ImapError> {
+    let folder_id = store.upsert_folder(account_id, folder)?;
+    let mut session = connect(config, secrets).await?;
+    let mailbox = session.select(folder).await?;
+
+    // UIDVALIDITY: if it changed since last sync, our stored UIDs are meaningless — drop them.
+    if let Some(validity) = mailbox.uid_validity {
+        let validity = i64::from(validity);
+        if matches!(store.folder_uidvalidity(folder_id)?, Some(prev) if prev != validity) {
+            store.clear_folder(folder_id)?;
+        }
+        store.set_folder_uidvalidity(folder_id, validity)?;
+    }
+
+    // Reconcile local vs. the server's current UID set.
+    let server: Vec<u32> = session.uid_search("ALL").await?.into_iter().collect();
+    let local: Vec<u32> = store
+        .uids_in_folder(folder_id)?
+        .into_iter()
+        .map(|u| u as u32)
+        .collect();
+    let plan = crate::sync::reconcile(&local, &server);
+
+    // Remove messages deleted on the server.
+    let deleted: Vec<i64> = plan.deleted.iter().map(|&u| i64::from(u)).collect();
+    store.delete_messages_by_uid(folder_id, &deleted)?;
+
+    // Fetch the most-recent `limit` new UIDs (older backfill is S2.4).
+    let mut new_uids = plan.new;
+    new_uids.sort_unstable();
+    let recent_new = &new_uids[new_uids.len().saturating_sub(limit as usize)..];
+    // Envelopes for the new UIDs.
+    if !recent_new.is_empty() {
+        let uid_set = recent_new
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut fetches = session
+            .uid_fetch(&uid_set, "(UID ENVELOPE FLAGS INTERNALDATE)")
+            .await?;
+        while let Some(fetch) = fetches.next().await {
+            let msg = fetch_to_new_message(&fetch?);
+            if msg.uid.is_none() {
+                continue; // see sync_envelopes: UID-less rows can't be de-duplicated (P6)
+            }
+            store.upsert_message(account_id, folder_id, &msg)?;
+        }
+    }
+
+    // Bodies for any recent message still lacking one — covers the just-fetched envelopes AND
+    // retries a body fetch that an earlier sync left incomplete, so it self-heals (P6). BODY.PEEK[]
+    // doesn't set \Seen.
+    let need_bodies = store.uids_without_body(folder_id, limit)?;
+    if !need_bodies.is_empty() {
+        let uid_set = need_bodies
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut fetches = session.uid_fetch(&uid_set, "(UID BODY.PEEK[])").await?;
+        while let Some(fetch) = fetches.next().await {
+            let fetch = fetch?;
+            let (Some(uid), Some(raw)) = (fetch.uid.map(i64::from), fetch.body()) else {
+                continue;
+            };
+            let Some(message_id) = store.message_id_by_uid(account_id, folder_id, uid)? else {
+                continue;
+            };
+            let parsed = crate::mime::parse_body(raw);
+            store.store_body(
+                message_id,
+                parsed.plain.as_deref(),
+                parsed.html.as_deref(),
+                parsed.snippet.as_deref(),
+                parsed.has_attachments,
+            )?;
+        }
+    }
+
+    let _ = session.logout().await; // best-effort
+    Ok(recent_new.len())
+}
+
 /// Upsert the given folder names into the store under `account_id` (idempotent). Pure — no network.
 pub fn persist_folders(
     store: &Store,
@@ -504,5 +599,84 @@ mod tests {
         assert!(m.has_attachments, "expected attachment flag");
         let body = store.body_for(m.id).unwrap().expect("body stored");
         assert!(body.plain.unwrap().contains("Body in plain text"));
+    }
+
+    /// Incremental sync: a new message appears, a re-sync is idempotent (no dupes), and a message
+    /// deleted on the server is removed locally. Needs Dovecot + `--features dangerous-tls`.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn live_incremental_new_and_delete() {
+        use futures::StreamExt;
+
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let subject = "Geleit S2.3 incremental test";
+        let raw =
+            format!("Subject: {subject}\r\nFrom: T <t@example.com>\r\n\r\nincremental body\r\n");
+        {
+            let mut session = connect(&cfg, &secrets).await.expect("connect");
+            session
+                .append("INBOX", None, None, raw.as_bytes())
+                .await
+                .expect("append");
+            let _ = session.logout().await;
+        }
+
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("geleittest@localhost", None).unwrap();
+        sync_folder_incremental(&cfg, &secrets, &store, acc, "INBOX", 200)
+            .await
+            .expect("sync 1");
+        let folder_id = store.upsert_folder(acc, "INBOX").unwrap();
+        let present = |s: &Store| {
+            s.messages_in_folder(folder_id, 500)
+                .unwrap()
+                .into_iter()
+                .filter(|m| m.subject.as_deref() == Some(subject))
+                .collect::<Vec<_>>()
+        };
+        let found = present(&store);
+        assert_eq!(found.len(), 1, "new message appears");
+        let uid = found[0].uid.expect("uid");
+
+        // re-sync is idempotent (no duplicate)
+        sync_folder_incremental(&cfg, &secrets, &store, acc, "INBOX", 200)
+            .await
+            .expect("sync 2");
+        assert_eq!(present(&store).len(), 1, "no duplicate on re-sync");
+
+        // delete on the server, then sync → gone locally
+        {
+            let mut session = connect(&cfg, &secrets).await.expect("connect");
+            session.select("INBOX").await.expect("select");
+            let mut upd = session
+                .uid_store(format!("{uid}"), "+FLAGS (\\Deleted)")
+                .await
+                .expect("store flags");
+            while upd.next().await.is_some() {}
+            drop(upd);
+            {
+                let ex = session.expunge().await.expect("expunge"); // !Unpin → pin to iterate
+                futures::pin_mut!(ex);
+                while ex.next().await.is_some() {}
+            }
+            let _ = session.logout().await;
+        }
+        sync_folder_incremental(&cfg, &secrets, &store, acc, "INBOX", 200)
+            .await
+            .expect("sync 3");
+        assert!(
+            present(&store).is_empty(),
+            "deleted message removed locally"
+        );
     }
 }
