@@ -60,9 +60,10 @@ type ImapSession = async_imap::Session<tokio_rustls::client::TlsStream<TcpStream
 /// `SecretStore` seam and is never logged (P2).
 async fn connect(config: &ImapConfig, secrets: &dyn SecretStore) -> Result<ImapSession, ImapError> {
     // Fetch the password first: missing → fail before opening any socket.
-    // NOTE: `SecretStore::get` is sync; the in-memory double is instant, but when the real
-    // OS-keychain backend lands (libsecret/DBus) this should move behind `spawn_blocking` so it
-    // doesn't block the async executor (guidelines §5).
+    // NOTE: `SecretStore::get` is sync and the real backend (OsSecretStore, S2.1) makes a blocking
+    // D-Bus call. It's safe today — `run_setup`/`run_refresh` drive this on a dedicated worker
+    // runtime, never the UI executor — but if connect() is ever called on a shared async executor,
+    // move this behind `spawn_blocking` (guidelines §5).
     let password = secrets
         .get(SECRET_SERVICE, &config.username)?
         .and_then(|bytes| String::from_utf8(bytes).ok())

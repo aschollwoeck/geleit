@@ -8,4 +8,5 @@
 
 pub mod html;
 pub mod oauth;
+pub mod os_secret;
 pub mod secret;

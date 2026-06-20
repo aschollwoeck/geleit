@@ -12,4 +12,10 @@ publish = false
 workspace = true
 
 [dependencies]
+# Linux secret-service backend only (pure-Rust zbus, no C deps). macOS/Windows stores are enabled
+# at cross-platform packaging (M8) by adding their store features.
+keyring = { version = "4", default-features = false, features = [
+    "v1",
+    "zbus-secret-service-keyring-store",
+] }
 thiserror = "2.0.18"

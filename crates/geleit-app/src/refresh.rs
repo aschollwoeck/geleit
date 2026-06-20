@@ -3,11 +3,12 @@
 //! P1). Excluded from mutation testing (network/integration glue, like the engine's `imap.rs`); the
 //! pure `build_settings` is unit-tested.
 //!
-//! Connection settings are persisted per-account in the store; the password lives in a
-//! session-shared secret store (still in-memory — a real OS keychain is SEC-2, a later milestone).
+//! Connection settings are persisted per-account in the store; the password lives in the OS
+//! keychain via the shared `SecretStore` (`OsSecretStore` in the app — S2.1), so it persists
+//! across restarts.
 
 use geleit_engine::imap::{self, ImapConfig};
-use geleit_platform::secret::InMemorySecretStore;
+use geleit_platform::secret::SecretStore;
 use geleit_store::{ImapSettings, Store, StoreError};
 
 /// Validate raw Add-account form fields into `(email, ImapSettings)`. Pure — unit-tested. (Email
@@ -71,7 +72,7 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
 /// created account is rolled back if the first connection fails, so a bad attempt leaves no trace.
 pub fn run_setup(
     db_path: &str,
-    secrets: &InMemorySecretStore,
+    secrets: &dyn SecretStore,
     email: &str,
     display_name: Option<&str>,
     settings: ImapSettings,
@@ -129,11 +130,7 @@ pub fn run_setup(
 
 /// Sync the first account's `folder` (+ folder list), reading settings from the store and the
 /// password from the shared secrets. Blocking + network: **run on a worker thread.**
-pub fn run_refresh(
-    db_path: &str,
-    secrets: &InMemorySecretStore,
-    folder: &str,
-) -> Result<(), String> {
+pub fn run_refresh(db_path: &str, secrets: &dyn SecretStore, folder: &str) -> Result<(), String> {
     let store = Store::open(db_path).map_err(|_| "Couldn't open the local mailbox.".to_owned())?;
     let account = store
         .list_accounts()

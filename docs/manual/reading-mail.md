@@ -16,11 +16,11 @@ The first time you open GeleitMail, it asks you to add an account. Fill in:
   mail apps).
 
 Choose **Connect**. GeleitMail signs in, downloads your inbox, and shows your mail. Your details
-stay on your own device.
+stay on your own device — your password is saved securely in your system keychain, so it's
+remembered the next time you open GeleitMail.
 
-> One early limitation: your password isn't stored between runs yet, so after you quit and reopen,
-> your mail is still here but you'll be asked for your password again the first time you Refresh.
-> Secure password storage in your system keychain is coming soon.
+> If your keychain is locked (some setups lock it until you sign in), the first Refresh may ask you
+> to re-enter your password via the same form.
 
 When you open GeleitMail you see three areas, left to right:
 
