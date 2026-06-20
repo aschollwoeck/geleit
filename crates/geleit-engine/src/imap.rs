@@ -169,6 +169,17 @@ pub async fn sync_envelopes(
     Ok(count)
 }
 
+/// Store an IMAP password for `username` in the secret seam (under the IMAP service key), so
+/// callers needn't know the internal service name. The password is never logged (P2).
+pub fn store_password(
+    secrets: &dyn SecretStore,
+    username: &str,
+    password: &[u8],
+) -> Result<(), ImapError> {
+    secrets.set(SECRET_SERVICE, username, password)?;
+    Ok(())
+}
+
 /// Fetch full bodies for a folder's recent window, MIME-parse them, and store each body (matched
 /// to its already-synced message by UID; run [`sync_envelopes`] first). Returns how many bodies
 /// were stored. `BODY.PEEK[]` is used so reading a body here does not set `\Seen`.

@@ -7,10 +7,16 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-# geleit-engine is re-added in S1.9 when the UI drives sync; the read-only shell needs only the store.
 geleit-store = { version = "0.0.0", path = "../geleit-store" }
+geleit-engine = { version = "0.0.0", path = "../geleit-engine" }
+geleit-platform = { version = "0.0.0", path = "../geleit-platform" }
 slint = "1.16.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+tokio = { version = "1", features = ["rt", "net", "time"] }
+
+[features]
+# Forwarded to the engine for self-signed dev servers; never enable in a release build.
+dangerous-tls = ["geleit-engine/dangerous-tls"]
 
 # The UI crate can't use the workspace `unsafe_code = "forbid"`: Slint's generated code carries
 # `#[allow(unsafe_code)]`, and `forbid` cannot be overridden. We `deny` instead — still blocks

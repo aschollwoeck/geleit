@@ -2,6 +2,7 @@
 //! message list in the "Soft daylight" design (`design.md`). Reads the store only — no network on
 //! the UI path (constitution P1); sync is the engine's job, wired in later (S1.9).
 
+mod refresh;
 mod viewmodel;
 
 use std::rc::Rc;
@@ -25,6 +26,8 @@ slint::slint! {
         out property <color> accent: #2e9e9b;
         out property <color> accent-strong: #1c7e7b;
         out property <color> accent-quiet: #e2f1f0;
+        out property <color> danger-strong: #b3472e;
+        out property <color> danger-quiet: #fbe9e4;
         out property <color> divider: #e3eaec;
     }
 
@@ -48,9 +51,12 @@ slint::slint! {
         in property <string> r-sender;
         in property <string> r-date;
         in property <string> r-body;
+        in property <bool> refreshing;
+        in property <string> status; // non-empty = error to show
         callback folder-selected(int);
         callback message-selected(MessageItem);
         callback mark-unread(int);
+        callback refresh();
 
         preferred-width: 1100px;
         preferred-height: 720px;
@@ -111,16 +117,59 @@ slint::slint! {
                         background: Palette.surface;
                         HorizontalLayout {
                             padding: 16px;
+                            spacing: 8px;
                             Text {
                                 text: root.selected-folder < root.folders.length ? root.folders[root.selected-folder] : "";
                                 color: Palette.text;
                                 font-size: 18px;
                                 font-weight: 600;
                                 vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Rectangle {
+                                width: 104px;
+                                height: 32px;
+                                y: 10px;
+                                border-radius: 8px;
+                                // accent-strong text needs surface, not accent-quiet (AA, design.md §4)
+                                background: Palette.surface;
+                                border-width: 1px;
+                                border-color: Palette.accent;
+                                opacity: root.refreshing ? 0.6 : 1.0;
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: root.refreshing ? "Refreshing…" : "Refresh";
+                                        color: Palette.accent-strong;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                TouchArea {
+                                    enabled: !root.refreshing;
+                                    clicked => { root.refresh(); }
+                                }
                             }
                         }
                     }
                     Rectangle { height: 1px; background: Palette.divider; }
+                    if root.status != "": Rectangle {
+                        height: 44px;
+                        background: Palette.danger-quiet;
+                        Rectangle { x: 0; width: 3px; background: Palette.danger-strong; } // guide edge
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            Text {
+                                text: root.status;
+                                color: Palette.text; // body text on tint (AA), per design.md §10
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
                     ListView {
                         for m in root.messages: Rectangle {
                             height: 72px;
@@ -292,6 +341,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => ("(no account)".to_owned(), Vec::new(), Vec::new()),
     };
 
+    // plain-String folder names for the refresh worker (the SharedString model is UI-thread only)
+    let folder_name_strs: Vec<String> = folder_names.iter().map(ToString::to_string).collect();
+
     let ui = Main::new()?;
     ui.set_account(account_label.into());
     ui.set_folders(ModelRc::new(VecModel::from(folder_names)));
@@ -350,6 +402,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_mark_unread(move |id| {
             let _ = store.set_seen(id.into(), false);
             flip_unread(&model, id, true);
+        });
+    }
+
+    // Refresh → sync on a worker thread (P1: never block the UI), then reload on the UI thread.
+    {
+        let weak = ui.as_weak();
+        let db_path = db.clone();
+        let folder_names = folder_name_strs;
+        ui.on_refresh(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.get_refreshing() {
+                return; // already in flight
+            }
+            let (config, password) = match refresh::config_from_env() {
+                Ok(v) => v,
+                Err(e) => {
+                    ui.set_status(e.into());
+                    return;
+                }
+            };
+            // sync (and reload) the folder the user is looking at; default to INBOX
+            let folder = folder_names
+                .get(ui.get_selected_folder() as usize)
+                .cloned()
+                .unwrap_or_else(|| "INBOX".to_owned());
+            ui.set_refreshing(true);
+            ui.set_status(SharedString::new());
+
+            let weak = weak.clone();
+            let db_path = db_path.clone();
+            std::thread::spawn(move || {
+                // Nothing !Send crosses here: only `weak` (Send) + plain data; the result post too.
+                // catch_unwind so a worker panic still clears `refreshing` (never a stuck button).
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    refresh::run_refresh(&db_path, config, &password, &folder)
+                }))
+                .unwrap_or_else(|_| Err("Couldn't refresh — something went wrong.".to_owned()));
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    ui.set_refreshing(false);
+                    match result {
+                        Ok(()) => {
+                            ui.set_status(SharedString::new());
+                            // reuse the existing reload path (shared model + UI store connection)
+                            ui.invoke_folder_selected(ui.get_selected_folder());
+                        }
+                        Err(msg) => ui.set_status(msg.into()),
+                    }
+                });
+            });
         });
     }
 

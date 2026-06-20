@@ -21,4 +21,12 @@ later, choose **Mark as unread** at the top of the reading area to bring the dot
 Some messages are written only in rich (HTML) formatting. For now those show a short note instead
 of the formatting — safe display of formatted mail is coming in a later version.
 
-Everything you see is kept on your own device, so the list stays fast and works offline.
+## Getting new mail
+
+Choose **Refresh** at the top of the message list to fetch new mail from your provider. While it
+works, the button reads *Refreshing…* — the app stays responsive the whole time, so you can keep
+reading. When it finishes, the list updates with anything new. If it can't reach your provider, a
+short message explains what to try; your existing mail stays put.
+
+Everything you see is kept on your own device, so the list stays fast and works offline — refresh is
+the moment GeleitMail talks to your provider to catch up.

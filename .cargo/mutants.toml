@@ -6,4 +6,12 @@
 # relies on (e.g. `Store::upsert_folder`) lives in `geleit-store` and stays mutation-tested.
 # Also exclude the app's main.rs: it is the Slint UI declaration + wiring (rendering, not logic);
 # the pure display mapping lives in `geleit-app/src/viewmodel.rs` and stays mutation-tested.
-exclude_globs = ["**/imap.rs", "**/geleit-app/src/main.rs"]
+# refresh.rs is network/threading/env glue (drives the engine sync off-thread) where mutants would
+# survive spuriously, like imap.rs. Its one pure helper, `build_imap_config`, is covered by unit
+# tests; excluding the whole file forgoes *mutation* coverage of that helper — an accepted small gap
+# rather than splitting this thin module.
+exclude_globs = [
+    "**/imap.rs",
+    "**/geleit-app/src/main.rs",
+    "**/geleit-app/src/refresh.rs",
+]
