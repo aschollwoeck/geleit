@@ -1447,8 +1447,11 @@ name = "geleit-app"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "geleit-engine",
+ "geleit-platform",
  "geleit-store",
  "slint",
+ "tokio",
 ]
 
 [[package]]
