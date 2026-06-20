@@ -67,6 +67,37 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
         .map_err(|_| "Couldn't start the sync runtime.".to_owned())
 }
 
+const DB_KEY_SERVICE: &str = "geleit-db";
+const DB_KEY_ACCOUNT: &str = "key";
+
+/// The database encryption key (SEC-1, ADR-0008): fetched from the keychain, or a fresh 32-byte
+/// random key generated and stored there on first run. Never logged (P2).
+///
+/// Only generates a key when the keychain reports the entry is genuinely **absent** — a read error
+/// or a present-but-wrong-size key is surfaced, never overwritten, so a transient keychain failure
+/// can't discard the real key and brick the encrypted DB.
+pub fn db_key(secrets: &dyn SecretStore) -> Result<Vec<u8>, String> {
+    match secrets.get(DB_KEY_SERVICE, DB_KEY_ACCOUNT) {
+        Ok(Some(key)) if key.len() == 32 => return Ok(key),
+        Ok(Some(_)) => return Err("The stored encryption key looks corrupt.".to_owned()),
+        Ok(None) => {} // first run → generate below
+        Err(_) => return Err("Couldn't read the encryption key from the keychain.".to_owned()),
+    }
+    let mut key = vec![0u8; 32];
+    getrandom::fill(&mut key).map_err(|_| "Couldn't generate an encryption key.".to_owned())?;
+    secrets
+        .set(DB_KEY_SERVICE, DB_KEY_ACCOUNT, &key)
+        .map_err(|_| "Couldn't store the encryption key.".to_owned())?;
+    Ok(key)
+}
+
+/// Open the **encrypted** local store, fetching (or creating) its key from the keychain.
+pub fn open_store(db_path: &str, secrets: &dyn SecretStore) -> Result<Store, String> {
+    let key = db_key(secrets)?;
+    Store::open_encrypted(db_path, &key)
+        .map_err(|_| "Couldn't open the encrypted mailbox.".to_owned())
+}
+
 /// Add (or reconnect) an account: persist its settings, store the password in the shared secrets,
 /// and do the first sync of the inbox. Blocking + network: **run on a worker thread.** A *newly*
 /// created account is rolled back if the first connection fails, so a bad attempt leaves no trace.
@@ -78,7 +109,7 @@ pub fn run_setup(
     settings: ImapSettings,
     password: &str,
 ) -> Result<(), String> {
-    let store = Store::open(db_path).map_err(|_| "Couldn't open the local mailbox.".to_owned())?;
+    let store = open_store(db_path, secrets)?;
     // Single-account for now (M1): if an account already exists this is a reconnect/reconfigure —
     // update it rather than risk creating a hidden second account when the email field is edited.
     let existing = store
@@ -130,7 +161,7 @@ pub fn run_setup(
 /// Sync the first account's `folder` (+ folder list), reading settings from the store and the
 /// password from the shared secrets. Blocking + network: **run on a worker thread.**
 pub fn run_refresh(db_path: &str, secrets: &dyn SecretStore, folder: &str) -> Result<(), String> {
-    let store = Store::open(db_path).map_err(|_| "Couldn't open the local mailbox.".to_owned())?;
+    let store = open_store(db_path, secrets)?;
     let account = store
         .list_accounts()
         .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
@@ -163,7 +194,7 @@ pub fn run_backfill(
     batch_size: u32,
     on_batch: &mut dyn FnMut(usize),
 ) -> Result<usize, String> {
-    let store = Store::open(db_path).map_err(|_| "Couldn't open the local mailbox.".to_owned())?;
+    let store = open_store(db_path, secrets)?;
     let account = store
         .list_accounts()
         .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
@@ -191,7 +222,7 @@ pub fn run_backfill(
 /// keychain password could **not** be cleared (so the caller can warn — SEC-3), `Err` if the mail
 /// wipe itself failed.
 pub fn run_remove_account(db_path: &str, secrets: &dyn SecretStore) -> Result<bool, String> {
-    let store = Store::open(db_path).map_err(|_| "Couldn't open the local mailbox.".to_owned())?;
+    let store = open_store(db_path, secrets)?;
     let Some(account) = store
         .list_accounts()
         .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
@@ -259,10 +290,10 @@ mod tests {
 
     #[test]
     fn run_remove_account_wipes_account_password_and_mail() {
-        use super::run_remove_account;
+        use super::{open_store, run_remove_account};
         use geleit_engine::imap::{self, store_password};
         use geleit_platform::secret::InMemorySecretStore;
-        use geleit_store::{ImapSettings, NewMessage, Store};
+        use geleit_store::{ImapSettings, NewMessage};
 
         let path = std::env::temp_dir().join("geleit-remove-test.db");
         let path = path.to_str().unwrap();
@@ -276,7 +307,8 @@ mod tests {
             allow_invalid_certs: false,
         };
         {
-            let store = Store::open(path).unwrap();
+            // encrypted store (open_store generates + stores the key in `secrets`)
+            let store = open_store(path, &secrets).unwrap();
             let acc = store
                 .add_imap_account("user@x.com", None, &settings)
                 .unwrap();
@@ -303,7 +335,7 @@ mod tests {
             "fully clean wipe"
         );
 
-        let store = Store::open(path).unwrap();
+        let store = open_store(path, &secrets).unwrap();
         assert!(store.list_accounts().unwrap().is_empty(), "account gone");
         assert!(
             !imap::has_password(&secrets, "user@x.com").unwrap(),
@@ -312,6 +344,18 @@ mod tests {
         // removing again is a no-op (idempotent), still reported clean
         assert!(run_remove_account(path, &secrets).expect("remove again"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn db_key_is_32_bytes_and_stable() {
+        use super::db_key;
+        use geleit_platform::secret::InMemorySecretStore;
+
+        let secrets = InMemorySecretStore::new();
+        let k1 = db_key(&secrets).unwrap();
+        assert_eq!(k1.len(), 32);
+        let k2 = db_key(&secrets).unwrap();
+        assert_eq!(k1, k2, "key persists, not regenerated each call");
     }
 
     #[test]

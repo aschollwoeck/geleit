@@ -541,9 +541,10 @@ fn post_reload(weak: &slint::Weak<Main>, status: Option<String>) {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = std::env::var("GELEIT_DB").unwrap_or_else(|_| "geleit.db".to_owned());
-    let store = Rc::new(Store::open(&db)?);
     // Secret store backed by the OS keychain (S2.1). Send+Sync → shared across the UI + workers.
     let secrets = Arc::new(OsSecretStore::new());
+    // Encrypted local store (SEC-1, ADR-0008); the key is fetched/created in the keychain.
+    let store = Rc::new(refresh::open_store(&db, &*secrets)?);
 
     let ui = Main::new()?;
     let folders_model = Rc::new(VecModel::<SharedString>::default());

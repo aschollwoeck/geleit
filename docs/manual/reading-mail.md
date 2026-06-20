@@ -51,6 +51,13 @@ short message explains what to try; your existing mail stays put.
 Everything you see is kept on your own device, so the list stays fast and works offline — refresh is
 the moment GeleitMail talks to your provider to catch up.
 
+## Your data is encrypted on this device
+
+The local copy of your mail is **encrypted at rest** — on disk it's unreadable ciphertext. The key
+is kept in your operating system's keychain and applied automatically when GeleitMail opens, so you
+never type a separate passphrase. (If you wipe the keychain, the local copy can't be opened; just
+add the account again to re-download it.)
+
 ## Reading offline
 
 Because your mail lives on your own device, you can read everything you've synced with no internet

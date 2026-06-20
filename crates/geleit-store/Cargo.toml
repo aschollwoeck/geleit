@@ -8,7 +8,9 @@ publish = false
 
 [dependencies]
 geleit-core = { path = "../geleit-core" }
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+# SQLCipher (bundled + vendored OpenSSL) for encryption at rest (SEC-1, ADR-0008). Vendored so
+# there's no system OpenSSL dependency; the key is supplied at open time via PRAGMA key.
+rusqlite = { version = "0.40.1", features = ["bundled-sqlcipher-vendored-openssl"] }
 thiserror = "2.0.18"
 
 [lints]
