@@ -361,6 +361,15 @@ impl Store {
         Ok(())
     }
 
+    /// Set a message's local read state. (Writing this back to the server is M6 / SYNC-5.)
+    pub fn set_seen(&self, message_id: i64, seen: bool) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE message SET seen = ?2 WHERE id = ?1",
+            (message_id, seen),
+        )?;
+        Ok(())
+    }
+
     /// The stored body for a message, or `None` if no body is stored yet.
     pub fn body_for(&self, message_id: i64) -> Result<Option<StoredBody>, StoreError> {
         Ok(self
@@ -657,6 +666,29 @@ mod tests {
         // FK violation on the body insert → the whole transaction rolls back, nothing committed.
         assert!(s.store_body(999, Some("x"), None, None, false).is_err());
         assert!(s.body_for(999).unwrap().is_none());
+    }
+
+    #[test]
+    fn set_seen_flips_read_state() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let fld = s.upsert_folder(acc, "INBOX").unwrap();
+        let mid = s
+            .upsert_message(
+                acc,
+                fld,
+                &NewMessage {
+                    uid: Some(1),
+                    seen: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(!s.messages_in_folder(fld, 1).unwrap()[0].seen);
+        s.set_seen(mid, true).unwrap();
+        assert!(s.messages_in_folder(fld, 1).unwrap()[0].seen);
+        s.set_seen(mid, false).unwrap();
+        assert!(!s.messages_in_folder(fld, 1).unwrap()[0].seen);
     }
 
     #[test]
