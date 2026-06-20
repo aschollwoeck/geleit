@@ -277,57 +277,139 @@ pub async fn sync_folder_incremental(
     let mut new_uids = plan.new;
     new_uids.sort_unstable();
     let recent_new = &new_uids[new_uids.len().saturating_sub(limit as usize)..];
-    // Envelopes for the new UIDs.
     if !recent_new.is_empty() {
-        let uid_set = recent_new
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut fetches = session
-            .uid_fetch(&uid_set, "(UID ENVELOPE FLAGS INTERNALDATE)")
-            .await?;
-        while let Some(fetch) = fetches.next().await {
-            let msg = fetch_to_new_message(&fetch?);
-            if msg.uid.is_none() {
-                continue; // see sync_envelopes: UID-less rows can't be de-duplicated (P6)
-            }
-            store.upsert_message(account_id, folder_id, &msg)?;
-        }
+        fetch_envelopes_for(
+            &mut session,
+            store,
+            account_id,
+            folder_id,
+            &uid_set(recent_new),
+        )
+        .await?;
     }
-
     // Bodies for any recent message still lacking one — covers the just-fetched envelopes AND
-    // retries a body fetch that an earlier sync left incomplete, so it self-heals (P6). BODY.PEEK[]
-    // doesn't set \Seen.
+    // retries a body fetch an earlier sync left incomplete, so it self-heals (P6).
     let need_bodies = store.uids_without_body(folder_id, limit)?;
     if !need_bodies.is_empty() {
-        let uid_set = need_bodies
-            .iter()
-            .map(i64::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut fetches = session.uid_fetch(&uid_set, "(UID BODY.PEEK[])").await?;
-        while let Some(fetch) = fetches.next().await {
-            let fetch = fetch?;
-            let (Some(uid), Some(raw)) = (fetch.uid.map(i64::from), fetch.body()) else {
-                continue;
-            };
-            let Some(message_id) = store.message_id_by_uid(account_id, folder_id, uid)? else {
-                continue;
-            };
-            let parsed = crate::mime::parse_body(raw);
-            store.store_body(
-                message_id,
-                parsed.plain.as_deref(),
-                parsed.html.as_deref(),
-                parsed.snippet.as_deref(),
-                parsed.has_attachments,
-            )?;
-        }
+        fetch_bodies_for(
+            &mut session,
+            store,
+            account_id,
+            folder_id,
+            &uid_set(&need_bodies),
+        )
+        .await?;
     }
 
     let _ = session.logout().await; // best-effort
     Ok(recent_new.len())
+}
+
+/// Progressively fetch the rest of a folder, newest-first, in `batch_size` chunks (envelopes+bodies
+/// per chunk). `on_batch` is called with the running total after each chunk. Resumable — each chunk
+/// commits, so a restart continues from local state. Returns the total fetched (0 if up to date).
+pub async fn backfill_folder(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    store: &Store,
+    account_id: i64,
+    folder: &str,
+    batch_size: u32,
+    on_batch: &mut dyn FnMut(usize),
+) -> Result<usize, ImapError> {
+    let folder_id = store.upsert_folder(account_id, folder)?;
+    let mut session = connect(config, secrets).await?;
+    let _mailbox = session.select(folder).await?;
+    // UIDVALIDITY is the incremental path's responsibility; if it changed in the gap before this
+    // runs, backfill may transiently refetch under new UIDs, and the next incremental sync (which
+    // checks UIDVALIDITY) clears + re-syncs the folder, healing it.
+
+    let server: Vec<u32> = session.uid_search("ALL").await?.into_iter().collect();
+    let local: Vec<u32> = store
+        .uids_in_folder(folder_id)?
+        .into_iter()
+        .map(|u| u as u32)
+        .collect();
+    let mut missing = crate::sync::reconcile(&local, &server).new;
+    missing.sort_unstable();
+    missing.reverse(); // newest (highest UID) first
+
+    let mut total = 0usize;
+    for chunk in missing.chunks(batch_size.max(1) as usize) {
+        let set = uid_set(chunk);
+        fetch_envelopes_for(&mut session, store, account_id, folder_id, &set).await?;
+        fetch_bodies_for(&mut session, store, account_id, folder_id, &set).await?;
+        total += chunk.len();
+        on_batch(total);
+    }
+
+    let _ = session.logout().await; // best-effort
+    Ok(total)
+}
+
+/// Build an IMAP UID set string ("u1,u2,...") from UIDs of any integer type.
+fn uid_set<T: ToString>(uids: &[T]) -> String {
+    uids.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+// NOTE (guidelines §5): these two helpers are the shared sync-write / MIME-parse choke points for
+// every sync path. They run synchronous SQLite writes (and `parse_body`, CPU-bound) on the async
+// executor, and hold a whole message body in memory per fetch. Safe today — all callers drive them
+// on a dedicated worker runtime, never the UI executor — but a future shared executor should move
+// the writes/parse behind `spawn_blocking` and add a max-body-size guard before parsing.
+
+/// `uid_fetch` envelopes for `uid_set` and upsert them (UID-less rows skipped — they can't be
+/// de-duplicated on re-sync, P6).
+async fn fetch_envelopes_for(
+    session: &mut ImapSession,
+    store: &Store,
+    account_id: i64,
+    folder_id: i64,
+    uid_set: &str,
+) -> Result<(), ImapError> {
+    let mut fetches = session
+        .uid_fetch(uid_set, "(UID ENVELOPE FLAGS INTERNALDATE)")
+        .await?;
+    while let Some(fetch) = fetches.next().await {
+        let msg = fetch_to_new_message(&fetch?);
+        if msg.uid.is_none() {
+            continue;
+        }
+        store.upsert_message(account_id, folder_id, &msg)?;
+    }
+    Ok(())
+}
+
+/// `uid_fetch` bodies for `uid_set` (BODY.PEEK[] — doesn't set `\Seen`), parse, and store them by UID.
+async fn fetch_bodies_for(
+    session: &mut ImapSession,
+    store: &Store,
+    account_id: i64,
+    folder_id: i64,
+    uid_set: &str,
+) -> Result<(), ImapError> {
+    let mut fetches = session.uid_fetch(uid_set, "(UID BODY.PEEK[])").await?;
+    while let Some(fetch) = fetches.next().await {
+        let fetch = fetch?;
+        let (Some(uid), Some(raw)) = (fetch.uid.map(i64::from), fetch.body()) else {
+            continue;
+        };
+        let Some(message_id) = store.message_id_by_uid(account_id, folder_id, uid)? else {
+            continue;
+        };
+        let parsed = crate::mime::parse_body(raw);
+        store.store_body(
+            message_id,
+            parsed.plain.as_deref(),
+            parsed.html.as_deref(),
+            parsed.snippet.as_deref(),
+            parsed.has_attachments,
+        )?;
+    }
+    Ok(())
 }
 
 /// Upsert the given folder names into the store under `account_id` (idempotent). Pure — no network.
@@ -678,5 +760,79 @@ mod tests {
             present(&store).is_empty(),
             "deleted message removed locally"
         );
+    }
+
+    /// Backfill fetches messages beyond the incremental cap, newest-first, with monotonic progress,
+    /// and is idempotent once complete. Needs Dovecot + `--features dangerous-tls`.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn live_backfill_fetches_the_rest() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let subjects: Vec<String> = (0..4)
+            .map(|i| format!("Geleit S2.4 backfill {i}"))
+            .collect();
+        {
+            let mut session = connect(&cfg, &secrets).await.expect("connect");
+            for s in &subjects {
+                let raw = format!("Subject: {s}\r\nFrom: T <t@example.com>\r\n\r\nbody {s}\r\n");
+                session
+                    .append("INBOX", None, None, raw.as_bytes())
+                    .await
+                    .expect("append");
+            }
+            let _ = session.logout().await;
+        }
+
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("geleittest@localhost", None).unwrap();
+        // recent window only
+        sync_folder_incremental(&cfg, &secrets, &store, acc, "INBOX", 2)
+            .await
+            .expect("incremental");
+        let folder_id = store.upsert_folder(acc, "INBOX").unwrap();
+
+        // backfill the rest, batched
+        let mut totals = Vec::new();
+        let fetched = backfill_folder(&cfg, &secrets, &store, acc, "INBOX", 2, &mut |n| {
+            totals.push(n)
+        })
+        .await
+        .expect("backfill");
+        assert!(fetched > 0, "backfill fetched some");
+        assert!(
+            totals.windows(2).all(|w| w[0] < w[1]),
+            "monotonic: {totals:?}"
+        );
+        assert_eq!(*totals.last().unwrap(), fetched);
+
+        // every appended message is now present with a body
+        let msgs = store.messages_in_folder(folder_id, 1000).unwrap();
+        for s in &subjects {
+            let m = msgs
+                .iter()
+                .find(|m| m.subject.as_deref() == Some(s.as_str()))
+                .unwrap_or_else(|| panic!("missing {s}"));
+            assert!(store.body_for(m.id).unwrap().is_some(), "body for {s}");
+        }
+
+        // already complete → no-op
+        let mut again_totals = Vec::new();
+        let again = backfill_folder(&cfg, &secrets, &store, acc, "INBOX", 2, &mut |n| {
+            again_totals.push(n)
+        })
+        .await
+        .expect("backfill 2");
+        assert_eq!(again, 0);
+        assert!(again_totals.is_empty());
     }
 }

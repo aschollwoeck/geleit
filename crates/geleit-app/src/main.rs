@@ -450,6 +450,18 @@ fn reload_all(
     }
 }
 
+/// Post a list reload (current folder) to the UI thread from a worker, optionally setting `status`.
+/// Reuses the `folder-selected` reload path (shared model + UI store connection).
+fn post_reload(weak: &slint::Weak<Main>, status: Option<String>) {
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_status(status.map(SharedString::from).unwrap_or_default());
+            ui.invoke_folder_selected(ui.get_selected_folder());
+        }
+    });
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = std::env::var("GELEIT_DB").unwrap_or_else(|_| "geleit.db".to_owned());
     let store = Rc::new(Store::open(&db)?);
@@ -576,19 +588,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let secrets = secrets.clone();
             std::thread::spawn(move || {
                 // Nothing !Send crosses: only `weak` + plain data + the Arc secrets (Send+Sync).
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Phase 1: incremental sync (recent window) — fast.
+                let sync = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     refresh::run_refresh(&db_path, &*secrets, &folder)
                 }))
                 .unwrap_or_else(|_| Err("Couldn't refresh — something went wrong.".to_owned()));
-                let _ = slint::invoke_from_event_loop(move || {
-                    let Some(ui) = weak.upgrade() else { return };
-                    ui.set_refreshing(false);
-                    match result {
-                        Ok(()) => {
-                            ui.set_status(SharedString::new());
-                            ui.invoke_folder_selected(ui.get_selected_folder());
+                if let Err(msg) = sync {
+                    let w = weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = w.upgrade() {
+                            ui.set_refreshing(false);
+                            ui.set_status(msg.into());
                         }
-                        Err(msg) => ui.set_status(msg.into()),
+                    });
+                    return;
+                }
+                // Recent mail is in — show it now (button stays "Refreshing…" through backfill).
+                post_reload(&weak, None);
+
+                // Phase 2: backfill the rest in the background, streaming a calm progress line.
+                let progress = weak.clone();
+                let mut on_batch = move |n: usize| {
+                    let p = progress.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = p.upgrade() {
+                            ui.set_status(format!("Catching up… {n}").into());
+                        }
+                    });
+                };
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    refresh::run_backfill(&db_path, &*secrets, &folder, 200, &mut on_batch)
+                }));
+
+                // Done: clear the status, show the full list, re-enable Refresh.
+                let w = weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = w.upgrade() {
+                        ui.set_refreshing(false);
+                        ui.set_status(SharedString::new());
+                        ui.invoke_folder_selected(ui.get_selected_folder());
                     }
                 });
             });

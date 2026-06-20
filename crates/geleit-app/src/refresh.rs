@@ -153,6 +153,36 @@ pub fn run_refresh(db_path: &str, secrets: &dyn SecretStore, folder: &str) -> Re
         .map_err(|_| "Couldn't refresh — check your connection and try again.".to_owned())
 }
 
+/// Progressively backfill the rest of `folder` (older messages) in the background, calling
+/// `on_batch` with the running count after each batch. Reads settings from the store; blocking +
+/// network → **run on a worker thread.**
+pub fn run_backfill(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    batch_size: u32,
+    on_batch: &mut dyn FnMut(usize),
+) -> Result<usize, String> {
+    let store = Store::open(db_path).map_err(|_| "Couldn't open the local mailbox.".to_owned())?;
+    let account = store
+        .list_accounts()
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No account configured yet.".to_owned())?;
+    let settings = store
+        .imap_settings(account.id)
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
+        .ok_or_else(|| "This account isn't set up for syncing.".to_owned())?;
+
+    let config = to_config(&settings);
+    runtime()?
+        .block_on(imap::backfill_folder(
+            &config, secrets, &store, account.id, folder, batch_size, on_batch,
+        ))
+        .map_err(|_| "Couldn't finish catching up — will resume next refresh.".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::build_settings;
