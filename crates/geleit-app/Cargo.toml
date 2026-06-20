@@ -7,8 +7,16 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-geleit-engine = { path = "../geleit-engine" }
-geleit-core = { path = "../geleit-core" }
+# geleit-engine is re-added in S1.9 when the UI drives sync; the read-only shell needs only the store.
+geleit-store = { version = "0.0.0", path = "../geleit-store" }
+slint = "1.16.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
-[lints]
-workspace = true
+# The UI crate can't use the workspace `unsafe_code = "forbid"`: Slint's generated code carries
+# `#[allow(unsafe_code)]`, and `forbid` cannot be overridden. We `deny` instead — still blocks
+# unsafe in our own code (we never `#[allow]` it), but lets the generated UI shim compile.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"

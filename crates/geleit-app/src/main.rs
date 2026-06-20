@@ -1,22 +1,259 @@
-//! `geleit-app` — application entrypoint.
-//!
-//! Scaffold placeholder (slice S0.1). The native Slint UI shell (ADR-0001) is added with
-//! the UI spike in slice S0.3; for now this is a minimal binary that exercises the
-//! `app → engine → core` dependency direction.
+//! `geleit-app` — the Slint shell (S1.7). Renders the local store's folders and a virtualized
+//! message list in the "Soft daylight" design (`design.md`). Reads the store only — no network on
+//! the UI path (constitution P1); sync is the engine's job, wired in later (S1.9).
 
-use geleit_engine::can_use_account;
+mod viewmodel;
 
-fn main() {
-    let demo = "user@example.com";
-    println!("geleit scaffold — {demo} usable: {}", can_use_account(demo));
+use std::rc::Rc;
+
+use geleit_store::Store;
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+
+// TODO (design polish, later slices): real line-icon for the attachment marker (design.md §7,
+// currently "[paperclip]"), bundle the Hanken Grotesk font (§3), per-account avatar initial + a
+// folder hover state, and the selected-message guide edge (arrives with selection in S1.8).
+slint::slint! {
+    import { ListView } from "std-widgets.slint";
+
+    // Soft-daylight tokens from design.md.
+    global Palette {
+        out property <color> bg: #f5f7f8;
+        out property <color> surface: #ffffff;
+        out property <color> surface-reading: #fbfaf7;
+        out property <color> text: #1f2a2e;
+        out property <color> muted: #5e7177;
+        out property <color> accent: #2e9e9b;
+        out property <color> accent-quiet: #e2f1f0;
+        out property <color> divider: #e3eaec;
+    }
+
+    struct MessageItem {
+        sender: string,
+        subject: string,
+        snippet: string,
+        date: string,
+        unread: bool,
+        attachment: bool,
+    }
+
+    export component Main inherits Window {
+        in property <string> account;
+        in property <[string]> folders;
+        in property <int> selected-folder;
+        in property <[MessageItem]> messages;
+        callback folder-selected(int);
+
+        preferred-width: 1100px;
+        preferred-height: 720px;
+        title: "GeleitMail";
+        background: Palette.bg;
+        default-font-size: 15px;
+
+        HorizontalLayout {
+            // ---- LEFT RAIL ----
+            Rectangle {
+                width: 240px;
+                background: Palette.bg;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle {
+                            width: 30px;
+                            height: 30px;
+                            border-radius: 15px;
+                            background: Palette.accent;
+                            Text { text: "A"; color: white; font-weight: 600; }
+                        }
+                        Text {
+                            text: root.account;
+                            color: Palette.text;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Rectangle { height: 12px; }
+                    for f[i] in root.folders: Rectangle {
+                        height: 40px; // design.md §9: ≥40px hit target
+                        border-radius: 10px;
+                        background: i == root.selected-folder ? Palette.accent-quiet : transparent;
+                        TouchArea { clicked => { root.folder-selected(i); } }
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            Text {
+                                text: f;
+                                color: Palette.text;
+                                vertical-alignment: center;
+                                font-weight: i == root.selected-folder ? 600 : 400;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- MESSAGE LIST ----
+            Rectangle {
+                width: 380px;
+                background: Palette.surface;
+                VerticalLayout {
+                    Rectangle {
+                        height: 52px;
+                        background: Palette.surface;
+                        HorizontalLayout {
+                            padding: 16px;
+                            Text {
+                                text: root.selected-folder < root.folders.length ? root.folders[root.selected-folder] : "";
+                                color: Palette.text;
+                                font-size: 18px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                    Rectangle { height: 1px; background: Palette.divider; }
+                    ListView {
+                        for m in root.messages: Rectangle {
+                            height: 72px;
+                            background: Palette.surface;
+                            HorizontalLayout {
+                                padding: 12px;
+                                spacing: 10px;
+                                Rectangle {
+                                    width: 10px;
+                                    Rectangle {
+                                        width: 8px;
+                                        height: 8px;
+                                        y: 6px;
+                                        border-radius: 4px;
+                                        background: m.unread ? Palette.accent : transparent;
+                                    }
+                                }
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    Text {
+                                        text: m.sender;
+                                        color: Palette.text;
+                                        font-size: 14px; // design.md §3
+                                        font-weight: m.unread ? 600 : 500;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: m.subject;
+                                        color: Palette.text;
+                                        font-weight: m.unread ? 600 : 500;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: m.snippet;
+                                        color: Palette.muted;
+                                        font-size: 13px;
+                                        overflow: elide;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: start;
+                                    Text {
+                                        text: m.date;
+                                        color: Palette.muted;
+                                        font-size: 12px;
+                                        horizontal-alignment: right;
+                                    }
+                                    Text {
+                                        text: m.attachment ? "[paperclip]" : "";
+                                        color: Palette.muted;
+                                        font-size: 12px;
+                                        horizontal-alignment: right;
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                y: parent.height - 1px;
+                                height: 1px;
+                                background: Palette.divider;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- READING PANE (placeholder until S1.8) ----
+            Rectangle {
+                background: Palette.surface-reading;
+                Rectangle { x: 0; width: 3px; background: Palette.accent; } // guide edge
+                VerticalLayout {
+                    padding: 28px;
+                    Text {
+                        text: "Select a message to read it.";
+                        color: Palette.muted;
+                    }
+                }
+            }
+        }
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use geleit_engine::can_use_account;
+fn load_messages(store: &Store, folder_id: i64) -> Vec<MessageItem> {
+    store
+        .messages_in_folder(folder_id, 1000)
+        .unwrap_or_default()
+        .iter()
+        .map(|h| {
+            let vm = viewmodel::message_vm(h);
+            MessageItem {
+                sender: vm.sender.into(),
+                subject: vm.subject.into(),
+                snippet: vm.snippet.into(),
+                date: vm.date.into(),
+                unread: vm.unread,
+                attachment: vm.attachment,
+            }
+        })
+        .collect()
+}
 
-    #[test]
-    fn app_reaches_engine() {
-        assert!(can_use_account("user@example.com"));
-    }
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = std::env::var("GELEIT_DB").unwrap_or_else(|_| "geleit.db".to_owned());
+    let store = Store::open(&db)?;
+
+    let account = store.list_accounts()?.into_iter().next();
+    let (account_label, folder_names, folder_ids) = match &account {
+        Some(a) => {
+            let folders = store.folders_for_account(a.id)?;
+            (
+                a.email.clone(),
+                folders
+                    .iter()
+                    .map(|f| SharedString::from(f.name.as_str()))
+                    .collect::<Vec<_>>(),
+                folders.iter().map(|f| f.id).collect::<Vec<_>>(),
+            )
+        }
+        None => ("(no account)".to_owned(), Vec::new(), Vec::new()),
+    };
+
+    let ui = Main::new()?;
+    ui.set_account(account_label.into());
+    ui.set_folders(ModelRc::new(VecModel::from(folder_names)));
+    ui.set_selected_folder(0);
+
+    let store = Rc::new(store);
+    let initial = folder_ids
+        .first()
+        .map(|&fid| load_messages(&store, fid))
+        .unwrap_or_default();
+    ui.set_messages(ModelRc::new(VecModel::from(initial)));
+
+    let weak = ui.as_weak();
+    let store_cb = store.clone();
+    ui.on_folder_selected(move |idx| {
+        let (Some(ui), Some(&fid)) = (weak.upgrade(), folder_ids.get(idx as usize)) else {
+            return;
+        };
+        ui.set_selected_folder(idx);
+        ui.set_messages(ModelRc::new(VecModel::from(load_messages(&store_cb, fid))));
+    });
+
+    ui.run()?;
+    Ok(())
 }

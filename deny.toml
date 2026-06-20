@@ -26,6 +26,11 @@ allow = [
     "CC0-1.0",
     "Zlib", # foldhash (via rusqlite) — permissive, MIT-compatible
     "CDLA-Permissive-2.0", # webpki-roots — Mozilla CA root *data* (permissive data license)
+    "BSL-1.0", # Boost license (a Slint/winit transitive dep) — permissive
+    # Slint is tri-licensed (GPL-3.0 OR Royalty-free OR commercial). We use it under the
+    # ROYALTY-FREE license (ADR-0007), so we allow only that LicenseRef — GPL-3.0 is deliberately
+    # NOT allowed, so the gate forbids accidentally taking the copyleft path. Attribution required.
+    "LicenseRef-Slint-Royalty-free-2.0",
 ]
 
 [bans]
