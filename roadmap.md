@@ -34,7 +34,7 @@ app-password account; OAuth app-registration paperwork starts at M0 (weeks of le
 
 ---
 
-## M0 — Foundations & feasibility
+## M0 — Foundations & feasibility — ✅ complete
 **Outcome:** commit to the native UI stack *with evidence*, on a working scaffold — or pivot
 before building on sand. *(Infrastructure — delivers no user stories directly.)*
 
@@ -46,10 +46,16 @@ before building on sand. *(Infrastructure — delivers no user stories directly.
 - **S0.5** Platform-abstraction seams for keychain / HTML render / OAuth; Linux as primary dev OS.
 - **S0.6** *(parallel admin track)* begin Google + Microsoft OAuth app-registration paperwork.
 
-## M1 — Thin slice: read one account
-**Delivers:** ACC-3, ACC-4*, SYNC-1*, SYNC-2, READ-1, READ-2, READ-3, READ-6, READ-7, SEC-2.
+## M1 — Thin slice: read one account — ✅ complete
+**Delivers:** ACC-3*, ACC-4*, SYNC-1*, SYNC-2, READ-1, READ-2, READ-3, READ-6, READ-7, SEC-2*.
 **Outcome:** open the app, connect one IMAP account, see your folders and message list, read a
-message in plaintext, and refresh — the whole stack proven end-to-end.
+message in plaintext, and refresh — the whole stack proven end-to-end, live-verified against Dovecot.
+
+> **Carried forward (the `*` items — the dev bridge):** account setup is via **environment config**,
+> not a UI (real account-setup UI is **M7**); the keychain is the **seam + in-memory double**, not a
+> real OS backend yet (SEC-2 backend → M2/M7); read-state is **local only** (server write-back →
+> M6); the folder list doesn't live-update after refresh (→ next launch / M2). These are deliberate,
+> documented deferrals, not gaps in the slices that shipped.
 
 - **S1.1** **Visual design language** → `design.md` (type, color/theme tokens for light+dark,
   spacing/density, layout & navigation shape, component look, iconography, motion). Defined
