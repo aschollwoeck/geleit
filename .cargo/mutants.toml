@@ -4,4 +4,6 @@
 # test against a local Dovecot (run with `--ignored`), which `cargo mutants` does not execute —
 # so mutants there survive spuriously, not because the code is untested. The reusable logic it
 # relies on (e.g. `Store::upsert_folder`) lives in `geleit-store` and stays mutation-tested.
-exclude_globs = ["**/imap.rs"]
+# Also exclude the app's main.rs: it is the Slint UI declaration + wiring (rendering, not logic);
+# the pure display mapping lives in `geleit-app/src/viewmodel.rs` and stays mutation-tested.
+exclude_globs = ["**/imap.rs", "**/geleit-app/src/main.rs"]

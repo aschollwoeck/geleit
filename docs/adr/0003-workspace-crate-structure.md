@@ -22,6 +22,10 @@ CI check (`cargo tree`, `scripts/check-boundary.sh`) asserts it as belt-and-susp
 Shared settings live in `[workspace.package]` (edition 2021, MIT, rust-version 1.96) and
 `[workspace.lints]` (`unsafe_code = forbid`, clippy `all = warn`); CI enforces `clippy -D warnings`.
 
+**Exception (S1.7):** `geleit-app` overrides `unsafe_code` to `deny` (not `forbid`) because Slint's
+generated UI code carries `#[allow(unsafe_code)]`, which `forbid` cannot accommodate. `deny` still
+blocks unsafe in our own code (we never `#[allow]` it); the relaxation is confined to the UI crate.
+
 ## Consequences
 - New crates join `crates/`, opt into workspace lints, and the engine/UI boundary stays structural.
 - `geleit-app` remains a placeholder binary until the Slint UI lands (S0.3); **Slint is not a
