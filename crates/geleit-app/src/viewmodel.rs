@@ -102,6 +102,8 @@ mod tests {
         MessageHeader {
             id: 1,
             uid: Some(1),
+            message_id: None,
+            in_reply_to: None,
             subject: None,
             from_name: None,
             from_addr: None,
