@@ -19,4 +19,9 @@ name = "geleit-engine"
 version = "0.0.0"
 dependencies = [
  "geleit-core",
+ "geleit-platform",
 ]
+
+[[package]]
+name = "geleit-platform"
+version = "0.0.0"
