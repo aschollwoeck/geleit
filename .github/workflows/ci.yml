@@ -18,6 +18,8 @@ jobs:
           toolchain: 1.96.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Slint build deps
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -53,6 +55,8 @@ jobs:
         with:
           toolchain: 1.96.0
       - uses: Swatinem/rust-cache@v2
+      - name: Slint build deps
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
       - name: Install cargo-mutants
         uses: taiki-e/install-action@v2
         with:
