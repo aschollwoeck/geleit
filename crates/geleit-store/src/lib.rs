@@ -175,13 +175,28 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Add a folder under an account; returns its id.
+    /// Add a folder under an account; returns its id. Errors if it already exists.
     pub fn add_folder(&self, account_id: i64, name: &str) -> Result<i64, StoreError> {
         self.conn.execute(
             "INSERT INTO folder (account_id, name) VALUES (?1, ?2)",
             (account_id, name),
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Insert a folder if absent (idempotent — for re-syncing the folder list); returns the
+    /// folder's id whether it was just inserted or already present.
+    pub fn upsert_folder(&self, account_id: i64, name: &str) -> Result<i64, StoreError> {
+        self.conn.execute(
+            "INSERT INTO folder (account_id, name) VALUES (?1, ?2) \
+             ON CONFLICT(account_id, name) DO NOTHING",
+            (account_id, name),
+        )?;
+        Ok(self.conn.query_row(
+            "SELECT id FROM folder WHERE account_id = ?1 AND name = ?2",
+            (account_id, name),
+            |r| r.get(0),
+        )?)
     }
 
     /// Folders for an account, ordered by name.
@@ -306,6 +321,20 @@ mod tests {
             .execute("DELETE FROM account WHERE id = ?1", [acc])
             .unwrap();
         assert_eq!(s.folders_for_account(acc).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn upsert_folder_is_idempotent_and_scoped() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.add_account("a@example.com", None).unwrap();
+        let b = s.add_account("b@example.com", None).unwrap();
+        let id1 = s.upsert_folder(a, "INBOX").unwrap();
+        let id2 = s.upsert_folder(a, "INBOX").unwrap(); // again → same row, no error
+        assert_eq!(id1, id2);
+        assert_eq!(s.folders_for_account(a).unwrap().len(), 1);
+        // same name under a different account is a distinct folder
+        s.upsert_folder(b, "INBOX").unwrap();
+        assert_eq!(s.folders_for_account(b).unwrap().len(), 1);
     }
 
     #[test]

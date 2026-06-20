@@ -8,8 +8,9 @@ Scaffold established in slice **S0.1**. See ADR-0002 (CI), ADR-0003 (crate struc
   OAuth loopback, HTML render host) with testable doubles (ADR-0004).
 - **`geleit-store`** — the local SQLite store: account-scoped schema + migrations (ADR-0005).
   `rusqlite` (bundled SQLite). Encryption at rest comes in M2.
-- **`geleit-engine`** — engine facade; depends on `geleit-core` + `geleit-platform`. Future home
-  of sync / MIME / search / transport / auth (and will use `geleit-store`).
+- **`geleit-engine`** — engine facade; depends on `geleit-core`, `geleit-platform`, `geleit-store`.
+  Home of sync / MIME / search / transport / auth. The `imap` module connects over TLS
+  (`async-imap` + `tokio` + `rustls`/`ring`, ADR-0006) and lists/persists folders.
 - **`geleit-app`** — binary entrypoint; depends on `geleit-engine` + `geleit-core`. Becomes the
   Slint shell (ADR-0001).
 
