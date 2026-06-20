@@ -63,6 +63,14 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX message_folder_date ON message(folder_id, date DESC);
     ",
+    // 2 — per-account IMAP connection settings (S1.10, manual account config). Nullable so a row
+    // can exist before settings are known; `imap_allow_invalid` is a dev-only self-signed escape.
+    "
+    ALTER TABLE account ADD COLUMN imap_host TEXT;
+    ALTER TABLE account ADD COLUMN imap_port INTEGER;
+    ALTER TABLE account ADD COLUMN imap_username TEXT;
+    ALTER TABLE account ADD COLUMN imap_allow_invalid INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
 
 /// An account row.
@@ -71,6 +79,16 @@ pub struct Account {
     pub id: i64,
     pub email: String,
     pub display_name: Option<String>,
+}
+
+/// Per-account IMAP connection settings. `allow_invalid_certs` is a dev-only escape for self-signed
+/// servers (never set for real accounts); the password lives in the secret store, not here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImapSettings {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub allow_invalid_certs: bool,
 }
 
 /// A folder/mailbox row.
@@ -175,6 +193,87 @@ impl Store {
             (email, display_name),
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Add an account together with its IMAP settings; returns its id.
+    pub fn add_imap_account(
+        &self,
+        email: &str,
+        display_name: Option<&str>,
+        imap: &ImapSettings,
+    ) -> Result<i64, StoreError> {
+        if !geleit_core::looks_like_email(email) {
+            return Err(StoreError::InvalidEmail);
+        }
+        self.conn.execute(
+            "INSERT INTO account \
+             (email, display_name, created_at, imap_host, imap_port, imap_username, imap_allow_invalid) \
+             VALUES (?1, ?2, strftime('%s', 'now'), ?3, ?4, ?5, ?6)",
+            (
+                email,
+                display_name,
+                &imap.host,
+                imap.port,
+                &imap.username,
+                imap.allow_invalid_certs,
+            ),
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Replace an account's IMAP settings (used for reconnect / re-config).
+    pub fn update_imap_settings(
+        &self,
+        account_id: i64,
+        imap: &ImapSettings,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE account SET imap_host = ?2, imap_port = ?3, imap_username = ?4, \
+             imap_allow_invalid = ?5 WHERE id = ?1",
+            (
+                account_id,
+                &imap.host,
+                imap.port,
+                &imap.username,
+                imap.allow_invalid_certs,
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// An account's IMAP settings, or `None` if not configured (host unset).
+    pub fn imap_settings(&self, account_id: i64) -> Result<Option<ImapSettings>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT imap_host, imap_port, imap_username, imap_allow_invalid \
+                 FROM account WHERE id = ?1",
+                [account_id],
+                |r| {
+                    let host: Option<String> = r.get(0)?;
+                    let port: Option<i64> = r.get(1)?;
+                    let username: Option<String> = r.get(2)?;
+                    let allow_invalid: bool = r.get(3)?;
+                    Ok(host
+                        .zip(port)
+                        .zip(username)
+                        .map(|((host, port), username)| ImapSettings {
+                            host,
+                            port: port as u16,
+                            username,
+                            allow_invalid_certs: allow_invalid,
+                        }))
+                },
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Delete an account and everything under it (folders/messages/bodies cascade).
+    pub fn delete_account(&self, account_id: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM account WHERE id = ?1", [account_id])?;
+        Ok(())
     }
 
     /// Fetch an account by email, or `None` if absent.
@@ -689,6 +788,54 @@ mod tests {
         assert!(s.messages_in_folder(fld, 1).unwrap()[0].seen);
         s.set_seen(mid, false).unwrap();
         assert!(!s.messages_in_folder(fld, 1).unwrap()[0].seen);
+    }
+
+    #[test]
+    fn imap_settings_roundtrip_update_and_default_none() {
+        let s = Store::open_in_memory().unwrap();
+        // plain account has no imap settings
+        let plain = s.add_account("plain@example.com", None).unwrap();
+        assert_eq!(s.imap_settings(plain).unwrap(), None);
+
+        let settings = ImapSettings {
+            host: "imap.example.com".to_owned(),
+            port: 993,
+            username: "me@example.com".to_owned(),
+            allow_invalid_certs: false,
+        };
+        let acc = s
+            .add_imap_account("me@example.com", Some("Me"), &settings)
+            .unwrap();
+        assert_eq!(s.imap_settings(acc).unwrap(), Some(settings));
+
+        let updated = ImapSettings {
+            host: "imap2.example.com".to_owned(),
+            port: 143,
+            username: "me2".to_owned(),
+            allow_invalid_certs: true,
+        };
+        s.update_imap_settings(acc, &updated).unwrap();
+        assert_eq!(s.imap_settings(acc).unwrap(), Some(updated));
+    }
+
+    #[test]
+    fn delete_account_cascades() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let fld = s.upsert_folder(acc, "INBOX").unwrap();
+        s.upsert_message(
+            acc,
+            fld,
+            &NewMessage {
+                uid: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        s.delete_account(acc).unwrap();
+        assert!(s.list_accounts().unwrap().is_empty());
+        assert!(s.folders_for_account(acc).unwrap().is_empty());
+        assert!(s.messages_in_folder(fld, 10).unwrap().is_empty());
     }
 
     #[test]

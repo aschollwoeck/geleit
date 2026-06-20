@@ -1,28 +1,35 @@
-//! Manual refresh: drives the engine's IMAP sync. `run_refresh` does network + blocking work and
-//! is meant to run on a **worker thread** (never the UI thread, P1). Excluded from mutation testing
-//! (network/integration glue, like the engine's `imap.rs`); `build_imap_config` is unit-tested.
+//! Drives the engine's IMAP sync for **add-account** (`run_setup`) and **refresh** (`run_refresh`).
+//! Both do network + blocking work and are meant to run on a **worker thread** (never the UI thread,
+//! P1). Excluded from mutation testing (network/integration glue, like the engine's `imap.rs`); the
+//! pure `build_settings` is unit-tested.
 //!
-//! Connection settings come from the environment for now — the dev bridge until account-setup UI
-//! (M7) and a real OS keychain land. The in-memory secret store here is dev-only.
+//! Connection settings are persisted per-account in the store; the password lives in a
+//! session-shared secret store (still in-memory — a real OS keychain is SEC-2, a later milestone).
 
 use geleit_engine::imap::{self, ImapConfig};
 use geleit_platform::secret::InMemorySecretStore;
-use geleit_store::Store;
+use geleit_store::{ImapSettings, Store, StoreError};
 
-/// Build and validate an [`ImapConfig`] from raw parts. Pure — unit-tested.
-pub fn build_imap_config(
+/// Validate raw Add-account form fields into `(email, ImapSettings)`. Pure — unit-tested. (Email
+/// format is checked by the store on insert; here we reject empty host/username and bad ports.)
+pub fn build_settings(
+    email: &str,
     host: &str,
     port: &str,
     username: &str,
     allow_invalid_certs: bool,
-) -> Result<ImapConfig, String> {
+) -> Result<(String, ImapSettings), String> {
+    let email = email.trim();
     let host = host.trim();
     let username = username.trim();
+    if email.is_empty() {
+        return Err("Enter your email address.".to_owned());
+    }
     if host.is_empty() {
-        return Err("No mail server set (GELEIT_IMAP_HOST).".to_owned());
+        return Err("Enter your mail server (IMAP host).".to_owned());
     }
     if username.is_empty() {
-        return Err("No username set (GELEIT_IMAP_USER).".to_owned());
+        return Err("Enter your username.".to_owned());
     }
     let port: u16 = match port.trim() {
         "" => 993,
@@ -30,34 +37,101 @@ pub fn build_imap_config(
             .parse()
             .ok()
             .filter(|&n| n != 0)
-            .ok_or_else(|| "Invalid port (GELEIT_IMAP_PORT).".to_owned())?,
+            .ok_or_else(|| "Enter a valid port (1–65535).".to_owned())?,
     };
-    Ok(ImapConfig {
-        host: host.to_owned(),
-        port,
-        username: username.to_owned(),
-        allow_invalid_certs,
-    })
+    Ok((
+        email.to_owned(),
+        ImapSettings {
+            host: host.to_owned(),
+            port,
+            username: username.to_owned(),
+            allow_invalid_certs,
+        },
+    ))
 }
 
-/// Read connection settings + password from the environment (dev bridge — see module docs).
-pub fn config_from_env() -> Result<(ImapConfig, String), String> {
-    let host = std::env::var("GELEIT_IMAP_HOST").unwrap_or_default();
-    let port = std::env::var("GELEIT_IMAP_PORT").unwrap_or_default();
-    let username = std::env::var("GELEIT_IMAP_USER").unwrap_or_default();
-    let password = std::env::var("GELEIT_IMAP_PASSWORD").unwrap_or_default();
-    let insecure = std::env::var("GELEIT_IMAP_INSECURE").is_ok();
-    let config = build_imap_config(&host, &port, &username, insecure)?;
-    Ok((config, password))
+fn to_config(s: &ImapSettings) -> ImapConfig {
+    ImapConfig {
+        host: s.host.clone(),
+        port: s.port,
+        username: s.username.clone(),
+        allow_invalid_certs: s.allow_invalid_certs,
+    }
 }
 
-/// Sync the first account (folder list + `folder`'s envelopes and bodies) into the store at
-/// `db_path`. Blocking + network: **run on a worker thread.** Returns a calm, PII-free message on
-/// failure.
+fn runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| "Couldn't start the sync runtime.".to_owned())
+}
+
+/// Add (or reconnect) an account: persist its settings, store the password in the shared secrets,
+/// and do the first sync of the inbox. Blocking + network: **run on a worker thread.** A *newly*
+/// created account is rolled back if the first connection fails, so a bad attempt leaves no trace.
+pub fn run_setup(
+    db_path: &str,
+    secrets: &InMemorySecretStore,
+    email: &str,
+    display_name: Option<&str>,
+    settings: ImapSettings,
+    password: &str,
+) -> Result<(), String> {
+    let store = Store::open(db_path).map_err(|_| "Couldn't open the local mailbox.".to_owned())?;
+    // Single-account for now (M1): if an account already exists this is a reconnect/reconfigure —
+    // update it rather than risk creating a hidden second account when the email field is edited.
+    let existing = store
+        .list_accounts()
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
+        .into_iter()
+        .next();
+    let (account_id, is_new) = match existing {
+        Some(a) => {
+            store
+                .update_imap_settings(a.id, &settings)
+                .map_err(|_| "Couldn't save the account.".to_owned())?;
+            (a.id, false)
+        }
+        None => {
+            let id = store
+                .add_imap_account(email, display_name, &settings)
+                .map_err(|e| match e {
+                    StoreError::InvalidEmail => "Enter a valid email address.".to_owned(),
+                    _ => "Couldn't save the account.".to_owned(),
+                })?;
+            (id, true)
+        }
+    };
+
+    if imap::store_password(secrets, &settings.username, password.as_bytes()).is_err() {
+        if is_new {
+            let _ = store.delete_account(account_id); // don't leave a half-created account
+        }
+        return Err("Couldn't store the password.".to_owned());
+    }
+
+    let config = to_config(&settings);
+    let synced = runtime()?.block_on(async {
+        imap::sync_folders(&config, secrets, &store, account_id).await?;
+        imap::sync_envelopes(&config, secrets, &store, account_id, "INBOX", 200).await?;
+        imap::sync_bodies(&config, secrets, &store, account_id, "INBOX", 200).await?;
+        Ok::<(), imap::ImapError>(())
+    });
+    if synced.is_err() {
+        if is_new {
+            let _ = store.delete_account(account_id); // roll back a half-created account
+        }
+        // engine error discarded (that discard is the P2 safeguard); calm, actionable message (§10)
+        return Err("Couldn't connect — check your details and try again.".to_owned());
+    }
+    Ok(())
+}
+
+/// Sync the first account's `folder` (+ folder list), reading settings from the store and the
+/// password from the shared secrets. Blocking + network: **run on a worker thread.**
 pub fn run_refresh(
     db_path: &str,
-    config: ImapConfig,
-    password: &str,
+    secrets: &InMemorySecretStore,
     folder: &str,
 ) -> Result<(), String> {
     let store = Store::open(db_path).map_err(|_| "Couldn't open the local mailbox.".to_owned())?;
@@ -67,89 +141,108 @@ pub fn run_refresh(
         .into_iter()
         .next()
         .ok_or_else(|| "No account configured yet.".to_owned())?;
+    let settings = store
+        .imap_settings(account.id)
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
+        .ok_or_else(|| "This account isn't set up for syncing.".to_owned())?;
 
-    let secrets = InMemorySecretStore::new();
-    imap::store_password(&secrets, &config.username, password.as_bytes())
-        .map_err(|_| "Couldn't prepare credentials.".to_owned())?;
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| "Couldn't start the sync runtime.".to_owned())?;
-
-    runtime
+    let config = to_config(&settings);
+    runtime()?
         .block_on(async {
-            imap::sync_folders(&config, &secrets, &store, account.id).await?;
-            imap::sync_envelopes(&config, &secrets, &store, account.id, folder, 200).await?;
-            imap::sync_bodies(&config, &secrets, &store, account.id, folder, 200).await?;
+            imap::sync_folders(&config, secrets, &store, account.id).await?;
+            imap::sync_envelopes(&config, secrets, &store, account.id, folder, 200).await?;
+            imap::sync_bodies(&config, secrets, &store, account.id, folder, 200).await?;
             Ok::<(), imap::ImapError>(())
         })
-        // The engine error is discarded entirely (that discard — not Display — is the P2 safeguard);
-        // show a calm, actionable message instead (design.md §10).
         .map_err(|_| "Couldn't refresh — check your connection and try again.".to_owned())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_imap_config;
+    use super::build_settings;
 
     #[test]
-    fn valid_config() {
-        let c = build_imap_config(" mail.example.com ", "993", " me ", false).unwrap();
-        assert_eq!(c.host, "mail.example.com");
-        assert_eq!(c.port, 993);
-        assert_eq!(c.username, "me");
-        assert!(!c.allow_invalid_certs);
+    fn valid_settings() {
+        let (email, s) = build_settings(
+            " me@example.com ",
+            " mail.example.com ",
+            "993",
+            " me ",
+            false,
+        )
+        .unwrap();
+        assert_eq!(email, "me@example.com");
+        assert_eq!(s.host, "mail.example.com");
+        assert_eq!(s.port, 993);
+        assert_eq!(s.username, "me");
+        assert!(!s.allow_invalid_certs);
     }
 
     #[test]
     fn empty_port_defaults_to_993() {
-        assert_eq!(build_imap_config("h", "", "u", false).unwrap().port, 993);
+        assert_eq!(
+            build_settings("me@x.com", "h", "", "u", false)
+                .unwrap()
+                .1
+                .port,
+            993
+        );
     }
 
     #[test]
-    fn rejects_empty_host_and_user() {
-        assert!(build_imap_config("", "993", "u", false).is_err());
-        assert!(build_imap_config("h", "993", "  ", false).is_err());
+    fn rejects_empty_fields() {
+        assert!(build_settings("", "h", "993", "u", false).is_err());
+        assert!(build_settings("me@x.com", "", "993", "u", false).is_err());
+        assert!(build_settings("me@x.com", "h", "993", " ", false).is_err());
     }
 
     #[test]
     fn rejects_bad_port() {
-        assert!(build_imap_config("h", "0", "u", false).is_err());
-        assert!(build_imap_config("h", "70000", "u", false).is_err());
-        assert!(build_imap_config("h", "abc", "u", false).is_err());
+        assert!(build_settings("me@x.com", "h", "0", "u", false).is_err());
+        assert!(build_settings("me@x.com", "h", "70000", "u", false).is_err());
+        assert!(build_settings("me@x.com", "h", "abc", "u", false).is_err());
     }
 
     #[test]
     fn passes_insecure_flag_through() {
         assert!(
-            build_imap_config("h", "993", "u", true)
+            build_settings("me@x.com", "h", "993", "u", true)
                 .unwrap()
+                .1
                 .allow_invalid_certs
         );
     }
 
-    /// End-to-end refresh against a local Dovecot: an account in the store + `run_refresh` →
-    /// INBOX gets messages. Exercises the real tokio runtime + engine sync the UI button drives.
+    /// End-to-end against a local Dovecot: `run_setup` creates the account + syncs INBOX, then
+    /// `run_refresh` reads the stored settings + session password and re-syncs.
     #[cfg(feature = "dangerous-tls")]
     #[test]
     #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
-    fn live_run_refresh_syncs_inbox() {
-        use super::run_refresh;
-        use geleit_store::Store;
+    fn live_setup_then_refresh() {
+        use super::{run_refresh, run_setup};
+        use geleit_platform::secret::InMemorySecretStore;
+        use geleit_store::{ImapSettings, Store};
 
-        let path = std::env::temp_dir().join("geleit-refresh-test.db");
+        let path = std::env::temp_dir().join("geleit-setup-test.db");
         let path = path.to_str().unwrap();
         let _ = std::fs::remove_file(path);
 
-        let store = Store::open(path).unwrap();
-        store
-            .add_account("geleittest@localhost", Some("geleittest"))
-            .unwrap();
-        drop(store);
-
-        let config = build_imap_config("127.0.0.1", "993", "geleittest", true).unwrap();
-        run_refresh(path, config, "testpass123", "INBOX").expect("refresh");
+        let secrets = InMemorySecretStore::new();
+        let settings = ImapSettings {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        run_setup(
+            path,
+            &secrets,
+            "geleittest@localhost",
+            Some("geleittest"),
+            settings,
+            "testpass123",
+        )
+        .expect("setup");
 
         let store = Store::open(path).unwrap();
         let acc = store.list_accounts().unwrap()[0].id;
@@ -161,6 +254,10 @@ mod tests {
             .expect("INBOX synced")
             .id;
         assert!(!store.messages_in_folder(inbox, 10).unwrap().is_empty());
+        drop(store);
+
+        // refresh reads settings from the store + password from the shared secrets
+        run_refresh(path, &secrets, "INBOX").expect("refresh");
         let _ = std::fs::remove_file(path);
     }
 }

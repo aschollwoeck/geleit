@@ -5,8 +5,12 @@
 mod refresh;
 mod viewmodel;
 
+use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use geleit_engine::imap;
+use geleit_platform::secret::InMemorySecretStore;
 use geleit_store::Store;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
@@ -14,7 +18,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 // currently "[paperclip]"), bundle the Hanken Grotesk font (§3), per-account avatar initial + a
 // folder hover state, and the selected-message guide edge (arrives with selection in S1.8).
 slint::slint! {
-    import { ListView, ScrollView } from "std-widgets.slint";
+    import { ListView, ScrollView, LineEdit } from "std-widgets.slint";
 
     // Soft-daylight tokens from design.md.
     global Palette {
@@ -53,10 +57,22 @@ slint::slint! {
         in property <string> r-body;
         in property <bool> refreshing;
         in property <string> status; // non-empty = error to show
+        // add-account form
+        in property <bool> needs-setup;
+        in-out property <string> f-email;
+        in-out property <string> f-name;
+        in-out property <string> f-host;
+        in-out property <string> f-port;
+        in-out property <string> f-user;
+        in-out property <string> f-pass;
+        in property <bool> setup-busy;
+        in property <string> setup-error;
         callback folder-selected(int);
         callback message-selected(MessageItem);
         callback mark-unread(int);
         callback refresh();
+        callback connect();
+        callback reload();
 
         preferred-width: 1100px;
         preferred-height: 720px;
@@ -64,7 +80,8 @@ slint::slint! {
         background: Palette.bg;
         default-font-size: 15px;
 
-        HorizontalLayout {
+        // ---- MAIN VIEW (an account exists) ----
+        if !root.needs-setup: HorizontalLayout {
             // ---- LEFT RAIL ----
             Rectangle {
                 width: 240px;
@@ -284,6 +301,77 @@ slint::slint! {
                 }
             }
         }
+
+        // ---- ADD-ACCOUNT FORM (no account yet, or reconnect) ----
+        if root.needs-setup: Rectangle {
+            background: Palette.bg;
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 440px;
+                        background: Palette.surface;
+                        border-radius: 14px;
+                        Rectangle { x: 0; width: 3px; background: Palette.accent; } // guide edge
+                        VerticalLayout {
+                            padding: 28px;
+                            spacing: 10px;
+                            Text {
+                                text: "Add your account";
+                                color: Palette.text;
+                                font-size: 20px;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: "Connect over IMAP. Your details stay on this device.";
+                                color: Palette.muted;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+                            Text { text: "Email"; color: Palette.muted; font-size: 12px; }
+                            LineEdit { placeholder-text: "you@example.com"; text <=> root.f-email; }
+                            Text { text: "Display name (optional)"; color: Palette.muted; font-size: 12px; }
+                            LineEdit { placeholder-text: "Your name"; text <=> root.f-name; }
+                            Text { text: "IMAP server"; color: Palette.muted; font-size: 12px; }
+                            LineEdit { placeholder-text: "imap.example.com"; text <=> root.f-host; }
+                            Text { text: "Port"; color: Palette.muted; font-size: 12px; }
+                            LineEdit { placeholder-text: "993"; text <=> root.f-port; }
+                            Text { text: "Username"; color: Palette.muted; font-size: 12px; }
+                            LineEdit { placeholder-text: "usually your email"; text <=> root.f-user; }
+                            Text { text: "Password"; color: Palette.muted; font-size: 12px; }
+                            LineEdit { input-type: password; text <=> root.f-pass; }
+                            if root.setup-error != "": Text {
+                                text: root.setup-error;
+                                color: Palette.danger-strong;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+                            Rectangle {
+                                height: 40px;
+                                border-radius: 8px;
+                                background: Palette.accent-strong;
+                                opacity: root.setup-busy ? 0.6 : 1.0;
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: root.setup-busy ? "Connecting…" : "Connect";
+                                        color: white;
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                TouchArea {
+                                    enabled: !root.setup-busy;
+                                    clicked => { root.connect(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -321,40 +409,74 @@ fn flip_unread(model: &VecModel<MessageItem>, id: i32, unread: bool) {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = std::env::var("GELEIT_DB").unwrap_or_else(|_| "geleit.db".to_owned());
-    let store = Store::open(&db)?;
-
-    let account = store.list_accounts()?.into_iter().next();
-    let (account_label, folder_names, folder_ids) = match &account {
-        Some(a) => {
-            let folders = store.folders_for_account(a.id)?;
-            (
-                a.email.clone(),
+/// Re-read account / folders / current-folder messages into the UI (UI thread only). Sets
+/// `needs-setup` when there is no account, so the Add-account form shows.
+fn reload_all(
+    ui: &Main,
+    store: &Store,
+    folders_model: &VecModel<SharedString>,
+    folder_ids: &RefCell<Vec<i64>>,
+    messages: &VecModel<MessageItem>,
+) {
+    ui.set_status(SharedString::new()); // clear any stale main-view banner
+    match store
+        .list_accounts()
+        .ok()
+        .and_then(|a| a.into_iter().next())
+    {
+        Some(acc) => {
+            ui.set_needs_setup(false);
+            ui.set_account(acc.email.into());
+            let folders = store.folders_for_account(acc.id).unwrap_or_default();
+            folders_model.set_vec(
                 folders
                     .iter()
                     .map(|f| SharedString::from(f.name.as_str()))
                     .collect::<Vec<_>>(),
-                folders.iter().map(|f| f.id).collect::<Vec<_>>(),
-            )
+            );
+            *folder_ids.borrow_mut() = folders.iter().map(|f| f.id).collect();
+            ui.set_selected_folder(0);
+            ui.set_selected_message(0);
+            let first = folder_ids.borrow().first().copied().unwrap_or(-1);
+            messages.set_vec(load_messages(store, first));
         }
-        None => ("(no account)".to_owned(), Vec::new(), Vec::new()),
-    };
+        None => {
+            ui.set_needs_setup(true);
+            ui.set_account(SharedString::new());
+            folders_model.set_vec(Vec::new());
+            folder_ids.borrow_mut().clear();
+            messages.set_vec(Vec::new());
+        }
+    }
+}
 
-    // plain-String folder names for the refresh worker (the SharedString model is UI-thread only)
-    let folder_name_strs: Vec<String> = folder_names.iter().map(ToString::to_string).collect();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = std::env::var("GELEIT_DB").unwrap_or_else(|_| "geleit.db".to_owned());
+    let store = Rc::new(Store::open(&db)?);
+    // Session-shared secret store (in-memory; real OS keychain is SEC-2). Send+Sync → workers share it.
+    let secrets = Arc::new(InMemorySecretStore::new());
 
     let ui = Main::new()?;
-    ui.set_account(account_label.into());
-    ui.set_folders(ModelRc::new(VecModel::from(folder_names)));
-    ui.set_selected_folder(0);
-
-    let store = Rc::new(store);
-    let folder_ids = Rc::new(folder_ids);
-
-    let initial_folder = folder_ids.first().copied().unwrap_or(-1);
-    let messages = Rc::new(VecModel::from(load_messages(&store, initial_folder)));
+    let folders_model = Rc::new(VecModel::<SharedString>::default());
+    let folder_ids = Rc::new(RefCell::new(Vec::<i64>::new()));
+    let messages = Rc::new(VecModel::<MessageItem>::default());
+    ui.set_folders(ModelRc::from(folders_model.clone()));
     ui.set_messages(ModelRc::from(messages.clone()));
+
+    // full reload (also the initial load) — reused by setup success
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let fm = folders_model.clone();
+        let fids = folder_ids.clone();
+        let msgs = messages.clone();
+        ui.on_reload(move || {
+            if let Some(ui) = weak.upgrade() {
+                reload_all(&ui, &store, &fm, &fids, &msgs);
+            }
+        });
+    }
+    ui.invoke_reload();
 
     // folder click → load that folder's list; clear the open message
     {
@@ -363,7 +485,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let fids = folder_ids.clone();
         let model = messages.clone();
         ui.on_folder_selected(move |idx| {
-            let (Some(ui), Some(&fid)) = (weak.upgrade(), fids.get(idx as usize)) else {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(fid) = fids.borrow().get(idx as usize).copied() else {
                 return;
             };
             ui.set_selected_folder(idx);
@@ -409,34 +532,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let db_path = db.clone();
-        let folder_names = folder_name_strs;
+        let store = store.clone();
+        let secrets = secrets.clone();
+        let folders_model = folders_model.clone();
         ui.on_refresh(move || {
             let Some(ui) = weak.upgrade() else { return };
             if ui.get_refreshing() {
                 return; // already in flight
             }
-            let (config, password) = match refresh::config_from_env() {
-                Ok(v) => v,
-                Err(e) => {
-                    ui.set_status(e.into());
-                    return;
-                }
+            let Some(account) = store
+                .list_accounts()
+                .ok()
+                .and_then(|a| a.into_iter().next())
+            else {
+                ui.set_status("No account configured yet.".into());
+                return;
             };
-            // sync (and reload) the folder the user is looking at; default to INBOX
-            let folder = folder_names
-                .get(ui.get_selected_folder() as usize)
-                .cloned()
+            let Some(settings) = store.imap_settings(account.id).ok().flatten() else {
+                ui.set_status("This account isn't set up for syncing.".into());
+                return;
+            };
+            // post-restart: no session password → re-show the form pre-filled to reconnect
+            if !imap::has_password(&*secrets, &settings.username).unwrap_or(false) {
+                ui.set_f_email(account.email.clone().into());
+                ui.set_f_name(account.display_name.clone().unwrap_or_default().into());
+                ui.set_f_host(settings.host.clone().into());
+                ui.set_f_port(settings.port.to_string().into());
+                ui.set_f_user(settings.username.clone().into());
+                ui.set_f_pass(SharedString::new());
+                ui.set_setup_error("Enter your password to reconnect.".into());
+                ui.set_needs_setup(true);
+                return;
+            }
+            let folder = folders_model
+                .row_data(ui.get_selected_folder() as usize)
+                .map(|s| s.to_string())
                 .unwrap_or_else(|| "INBOX".to_owned());
             ui.set_refreshing(true);
             ui.set_status(SharedString::new());
 
             let weak = weak.clone();
             let db_path = db_path.clone();
+            let secrets = secrets.clone();
             std::thread::spawn(move || {
-                // Nothing !Send crosses here: only `weak` (Send) + plain data; the result post too.
-                // catch_unwind so a worker panic still clears `refreshing` (never a stuck button).
+                // Nothing !Send crosses: only `weak` + plain data + the Arc secrets (Send+Sync).
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    refresh::run_refresh(&db_path, config, &password, &folder)
+                    refresh::run_refresh(&db_path, &secrets, &folder)
                 }))
                 .unwrap_or_else(|_| Err("Couldn't refresh — something went wrong.".to_owned()));
                 let _ = slint::invoke_from_event_loop(move || {
@@ -445,10 +586,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match result {
                         Ok(()) => {
                             ui.set_status(SharedString::new());
-                            // reuse the existing reload path (shared model + UI store connection)
                             ui.invoke_folder_selected(ui.get_selected_folder());
                         }
                         Err(msg) => ui.set_status(msg.into()),
+                    }
+                });
+            });
+        });
+    }
+
+    // Connect (add account / reconnect) → run setup on a worker thread, then reload.
+    {
+        let weak = ui.as_weak();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        ui.on_connect(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.get_setup_busy() {
+                return;
+            }
+            let (email, settings) = match refresh::build_settings(
+                &ui.get_f_email(),
+                &ui.get_f_host(),
+                &ui.get_f_port(),
+                &ui.get_f_user(),
+                false,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    ui.set_setup_error(e.into());
+                    return;
+                }
+            };
+            let password = ui.get_f_pass().to_string();
+            if password.is_empty() {
+                ui.set_setup_error("Enter your password.".into());
+                return;
+            }
+            let display = ui.get_f_name().to_string();
+            let display = (!display.trim().is_empty()).then_some(display);
+            ui.set_setup_busy(true);
+            ui.set_setup_error(SharedString::new());
+
+            let weak = weak.clone();
+            let db_path = db_path.clone();
+            let secrets = secrets.clone();
+            std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    refresh::run_setup(
+                        &db_path,
+                        &secrets,
+                        &email,
+                        display.as_deref(),
+                        settings,
+                        &password,
+                    )
+                }))
+                .unwrap_or_else(|_| Err("Couldn't connect — something went wrong.".to_owned()));
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    ui.set_setup_busy(false);
+                    match result {
+                        Ok(()) => {
+                            ui.set_f_pass(SharedString::new());
+                            ui.set_setup_error(SharedString::new());
+                            ui.invoke_reload(); // show the mail
+                        }
+                        Err(msg) => ui.set_setup_error(msg.into()),
                     }
                 });
             });
