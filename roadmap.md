@@ -96,23 +96,23 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 - **S2.8** ✅ Offline reading verified (OFF-1); wipe local data on account removal (SEC-3).
 - **(follow-up)** `zeroize` secret + key buffers where practical (§9; ADR-0004/0008).
 
-## M3 — Rich, safe reading
-**Delivers:** READ-4, READ-5, READ-8, PRIV-1, PRIV-2, PRIV-3, PRIV-4.
+## M3 — Rich, safe reading ✅ COMPLETE
+**Delivers:** READ-4, READ-5, READ-8 (view), PRIV-1, PRIV-2, PRIV-3, PRIV-4.
 **Outcome:** read real HTML mail safely, in threads, with attachments.
 
 - **S3.4** ✅ Conversation threading — detect conversations + count (READ-5). *(Full thread view: follow-up.)*
 - **S3.5** ✅ Attachments: **view** name/type/size (READ-8 view half). *(Save-to-disk: follow-up.)*
 - **S3.1** ✅ Sandboxed HTML renderer embedded in the reading pane (READ-4) + sanitization
-  (PRIV-1 remote blocked, PRIV-4 no scripts). *(X11; Wayland + CSS-fidelity = follow-ups. Visual
-  fidelity pending maintainer eyeball.)*
-- **S3.2** Hardening: CSP belt-and-suspenders (script/img/connect none) + sandbox-escape tests
-  (much of PRIV-1/PRIV-4 already landed in S3.1 via sanitization + JS-disabled).
-- **S3.3** Per-message / trusted-sender "load remote content" (PRIV-2); "trackers blocked" cue (PRIV-3).
+  (PRIV-1 remote blocked, PRIV-4 no scripts).
+- **S3.2** ✅ Hardening: CSP belt-and-suspenders (`default-src 'none'`) + sandbox-escape tests.
+- **S3.3** ✅ Per-message "load remote content" opt-in (PRIV-2) + "remote content blocked" cue (PRIV-3).
 
-> S3.1–S3.3 are the sandboxed-**webview** work (wry-in-Slint). The **security** (sanitization,
-> no-script, no-remote) is verifiable automatically (S0.2 oracle + `ammonia`); the **visual fidelity**
-> of rendered mail needs a real display + human eyes — the one place "build + self-verify" needs the
-> maintainer. Done verifiably first: S3.4, S3.5.
+> The webview (wry-in-Slint, `build_as_child`) is **X11 only**; on Wayland the reading pane falls back
+> to the plain-text view (graceful). The **security** (sanitization, no-script, no-remote, CSP) is
+> machine-verified; the **visual fidelity** of rendered mail needs the maintainer's eyes on a running
+> window — the one place "build + self-verify" needs the maintainer.
+> **M3 follow-ups:** full thread-navigation view; save-attachments-to-disk; trusted-sender persistence
+> (always-load); CSS-aware sanitization (fidelity); Wayland embedding.
 
 ## M4 — Send
 **Delivers:** SEND-1…SEND-9, ACC-7.
