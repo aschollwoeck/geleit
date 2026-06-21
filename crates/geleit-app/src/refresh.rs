@@ -323,6 +323,33 @@ pub fn run_set_flag(
         .map_err(|_| "Couldn't update the star on the server.".to_owned())
 }
 
+/// Move a message by UID from `source` to `target` on the server (ORG-1/2/3 write-back). Blocking +
+/// network: **worker thread.**
+pub fn run_move(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    source: &str,
+    uid: u32,
+    target: &str,
+) -> Result<(), String> {
+    let store = open_store(db_path, secrets)?;
+    let account = store
+        .list_accounts()
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No account is set up yet.".to_owned())?;
+    let imap = store
+        .imap_settings(account.id)
+        .ok()
+        .flatten()
+        .ok_or_else(|| "This account isn't set up.".to_owned())?;
+    let config = to_config(&imap);
+    runtime()?
+        .block_on(imap::move_message(&config, secrets, source, uid, target))
+        .map_err(|_| "Couldn't move the message on the server.".to_owned())
+}
+
 /// Sync the first account's `folder` (+ folder list), reading settings from the store and the
 /// password from the shared secrets. Blocking + network: **run on a worker thread.**
 pub fn run_refresh(db_path: &str, secrets: &dyn SecretStore, folder: &str) -> Result<(), String> {

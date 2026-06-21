@@ -913,6 +913,14 @@ impl Store {
             .flatten())
     }
 
+    /// Remove a single message locally (optimistic archive/trash/move; body + attachments cascade).
+    /// The server change is the engine's job; on failure a re-sync restores the row.
+    pub fn delete_message(&self, message_id: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM message WHERE id = ?1", [message_id])?;
+        Ok(())
+    }
+
     /// The stored body for a message, or `None` if no body is stored yet.
     pub fn body_for(&self, message_id: i64) -> Result<Option<StoredBody>, StoreError> {
         Ok(self
@@ -1203,6 +1211,27 @@ mod tests {
         );
         s.update_signature(acc, "").unwrap(); // empty clears it
         assert_eq!(s.signature(acc).unwrap(), None);
+    }
+
+    #[test]
+    fn delete_message_removes_the_row() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let id = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(s.messages_in_folder(inbox, 10).unwrap().len(), 1);
+        s.delete_message(id).unwrap();
+        assert!(s.header_by_id(id).unwrap().is_none());
+        assert!(s.messages_in_folder(inbox, 10).unwrap().is_empty());
     }
 
     #[test]

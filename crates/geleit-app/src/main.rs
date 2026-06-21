@@ -190,6 +190,8 @@ slint::slint! {
         in property <string> r-body;
         in property <bool> r-starred; // the open message is starred (ORG-4)
         in property <[string]> r-attachments;
+        in property <bool> picking-folder; // "Move to…" folder picker open (ORG-3)
+        in property <[string]> move-folders;
         in property <bool> refreshing;
         in property <string> status; // non-empty = error to show (danger banner)
         in property <string> sync-status; // non-empty = calm sync-progress line
@@ -228,6 +230,11 @@ slint::slint! {
         callback message-selected(MessageItem);
         callback mark-unread(int);
         callback toggle-star(int);
+        callback archive-message(int);
+        callback trash-message(int);
+        callback open-move(int);
+        callback move-to(string);
+        callback close-move();
         callback refresh();
         callback connect();
         callback reload();
@@ -630,6 +637,27 @@ slint::slint! {
                             font-size: 13px;
                             font-weight: 600;
                             TouchArea { clicked => { root.toggle-star(root.selected-message); } }
+                        }
+                        Text {
+                            text: "Archive";
+                            color: Palette.accent-strong;
+                            font-size: 13px;
+                            font-weight: 600;
+                            TouchArea { clicked => { root.archive-message(root.selected-message); } }
+                        }
+                        Text {
+                            text: "Delete";
+                            color: Palette.danger-strong;
+                            font-size: 13px;
+                            font-weight: 600;
+                            TouchArea { clicked => { root.trash-message(root.selected-message); } }
+                        }
+                        Text {
+                            text: "Move…";
+                            color: Palette.accent-strong;
+                            font-size: 13px;
+                            font-weight: 600;
+                            TouchArea { clicked => { root.open-move(root.selected-message); } }
                         }
                         Text {
                             text: "Mark as unread";
@@ -1069,6 +1097,55 @@ slint::slint! {
                 }
             }
         }
+
+        // ---- MOVE TO… (ORG-3) — pick a destination folder ----
+        if root.picking-folder: Rectangle {
+            background: #0d171b99;
+            TouchArea {}
+            Rectangle {
+                width: min(420px, parent.width - 80px);
+                height: min(480px, parent.height - 80px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Palette.surface;
+                border-radius: 12px;
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 10px;
+                    HorizontalLayout {
+                        Text {
+                            text: "Move to…";
+                            color: Palette.text;
+                            font-size: 18px;
+                            font-weight: 700;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: "Cancel";
+                            color: Palette.accent-strong;
+                            font-size: 14px;
+                            font-weight: 600;
+                            TouchArea { clicked => { root.close-move(); } }
+                        }
+                    }
+                    ListView {
+                        vertical-stretch: 1;
+                        for f in root.move-folders: Rectangle {
+                            height: 36px;
+                            border-radius: 8px;
+                            background: mt.has-hover ? Palette.accent-quiet : transparent;
+                            mt := TouchArea { clicked => { root.move-to(f); } }
+                            Text {
+                                text: f;
+                                x: 9px;
+                                color: Palette.text;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1211,6 +1288,78 @@ fn flip_starred(model: &VecModel<MessageItem>, id: i32, starred: bool) {
     }
 }
 
+/// Remove one row by id (optimistic archive/trash/move — keeps scroll).
+fn remove_row(model: &VecModel<MessageItem>, id: i32) {
+    for i in 0..model.row_count() {
+        if model.row_data(i).is_some_and(|r| r.id == id) {
+            model.remove(i);
+            break;
+        }
+    }
+}
+
+/// The folder names currently in the rail, as owned strings.
+fn folder_names(folders: &VecModel<SharedString>) -> Vec<String> {
+    (0..folders.row_count())
+        .filter_map(|i| folders.row_data(i))
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Archive/trash/move a message: optimistic local-remove + reading-pane clear, then a worker writes
+/// the IMAP move back. On failure the row returns on the next refresh (no loss).
+#[allow(clippy::too_many_arguments)]
+fn perform_move(
+    ui: &Main,
+    store: &Store,
+    messages: &VecModel<MessageItem>,
+    folders: &VecModel<SharedString>,
+    view: &HtmlView,
+    db_path: &str,
+    secrets: &Arc<OsSecretStore>,
+    id: i32,
+    target: &str,
+) {
+    let source = folders
+        .row_data(ui.get_selected_folder() as usize)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "INBOX".to_owned());
+    if target.is_empty() || target.eq_ignore_ascii_case(&source) {
+        return;
+    }
+    let uid = store
+        .header_by_id(id.into())
+        .ok()
+        .flatten()
+        .and_then(|h| h.uid);
+    let _ = store.delete_message(id.into()); // optimistic
+    remove_row(messages, id);
+    ui.set_selected_message(0);
+    hide_html(view);
+    let Some(uid) = uid else { return }; // local-only message → nothing to move on the server
+    let weak = ui.as_weak();
+    let db_path = db_path.to_owned();
+    let secrets = secrets.clone();
+    let source = source.clone();
+    let target = target.to_owned();
+    std::thread::spawn(move || {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            refresh::run_move(&db_path, &*secrets, &source, uid as u32, &target)
+        }))
+        .unwrap_or_else(|_| Err("Couldn't move the message.".to_owned()));
+        if let Err(_msg) = res {
+            let w = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    ui.set_status(
+                        "Couldn't move the message — it'll return on the next refresh.".into(),
+                    );
+                }
+            });
+        }
+    });
+}
+
 /// Re-read account / folders / current-folder messages into the UI (UI thread only). Sets
 /// `needs-setup` when there is no account, so the Add-account form shows.
 fn reload_all(
@@ -1306,6 +1455,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_c_attachments(ModelRc::from(attach_model.clone()));
     let suggest_model = Rc::new(VecModel::<SharedString>::default());
     ui.set_c_suggestions(ModelRc::from(suggest_model.clone()));
+    // "Move to…" picker: the message awaiting a destination + the candidate folders
+    let pending_move_id = Rc::new(RefCell::new(Option::<i32>::None));
+    let move_folders_model = Rc::new(VecModel::<SharedString>::default());
+    ui.set_move_folders(ModelRc::from(move_folders_model.clone()));
     ui.set_folders(ModelRc::from(folders_model.clone()));
     ui.set_messages(ModelRc::from(messages.clone()));
 
@@ -1484,6 +1637,98 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                 }
             });
+        });
+    }
+
+    // Archive (ORG-1) → move to the Archive folder.
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let messages = messages.clone();
+        let fm = folders_model.clone();
+        let view = html_view.clone();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        ui.on_archive_message(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let names = folder_names(&fm);
+            match viewmodel::find_folder(&names, &["archive"]) {
+                Some(target) => perform_move(
+                    &ui, &store, &messages, &fm, &view, &db_path, &secrets, id, target,
+                ),
+                None => ui.set_status("This account has no Archive folder.".into()),
+            }
+        });
+    }
+
+    // Delete (ORG-2) → move to Trash.
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let messages = messages.clone();
+        let fm = folders_model.clone();
+        let view = html_view.clone();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        ui.on_trash_message(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let names = folder_names(&fm);
+            match viewmodel::find_folder(&names, &["trash", "deleted", "bin"]) {
+                Some(target) => perform_move(
+                    &ui, &store, &messages, &fm, &view, &db_path, &secrets, id, target,
+                ),
+                None => ui.set_status("This account has no Trash folder.".into()),
+            }
+        });
+    }
+
+    // Move… (ORG-3) → open the folder picker, then move to the chosen folder.
+    {
+        let weak = ui.as_weak();
+        let fm = folders_model.clone();
+        let mfm = move_folders_model.clone();
+        let pending = pending_move_id.clone();
+        ui.on_open_move(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            *pending.borrow_mut() = Some(id);
+            let current = fm
+                .row_data(ui.get_selected_folder() as usize)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let others: Vec<SharedString> = folder_names(&fm)
+                .into_iter()
+                .filter(|f| !f.eq_ignore_ascii_case(&current))
+                .map(Into::into)
+                .collect();
+            mfm.set_vec(others);
+            ui.set_picking_folder(true);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let messages = messages.clone();
+        let fm = folders_model.clone();
+        let view = html_view.clone();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        let pending = pending_move_id.clone();
+        ui.on_move_to(move |target| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_picking_folder(false);
+            if let Some(id) = pending.borrow_mut().take() {
+                perform_move(
+                    &ui, &store, &messages, &fm, &view, &db_path, &secrets, id, &target,
+                );
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_close_move(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_picking_folder(false);
+            }
         });
     }
 

@@ -79,6 +79,25 @@ pub fn complete_last_token(field: &str, addr: &str) -> String {
     }
 }
 
+/// Find a special folder by name among `folders` — an exact (case-insensitive) match on any keyword
+/// wins; otherwise the first folder whose name contains a keyword. Used to locate Archive / Trash /
+/// Junk (ORG-1/2/5), whose exact names vary by provider.
+pub fn find_folder<'a>(folders: &'a [String], keywords: &[&str]) -> Option<&'a str> {
+    if let Some(f) = folders
+        .iter()
+        .find(|f| keywords.iter().any(|k| f.eq_ignore_ascii_case(k)))
+    {
+        return Some(f);
+    }
+    folders
+        .iter()
+        .find(|f| {
+            let l = f.to_lowercase();
+            keywords.iter().any(|k| l.contains(k))
+        })
+        .map(String::as_str)
+}
+
 /// Human-readable byte size (B / KB / MB, 1 decimal above 1 KB).
 fn human_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -98,6 +117,22 @@ mod tests {
         attachment_label, body_display, complete_last_token, format_date, human_size, last_token,
         message_vm,
     };
+
+    #[test]
+    fn find_folder_exact_then_contains() {
+        use super::find_folder;
+        let folders = vec![
+            "INBOX".to_owned(),
+            "Deleted Items".to_owned(),
+            "Archive".to_owned(),
+        ];
+        assert_eq!(find_folder(&folders, &["archive"]), Some("Archive")); // exact (ci)
+        assert_eq!(
+            find_folder(&folders, &["trash", "deleted", "bin"]),
+            Some("Deleted Items")
+        ); // contains
+        assert_eq!(find_folder(&folders, &["junk", "spam"]), None);
+    }
 
     #[test]
     fn last_token_and_complete() {
