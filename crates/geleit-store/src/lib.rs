@@ -223,6 +223,8 @@ pub struct NewMessage {
     pub cc_addrs: Option<String>,
     pub date: Option<i64>,
     pub seen: bool,
+    /// Starred/`\Flagged` on the server at first sync (ORG-4). Local stars are preserved on re-sync.
+    pub flagged: bool,
     pub has_attachments: bool,
     pub snippet: Option<String>,
 }
@@ -243,6 +245,7 @@ pub struct MessageHeader {
     pub cc_addrs: Option<String>,
     pub date: Option<i64>,
     pub seen: bool,
+    pub flagged: bool,
     pub has_attachments: bool,
     pub snippet: Option<String>,
 }
@@ -648,7 +651,7 @@ impl Store {
             "INSERT INTO message \
              (account_id, folder_id, uid, message_id, in_reply_to, subject, from_name, from_addr, \
               to_addrs, cc_addrs, date, seen, flagged, has_attachments, snippet) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, ?14) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
              ON CONFLICT(account_id, folder_id, uid) DO UPDATE SET \
                message_id = excluded.message_id, in_reply_to = excluded.in_reply_to, \
                subject = excluded.subject, from_name = excluded.from_name, \
@@ -667,6 +670,7 @@ impl Store {
                 &m.cc_addrs,
                 m.date,
                 m.seen,
+                m.flagged,
                 m.has_attachments,
                 &m.snippet,
             ),
@@ -691,7 +695,7 @@ impl Store {
     ) -> Result<Vec<MessageHeader>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, uid, message_id, in_reply_to, subject, from_name, from_addr, date, seen, \
-             has_attachments, snippet \
+             has_attachments, snippet, flagged \
              FROM message WHERE folder_id = ?1 ORDER BY date DESC, id DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map((folder_id, limit), |r| {
@@ -709,6 +713,7 @@ impl Store {
                 seen: r.get(8)?,
                 has_attachments: r.get(9)?,
                 snippet: r.get(10)?,
+                flagged: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -749,7 +754,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT id, uid, message_id, in_reply_to, subject, from_name, from_addr, date, \
-                 seen, has_attachments, snippet, to_addrs, cc_addrs FROM message WHERE id = ?1",
+                 seen, has_attachments, snippet, to_addrs, cc_addrs, flagged FROM message WHERE id = ?1",
                 [id],
                 |r| {
                     Ok(MessageHeader {
@@ -766,6 +771,7 @@ impl Store {
                         seen: r.get(8)?,
                         has_attachments: r.get(9)?,
                         snippet: r.get(10)?,
+                        flagged: r.get(13)?,
                     })
                 },
             )
@@ -889,6 +895,22 @@ impl Store {
             (message_id, seen),
         )?;
         Ok(())
+    }
+
+    /// Set a message's local star/`\Flagged` state (ORG-4); the write-back to the server is the
+    /// engine's job. Returns the message's IMAP `uid` (for that write-back), or `None`.
+    pub fn set_flagged(&self, message_id: i64, flagged: bool) -> Result<Option<i64>, StoreError> {
+        self.conn.execute(
+            "UPDATE message SET flagged = ?2 WHERE id = ?1",
+            (message_id, flagged),
+        )?;
+        Ok(self
+            .conn
+            .query_row("SELECT uid FROM message WHERE id = ?1", [message_id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten())
     }
 
     /// The stored body for a message, or `None` if no body is stored yet.
@@ -1181,6 +1203,42 @@ mod tests {
         );
         s.update_signature(acc, "").unwrap(); // empty clears it
         assert_eq!(s.signature(acc).unwrap(), None);
+    }
+
+    #[test]
+    fn flagged_synced_on_insert_preserved_on_resync_and_settable() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        // first sync: server has it flagged
+        let id = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(1),
+                    flagged: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(s.header_by_id(id).unwrap().unwrap().flagged);
+        // local unstar, then an envelope re-sync (server still says flagged) must NOT clobber it
+        let uid = s.set_flagged(id, false).unwrap();
+        assert_eq!(uid, Some(1));
+        s.upsert_message(
+            acc,
+            inbox,
+            &NewMessage {
+                uid: Some(1),
+                flagged: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!s.header_by_id(id).unwrap().unwrap().flagged); // local state preserved
+                                                                // listing exposes the flag too
+        assert!(!s.messages_in_folder(inbox, 10).unwrap()[0].flagged);
     }
 
     #[test]

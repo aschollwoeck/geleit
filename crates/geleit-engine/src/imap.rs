@@ -147,6 +147,9 @@ fn fetch_to_new_message(f: &async_imap::types::Fetch) -> NewMessage {
         seen: f
             .flags()
             .any(|fl| matches!(fl, async_imap::types::Flag::Seen)),
+        flagged: f
+            .flags()
+            .any(|fl| matches!(fl, async_imap::types::Flag::Flagged)),
         has_attachments: false,
         snippet: None,
     }
@@ -210,6 +213,40 @@ pub fn has_password(secrets: &dyn SecretStore, username: &str) -> Result<bool, I
 /// The caller must not log it (P2).
 pub fn password(secrets: &dyn SecretStore, username: &str) -> Result<Option<Vec<u8>>, ImapError> {
     Ok(secrets.get(SECRET_SERVICE, username)?)
+}
+
+/// Set or clear the `\Flagged` (star) flag on a message by UID in `folder` (ORG-4 write-back).
+pub async fn set_flag(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    uid: u32,
+    flagged: bool,
+) -> Result<(), ImapError> {
+    let mut session = connect(config, secrets).await?;
+    session.select(folder).await?;
+    let op = if flagged { "+FLAGS" } else { "-FLAGS" };
+    let result = drain(
+        session
+            .uid_store(uid.to_string(), format!("{op} (\\Flagged)"))
+            .await,
+    )
+    .await;
+    let _ = session.logout().await; // best-effort
+    result
+}
+
+/// Consume an IMAP response stream (e.g. STORE's FETCH replies) to completion, surfacing the first
+/// error. We don't need the per-message data, only that the command succeeded.
+async fn drain<S, T>(stream: Result<S, async_imap::error::Error>) -> Result<(), ImapError>
+where
+    S: futures::Stream<Item = Result<T, async_imap::error::Error>> + Unpin,
+{
+    let mut stream = stream?;
+    while let Some(item) = stream.next().await {
+        item?;
+    }
+    Ok(())
 }
 
 /// Append a (sent) message to `folder` — e.g. saving an outgoing message to Sent (SEND-8) — marked
