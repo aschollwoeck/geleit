@@ -133,16 +133,22 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 > uses Slint's **software renderer** to coexist with webkit's GL (X11; PR #53). Sending verified
 > end-to-end by the in-process SMTP sink; live IMAP APPEND has an `#[ignore]` test.
 
-## M5 — Organize
+## M5 — Organize ✅ COMPLETE
 **Delivers:** ORG-1…ORG-7, SYNC-5.
 **Outcome:** manage your inbox, consistent with the server.
 
-- **S5.1** Local actions with optimistic UI: archive, delete→trash, move, star (ORG-1…ORG-4).
-- **S5.2** Write-back sync of actions to the server (SYNC-5); reconcile, no dupes/loss.
-- **S5.3** Empty trash / delete permanently (ORG-2).
-- **S5.4** Junk/Spam folder visible; move to/from junk (ORG-5).
-- **S5.5** Create / rename / delete folders (ORG-6).
-- **S5.6** Multi-select + bulk actions (ORG-7).
+- **S5.1** ✅ Star / flag a message (ORG-4) — optimistic + `\Flagged` write-back; the action pattern.
+- **S5.2** ✅ Archive / delete→trash / move + write-back (ORG-1/2/3, SYNC-5) — optimistic local-remove
+  + worker IMAP `MOVE`; reappears in target on sync, returns to source on failure (no dupes/loss).
+- **S5.3** ✅ Empty trash / delete permanently (ORG-2) — `UID EXPUNGE` per-message + whole-folder.
+- **S5.4** ✅ Junk/Spam visible (synced) + Spam / Not-spam move to/from Junk (ORG-5).
+- **S5.5** ✅ Create / rename / delete folders (ORG-6) — IMAP folder ops + local list reconcile (prune).
+- **S5.6** ✅ Multi-select + bulk Archive/Delete/Star (ORG-7).
+
+> **Model:** every action applies optimistically to the local store, then a worker writes it back over
+> IMAP; failures self-heal on the next refresh. **Follow-ups (backlog):** COPY+EXPUNGE fallback for
+> non-MOVE servers; bulk move-to-arbitrary-folder + bulk mark-read; permanent bulk-delete in Trash;
+> persistent offline action queue (survives restart mid-flight); cross-client flag sync after first sync.
 
 ## M6 — Search
 **Delivers:** SEARCH-1, SEARCH-2, SEARCH-3, OFF-2.
