@@ -102,9 +102,11 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 
 - **S3.4** ✅ Conversation threading — detect conversations + count (READ-5). *(Full thread view: follow-up.)*
 - **S3.5** ✅ Attachments: **view** name/type/size (READ-8 view half). *(Save-to-disk: follow-up.)*
-- **S3.1** Integrate the sandboxed HTML renderer (from S0.2) into the reading pane (READ-4).
-- **S3.2** Block remote content by default (PRIV-1); no script execution (PRIV-4); hardening +
-  sandbox-escape tests.
+- **S3.1** ✅ Sandboxed HTML renderer embedded in the reading pane (READ-4) + sanitization
+  (PRIV-1 remote blocked, PRIV-4 no scripts). *(X11; Wayland + CSS-fidelity = follow-ups. Visual
+  fidelity pending maintainer eyeball.)*
+- **S3.2** Hardening: CSP belt-and-suspenders (script/img/connect none) + sandbox-escape tests
+  (much of PRIV-1/PRIV-4 already landed in S3.1 via sanitization + JS-disabled).
 - **S3.3** Per-message / trusted-sender "load remote content" (PRIV-2); "trackers blocked" cue (PRIV-3).
 
 > S3.1–S3.3 are the sandboxed-**webview** work (wry-in-Slint). The **security** (sanitization,
