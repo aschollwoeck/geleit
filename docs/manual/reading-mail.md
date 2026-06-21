@@ -44,9 +44,10 @@ later, choose **Mark as unread** at the top of the reading area to bring the dot
 If the message has files attached, an **Attachments** list appears under the message showing each
 file's name and size. (Saving attachments to your computer is coming soon.)
 
-Messages written in rich (HTML) formatting are shown **formatted**, in a protected view that has
-**remote images, trackers, and scripts already stripped out** — so opening a message can't quietly
-load anything from the internet or run code. Plain-text messages show as before.
+Messages written in rich (HTML) formatting are shown **formatted** — with their colors, fonts,
+layout, and links intact — in a protected view. **Scripts can't run and trackers/remote images don't
+load**, so opening a message can't quietly fetch anything from the internet or execute code.
+Plain-text messages show as before.
 
 When a message *did* contain remote content, you'll see a small **"Remote content blocked"** note
 with a **Load remote images** button. Nothing remote loads until you choose to: click it and that

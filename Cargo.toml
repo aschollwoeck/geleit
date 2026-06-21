@@ -9,12 +9,18 @@ members = [
 ]
 # Throwaway feasibility spikes are standalone crates, kept out of the workspace so
 # `cargo build --workspace`, clippy, and CI never touch them (guidelines §11).
-exclude = ["spikes/s0.2-html-render", "spikes/s0.3-list-render"]
+exclude = ["spikes/s0.2-html-render", "spikes/s0.3-list-render", "spikes/s3.1-html-embed"]
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
 rust-version = "1.96"
+
+# Release builds: strip symbols (the binary is ~36M unstripped → ~29M stripped) and thin-LTO for a
+# faster, smaller artifact. Keep unwind (workers rely on catch_unwind), so no panic="abort".
+[profile.release]
+strip = true
+lto = "thin"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

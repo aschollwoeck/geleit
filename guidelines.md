@@ -49,6 +49,13 @@ Status: **initial draft.** Refine as the codebase grows; amend deliberately, not
 
 ## 5. Async & concurrency
 
+- **Every interaction must feel instantaneous.** This is a product value, not a nice-to-have: a
+  native local-first client justifies itself by feeling immediate. Treat perceptible latency on a
+  local action (folder switch, opening a mail, rendering content) as a **defect** — fix the cause
+  (right data structures, no redundant work or blocking calls in a click handler; build expensive
+  things like the webview once, up front, not lazily on first use). Only where work genuinely takes
+  real time (network sync) is **immediate visual feedback** the answer — and it's the fallback, not
+  the goal. Always judge performance on a `--release` build; debug is 10–50× slower and misleading.
 - `tokio` as the async runtime. All IMAP/SMTP/network I/O is async.
 - **The UI never blocks on the network (P1).** Engine work runs off the UI thread; the UI
   observes the local store and receives updates. CPU-heavy work (MIME, indexing) uses
