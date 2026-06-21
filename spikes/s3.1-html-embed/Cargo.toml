@@ -1,0 +1,15 @@
+[package]
+name = "s3_1_html_embed"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Throwaway spike (S3.1) — prove a sandboxed wry webview can be embedded as a child of the Slint
+# window (X11) and render sanitized HTML, with GTK-loop pumping. Not part of the workspace.
+[dependencies]
+slint = { version = "1.16.1", features = ["unstable-winit-030", "backend-winit-x11"] }
+wry = "0.55.1"
+ammonia = "4.1.2"
+gtk = "0.18"
+
+[workspace]

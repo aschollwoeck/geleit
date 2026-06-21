@@ -10,10 +10,14 @@ publish = false
 geleit-store = { version = "0.0.0", path = "../geleit-store" }
 geleit-engine = { version = "0.0.0", path = "../geleit-engine" }
 geleit-platform = { version = "0.0.0", path = "../geleit-platform" }
-slint = "1.16.1"
+# unstable-winit-030 exposes the winit window so a sandboxed wry webview can embed as a child
+# (S3.1, ADR-0001); webview embedding works on X11, with a graceful text fallback elsewhere.
+slint = { version = "1.16.1", features = ["unstable-winit-030"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 tokio = { version = "1", features = ["rt", "net", "time"] }
 getrandom = "0.4.3"
+wry = "0.55.1"
+gtk = "0.18" # webkit2gtk's GTK; we init it and pump its loop under Slint's event loop
 
 [features]
 # Forwarded to the engine for self-signed dev servers; never enable in a release build.

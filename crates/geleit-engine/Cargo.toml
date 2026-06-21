@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+ammonia = "4"
 async-imap = { version = "0.11.2", default-features = false, features = ["runtime-tokio"] }
 futures = "0.3.32"
 geleit-core = { path = "../geleit-core" }

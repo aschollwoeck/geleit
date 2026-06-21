@@ -4,10 +4,25 @@
 [advisories]
 version = 2
 yanked = "deny"
-# In schema v2, vulnerability + unsound advisories always fail; unmaintained + notice only warn.
-# So an unmaintained dependency warns but does NOT fail CI (intentional — RustSec unmaintained
-# notices are noisy). Revisit if we want to gate it.
-# ignore = []  # add advisory IDs here only with a written justification
+# Add advisory IDs here only with a written justification.
+ignore = [
+    # gtk3-rs bindings (gtk/gdk/atk/… 0.18) are flagged **unmaintained** (not vulnerable). They are
+    # pulled by `webkit2gtk` → `wry`, the only way to render HTML email on Linux (ADR-0001, S3.1);
+    # webkit2gtk still requires GTK3. No GTK4 path exists for wry yet. Revisit when wry/webkit2gtk
+    # move to GTK4. These are advisories, not exploitable vulnerabilities.
+    "RUSTSEC-2024-0412",
+    "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0414",
+    "RUSTSEC-2024-0415",
+    "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0417",
+    "RUSTSEC-2024-0418",
+    "RUSTSEC-2024-0419",
+    "RUSTSEC-2024-0420",
+    # proc-macro-error 1.0.4 — unmaintained, pulled transitively via the webview/gtk macro stack
+    # (not vulnerable). Goes away when the gtk3 stack does.
+    "RUSTSEC-2024-0370",
+]
 
 [licenses]
 version = 2
@@ -27,6 +42,9 @@ allow = [
     "Zlib", # foldhash (via rusqlite) — permissive, MIT-compatible
     "CDLA-Permissive-2.0", # webpki-roots — Mozilla CA root *data* (permissive data license)
     "BSL-1.0", # Boost license (a Slint/winit transitive dep) — permissive
+    # MPL-2.0 (ammonia's servo HTML-parser deps: html5ever/markup5ever). File-level weak copyleft —
+    # fine to *use* unmodified in our MIT app; only changes to those MPL files would need sharing.
+    "MPL-2.0",
     # Slint is tri-licensed (GPL-3.0 OR Royalty-free OR commercial). We use it under the
     # ROYALTY-FREE license (ADR-0007), so we allow only that LicenseRef — GPL-3.0 is deliberately
     # NOT allowed, so the gate forbids accidentally taking the copyleft path. Attribution required.
