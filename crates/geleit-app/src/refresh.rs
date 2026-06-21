@@ -8,6 +8,8 @@
 //! across restarts.
 
 use geleit_engine::imap::{self, ImapConfig};
+use geleit_engine::message::{self, Draft};
+use geleit_engine::smtp::{self, SmtpSecurity, SmtpSettings};
 use geleit_platform::secret::SecretStore;
 use geleit_store::{ImapSettings, SmtpConfig, SmtpSecurityKind, Store, StoreError};
 
@@ -194,6 +196,73 @@ pub fn run_setup(
     Ok(())
 }
 
+/// Split a comma/semicolon-separated address field into trimmed, non-empty addresses. Pure.
+fn parse_addrs(field: &str) -> Vec<String> {
+    field
+        .split([',', ';'])
+        .map(|a| a.trim().to_owned())
+        .filter(|a| !a.is_empty())
+        .collect()
+}
+
+/// Send a composed message via the first account's SMTP server (M4). Reads SMTP settings from the
+/// store and reuses the IMAP username/password from the keychain. Blocking + network: **run on a
+/// worker thread.** Calm, PII-free errors.
+pub fn run_send(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    to: &str,
+    cc: &str,
+    subject: &str,
+    body: &str,
+) -> Result<(), String> {
+    let store = open_store(db_path, secrets)?;
+    let account = store
+        .list_accounts()
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No account is set up yet.".to_owned())?;
+    let imap = store
+        .imap_settings(account.id)
+        .ok()
+        .flatten()
+        .ok_or_else(|| "This account isn't set up.".to_owned())?;
+    let smtp = store
+        .smtp_settings(account.id)
+        .ok()
+        .flatten()
+        .ok_or_else(|| "No outgoing (SMTP) server is configured for this account.".to_owned())?;
+
+    let password = imap::password(secrets, &imap.username)
+        .map_err(|_| "Couldn't read your saved password.".to_owned())?
+        .ok_or_else(|| "Enter your password (Refresh to reconnect) before sending.".to_owned())?;
+    let password =
+        String::from_utf8(password).map_err(|_| "The saved password looks corrupt.".to_owned())?;
+
+    let draft = Draft {
+        from_name: account.display_name.clone(),
+        from_addr: account.email.clone(),
+        to: parse_addrs(to),
+        cc: parse_addrs(cc),
+        subject: subject.to_owned(),
+        body_text: body.to_owned(),
+    };
+    let bytes = message::build(&draft)?;
+    let envelope = smtp::envelope(&draft.from_addr, &message::recipients(&draft))?;
+    let settings = SmtpSettings {
+        host: smtp.host,
+        port: smtp.port,
+        username: imap.username,
+        security: match smtp.security {
+            SmtpSecurityKind::Implicit => SmtpSecurity::Implicit,
+            SmtpSecurityKind::StartTls => SmtpSecurity::StartTls,
+        },
+        allow_invalid_certs: imap.allow_invalid_certs,
+    };
+    runtime()?.block_on(smtp::send(&settings, &password, &envelope, &bytes))
+}
+
 /// Sync the first account's `folder` (+ folder list), reading settings from the store and the
 /// password from the shared secrets. Blocking + network: **run on a worker thread.**
 pub fn run_refresh(db_path: &str, secrets: &dyn SecretStore, folder: &str) -> Result<(), String> {
@@ -303,6 +372,17 @@ mod tests {
         assert!(build_smtp_settings("  ", "587", true).is_err());
         assert!(build_smtp_settings("h", "0", false).is_err());
         assert!(build_smtp_settings("h", "abc", false).is_err());
+    }
+
+    #[test]
+    fn parse_addrs_splits_trims_and_drops_empties() {
+        use super::parse_addrs;
+        assert_eq!(
+            parse_addrs(" a@x.com , b@y.com ;c@z.com,"),
+            vec!["a@x.com", "b@y.com", "c@z.com"]
+        );
+        assert!(parse_addrs("   ").is_empty());
+        assert!(parse_addrs("").is_empty());
     }
 
     #[test]

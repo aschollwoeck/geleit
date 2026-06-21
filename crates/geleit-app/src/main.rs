@@ -105,7 +105,7 @@ fn hide_html(view: &HtmlView) {
 // currently "[paperclip]"), bundle the Hanken Grotesk font (§3), per-account avatar initial + a
 // folder hover state, and the selected-message guide edge (arrives with selection in S1.8).
 slint::slint! {
-    import { ListView, ScrollView, LineEdit } from "std-widgets.slint";
+    import { ListView, ScrollView, LineEdit, TextEdit } from "std-widgets.slint";
 
     // Soft-daylight tokens from design.md.
     global Palette {
@@ -148,6 +148,14 @@ slint::slint! {
         in property <string> status; // non-empty = error to show (danger banner)
         in property <string> sync-status; // non-empty = calm sync-progress line
         in property <bool> remote-blocked; // HTML message had remote content stripped (PRIV-3)
+        // compose (M4 send)
+        in property <bool> composing;
+        in-out property <string> c-to;
+        in-out property <string> c-cc;
+        in-out property <string> c-subject;
+        in-out property <string> c-body;
+        in property <bool> sending;
+        in property <string> compose-status; // non-empty = send error
         // add-account form
         in property <bool> needs-setup;
         in-out property <string> f-email;
@@ -170,6 +178,9 @@ slint::slint! {
         callback reload();
         callback remove-account();
         callback load-remote();
+        callback compose();
+        callback send-message();
+        callback cancel-compose();
 
         preferred-width: 1100px;
         preferred-height: 720px;
@@ -201,6 +212,24 @@ slint::slint! {
                             font-weight: 600;
                             vertical-alignment: center;
                         }
+                    }
+                    Rectangle { height: 12px; }
+                    // Compose a new message (M4)
+                    Rectangle {
+                        height: 40px;
+                        border-radius: 10px;
+                        background: Palette.accent-strong;
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text {
+                                text: "✏  New message";
+                                color: white;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                        TouchArea { clicked => { root.compose(); } }
                     }
                     Rectangle { height: 12px; }
                     for f[i] in root.folders: Rectangle {
@@ -651,6 +680,87 @@ slint::slint! {
                 }
             }
         }
+
+        // ---- COMPOSE (M4 send) — overlay on top of everything ----
+        if root.composing: Rectangle {
+            background: #0d171b99; // dim the backdrop
+            TouchArea {} // swallow clicks behind the card
+            Rectangle {
+                width: min(640px, parent.width - 80px);
+                height: min(560px, parent.height - 80px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Palette.surface;
+                border-radius: 12px;
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 10px;
+                    Text {
+                        text: "New message";
+                        color: Palette.text;
+                        font-size: 18px;
+                        font-weight: 700;
+                    }
+                    Text { text: "To"; color: Palette.muted; font-size: 12px; }
+                    LineEdit { placeholder-text: "name@example.com, …"; text <=> root.c-to; }
+                    Text { text: "Cc (optional)"; color: Palette.muted; font-size: 12px; }
+                    LineEdit { placeholder-text: "name@example.com, …"; text <=> root.c-cc; }
+                    Text { text: "Subject"; color: Palette.muted; font-size: 12px; }
+                    LineEdit { text <=> root.c-subject; }
+                    TextEdit {
+                        text <=> root.c-body;
+                        vertical-stretch: 1;
+                        wrap: word-wrap;
+                    }
+                    if root.compose-status != "": Text {
+                        text: root.compose-status;
+                        color: Palette.danger-strong;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        alignment: end;
+                        Rectangle {
+                            width: 100px;
+                            height: 40px;
+                            border-radius: 8px;
+                            background: Palette.bg;
+                            border-width: 1px;
+                            border-color: Palette.divider;
+                            Text {
+                                text: "Cancel";
+                                color: Palette.text;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                            TouchArea {
+                                enabled: !root.sending;
+                                clicked => { root.cancel-compose(); }
+                            }
+                        }
+                        Rectangle {
+                            width: 120px;
+                            height: 40px;
+                            border-radius: 8px;
+                            background: Palette.accent-strong;
+                            opacity: root.sending ? 0.6 : 1.0;
+                            Text {
+                                text: root.sending ? "Sending…" : "Send";
+                                color: white;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                            TouchArea {
+                                enabled: !root.sending;
+                                clicked => { root.send-message(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -936,6 +1046,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(doc) = current_allowed.borrow().as_ref() {
                 show_html(&ui, &view, doc);
             }
+        });
+    }
+
+    // Compose → open the new-message overlay (hide the webview so it can't cover it).
+    {
+        let weak = ui.as_weak();
+        let view = html_view.clone();
+        ui.on_compose(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            hide_html(&view);
+            ui.set_c_to(SharedString::new());
+            ui.set_c_cc(SharedString::new());
+            ui.set_c_subject(SharedString::new());
+            ui.set_c_body(SharedString::new());
+            ui.set_compose_status(SharedString::new());
+            ui.set_composing(true);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_cancel_compose(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_composing(false);
+            }
+        });
+    }
+
+    // Send → build + send on a worker thread (P1), then close the overlay or show a calm error.
+    {
+        let weak = ui.as_weak();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        ui.on_send_message(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.get_sending() {
+                return;
+            }
+            if ui.get_c_to().trim().is_empty() {
+                ui.set_compose_status("Add at least one recipient.".into());
+                return;
+            }
+            let (to, cc, subject, body) = (
+                ui.get_c_to().to_string(),
+                ui.get_c_cc().to_string(),
+                ui.get_c_subject().to_string(),
+                ui.get_c_body().to_string(),
+            );
+            ui.set_compose_status(SharedString::new());
+            ui.set_sending(true);
+
+            let weak = weak.clone();
+            let db_path = db_path.clone();
+            let secrets = secrets.clone();
+            std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    refresh::run_send(&db_path, &*secrets, &to, &cc, &subject, &body)
+                }))
+                .unwrap_or_else(|_| Err("Couldn't send — something went wrong.".to_owned()));
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    ui.set_sending(false);
+                    match result {
+                        Ok(()) => {
+                            ui.set_composing(false);
+                            ui.set_sync_status("Message sent.".into());
+                        }
+                        Err(msg) => ui.set_compose_status(msg.into()),
+                    }
+                });
+            });
         });
     }
 
