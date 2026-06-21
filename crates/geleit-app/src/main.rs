@@ -1110,21 +1110,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Build the webview once, just after the window is up, so the first mail open is instant.
-    let webview_init = slint::Timer::default();
-    {
-        let weak = ui.as_weak();
-        let view = html_view.clone();
-        webview_init.start(
-            slint::TimerMode::SingleShot,
-            Duration::from_millis(150),
-            move || {
-                if let Some(ui) = weak.upgrade() {
-                    ensure_webview(&ui, &view);
-                }
-            },
-        );
-    }
+    // NOTE: the webview is built lazily on first HTML message (in `show_html`/`ensure_webview`), NOT
+    // eagerly at startup. Building it at launch raced Slint's GL renderer and crashed the window with
+    // an async `GLXBadWindow` before anything was clicked (regression from S3.6). Lazy build keeps the
+    // app opening reliably; the proper fix for the GL coexistence is a follow-up (software renderer).
 
     // full reload (also the initial load) — reused by setup success
     {
