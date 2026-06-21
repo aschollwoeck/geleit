@@ -350,6 +350,48 @@ pub fn run_move(
         .map_err(|_| "Couldn't move the message on the server.".to_owned())
 }
 
+/// Permanently delete one message by UID (ORG-2). Blocking + network: **worker thread.**
+pub fn run_delete_permanently(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    uid: u32,
+) -> Result<(), String> {
+    let config = first_account_imap(db_path, secrets)?;
+    runtime()?
+        .block_on(imap::delete_permanently(&config, secrets, folder, uid))
+        .map_err(|_| "Couldn't delete the message on the server.".to_owned())
+}
+
+/// Empty a folder on the server (ORG-2, empty-trash). Blocking + network: **worker thread.**
+pub fn run_empty_folder(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    folder: &str,
+) -> Result<(), String> {
+    let config = first_account_imap(db_path, secrets)?;
+    runtime()?
+        .block_on(imap::empty_folder(&config, secrets, folder))
+        .map_err(|_| "Couldn't empty the folder on the server.".to_owned())
+}
+
+/// The first account's IMAP config (host/port/username/allow-invalid), for write-back ops.
+fn first_account_imap(db_path: &str, secrets: &dyn SecretStore) -> Result<ImapConfig, String> {
+    let store = open_store(db_path, secrets)?;
+    let account = store
+        .list_accounts()
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No account is set up yet.".to_owned())?;
+    let imap = store
+        .imap_settings(account.id)
+        .ok()
+        .flatten()
+        .ok_or_else(|| "This account isn't set up.".to_owned())?;
+    Ok(to_config(&imap))
+}
+
 /// Sync the first account's `folder` (+ folder list), reading settings from the store and the
 /// password from the shared secrets. Blocking + network: **run on a worker thread.**
 pub fn run_refresh(db_path: &str, secrets: &dyn SecretStore, folder: &str) -> Result<(), String> {
