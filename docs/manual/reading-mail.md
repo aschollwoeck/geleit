@@ -44,8 +44,9 @@ later, choose **Mark as unread** at the top of the reading area to bring the dot
 If the message has files attached, an **Attachments** list appears under the message showing each
 file's name and size. (Saving attachments to your computer is coming soon.)
 
-Some messages are written only in rich (HTML) formatting. For now those show a short note instead
-of the formatting — safe display of formatted mail is coming in a later version.
+Messages written in rich (HTML) formatting are shown **formatted**, in a protected view that has
+**remote images, trackers, and scripts already stripped out** — so opening a message can't quietly
+load anything from the internet or run code. Plain-text messages show as before.
 
 ## Getting new mail
 

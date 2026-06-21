@@ -5,14 +5,71 @@
 mod refresh;
 mod viewmodel;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use geleit_engine::imap;
 use geleit_platform::os_secret::OsSecretStore;
 use geleit_store::Store;
+use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
+
+/// Shared handle to the embedded HTML webview + whether it's currently shown.
+#[derive(Default)]
+struct HtmlView {
+    webview: RefCell<Option<wry::WebView>>,
+    visible: Cell<bool>,
+}
+
+/// The reading-pane body region (logical coords) the webview should cover — right of the rail
+/// (240) + list (380), below the subject/sender header (~132).
+fn body_rect(ui: &Main) -> wry::Rect {
+    let scale = ui.window().scale_factor();
+    let phys = ui.window().size();
+    let w = (phys.width as f32 / scale) - 620.0;
+    let h = (phys.height as f32 / scale) - 132.0;
+    wry::Rect {
+        position: wry::dpi::LogicalPosition::new(620.0_f32, 132.0_f32).into(),
+        size: wry::dpi::LogicalSize::new(w.max(0.0), h.max(0.0)).into(),
+    }
+}
+
+/// Render `sanitized_html` in the embedded sandboxed webview over the reading-pane body. Lazily
+/// builds the child webview on first use; a no-op (text fallback stays) if embedding is unavailable
+/// (e.g. Wayland — `build_as_child` is X11-only).
+fn show_html(ui: &Main, view: &HtmlView, sanitized_html: &str) {
+    let rect = body_rect(ui);
+    if view.webview.borrow().is_none() {
+        let built = ui.window().with_winit_window(|win| {
+            wry::WebViewBuilder::new()
+                // defense-in-depth (guidelines §13): sanitization already removes scripts, but
+                // disable JS in the webview too so a sanitizer miss still can't execute.
+                .with_javascript_disabled()
+                .with_bounds(rect)
+                .build_as_child(win)
+        });
+        match built {
+            Some(Ok(w)) => *view.webview.borrow_mut() = Some(w),
+            _ => return, // embedding unavailable → leave the plain-text pane showing
+        }
+    }
+    if let Some(w) = view.webview.borrow().as_ref() {
+        let _ = w.load_html(sanitized_html);
+        let _ = w.set_bounds(rect);
+        let _ = w.set_visible(true);
+        view.visible.set(true);
+    }
+}
+
+/// Hide the embedded webview so the Slint reading pane (text / form) shows.
+fn hide_html(view: &HtmlView) {
+    if let Some(w) = view.webview.borrow().as_ref() {
+        let _ = w.set_visible(false);
+    }
+    view.visible.set(false);
+}
 
 // TODO (design polish, later slices): real line-icon for the attachment marker (design.md §7,
 // currently "[paperclip]"), bundle the Hanken Grotesk font (§3), per-account avatar initial + a
@@ -611,6 +668,10 @@ fn post_reload(weak: &slint::Weak<Main>, status: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The embedded HTML webview (S3.1) uses webkit2gtk, which needs GTK initialised + its loop
+    // pumped. Best-effort: if GTK isn't available the app still runs (HTML falls back to text).
+    let gtk_ready = gtk::init().is_ok();
+
     let db = std::env::var("GELEIT_DB").unwrap_or_else(|_| "geleit.db".to_owned());
     // Secret store backed by the OS keychain (S2.1). Send+Sync → shared across the UI + workers.
     let secrets = Arc::new(OsSecretStore::new());
@@ -621,8 +682,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let folders_model = Rc::new(VecModel::<SharedString>::default());
     let folder_ids = Rc::new(RefCell::new(Vec::<i64>::new()));
     let messages = Rc::new(VecModel::<MessageItem>::default());
+    let html_view = Rc::new(HtmlView::default());
     ui.set_folders(ModelRc::from(folders_model.clone()));
     ui.set_messages(ModelRc::from(messages.clone()));
+
+    // Pump GTK (so the embedded webview renders) under Slint's loop, and keep the webview's bounds
+    // on the reading-pane body while it's shown. Kept alive for the app's lifetime.
+    let gtk_pump = slint::Timer::default();
+    {
+        let weak = ui.as_weak();
+        let view = html_view.clone();
+        gtk_pump.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(16),
+            move || {
+                if gtk_ready {
+                    while gtk::events_pending() {
+                        gtk::main_iteration_do(false);
+                    }
+                }
+                if view.visible.get() {
+                    if let (Some(ui), Some(w)) = (weak.upgrade(), view.webview.borrow().as_ref()) {
+                        let _ = w.set_bounds(body_rect(&ui));
+                    }
+                }
+            },
+        );
+    }
 
     // full reload (also the initial load) — reused by setup success
     {
@@ -631,9 +717,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let fm = folders_model.clone();
         let fids = folder_ids.clone();
         let msgs = messages.clone();
+        let view = html_view.clone();
         ui.on_reload(move || {
             if let Some(ui) = weak.upgrade() {
                 reload_all(&ui, &store, &fm, &fids, &msgs);
+                hide_html(&view); // nothing selected → show the Slint pane / form
             }
         });
     }
@@ -645,6 +733,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let fids = folder_ids.clone();
         let model = messages.clone();
+        let view = html_view.clone();
         ui.on_folder_selected(move |idx| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(fid) = fids.borrow().get(idx as usize).copied() else {
@@ -653,6 +742,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_selected_folder(idx);
             ui.set_selected_message(0);
             model.set_vec(load_messages(&store, fid));
+            hide_html(&view); // selection cleared
         });
     }
 
@@ -661,17 +751,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let store = store.clone();
         let model = messages.clone();
+        let view = html_view.clone();
         ui.on_message_selected(move |item| {
             let Some(ui) = weak.upgrade() else { return };
             ui.set_selected_message(item.id);
             ui.set_r_subject(item.subject.clone());
             ui.set_r_sender(item.sender.clone());
             ui.set_r_date(item.date.clone());
-            let body = match store.body_for(item.id.into()) {
-                Ok(b) => viewmodel::body_display(b.as_ref()),
-                Err(_) => "(Could not load this message.)".to_owned(),
+            let stored = store.body_for(item.id.into());
+            let (body_text, html) = match &stored {
+                Ok(b) => (
+                    viewmodel::body_display(b.as_ref()),
+                    b.as_ref().and_then(|x| x.html.clone()),
+                ),
+                Err(_) => ("(Could not load this message.)".to_owned(), None),
             };
-            ui.set_r_body(body.into());
+            ui.set_r_body(body_text.into());
+            // HTML messages render in the sandboxed webview; text messages use the Slint pane.
+            match html {
+                Some(h) => show_html(&ui, &view, &geleit_engine::safehtml::sanitize_html(&h)),
+                None => hide_html(&view),
+            }
             let labels: Vec<SharedString> = store
                 .attachments_for(item.id.into())
                 .unwrap_or_default()
