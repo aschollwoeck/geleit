@@ -188,6 +188,12 @@ pub fn has_password(secrets: &dyn SecretStore, username: &str) -> Result<bool, I
     Ok(secrets.get(SECRET_SERVICE, username)?.is_some())
 }
 
+/// Read the stored password for `username` (shared with SMTP — same credentials). `None` if absent.
+/// The caller must not log it (P2).
+pub fn password(secrets: &dyn SecretStore, username: &str) -> Result<Option<Vec<u8>>, ImapError> {
+    Ok(secrets.get(SECRET_SERVICE, username)?)
+}
+
 /// Remove a stored IMAP password (e.g. on account removal, SEC-3). Idempotent — deleting an absent
 /// secret succeeds (the `SecretStore` contract).
 pub fn delete_password(secrets: &dyn SecretStore, username: &str) -> Result<(), ImapError> {

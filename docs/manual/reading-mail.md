@@ -53,6 +53,15 @@ When a message *did* contain remote content, you'll see a small **"Remote conten
 with a **Load remote images** button. Nothing remote loads until you choose to: click it and that
 one message is re-shown with its images fetched. (Scripts are never run, even then.)
 
+## Writing a message
+
+Choose **New message** on the left to open the compose window. Fill in **To** (separate several
+addresses with commas), an optional **Cc**, a **Subject**, and your message, then choose **Send**.
+GeleitMail sends it through your account's outgoing (SMTP) server — which you set up alongside your
+incoming server when you added the account. Sending happens in the background, so the app stays
+responsive; if something goes wrong you'll see a short, plain explanation and your draft stays open
+to try again.
+
 ## Getting new mail
 
 Choose **Refresh** at the top of the message list to fetch new mail from your provider. While it
