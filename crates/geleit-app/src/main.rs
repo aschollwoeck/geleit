@@ -105,7 +105,7 @@ fn hide_html(view: &HtmlView) {
 // currently "[paperclip]"), bundle the Hanken Grotesk font (§3), per-account avatar initial + a
 // folder hover state, and the selected-message guide edge (arrives with selection in S1.8).
 slint::slint! {
-    import { ListView, ScrollView, LineEdit, TextEdit } from "std-widgets.slint";
+    import { ListView, ScrollView } from "std-widgets.slint";
 
     // Soft-daylight tokens from design.md.
     global Palette {
@@ -138,6 +138,41 @@ slint::slint! {
         subject: string,
         recipients: string,
         date: string,
+    }
+
+    // A text input styled to the Soft-daylight palette: always visible (surface fill + divider
+    // border), accent border on focus, dark text, muted placeholder. Replaces std-widgets LineEdit/
+    // TextEdit, whose default style is invisible against our background.
+    component Field inherits Rectangle {
+        in-out property <string> text <=> input.text;
+        in property <string> placeholder;
+        in property <bool> password;
+        in property <bool> multiline;
+        min-height: 38px;
+        border-radius: 8px;
+        background: Palette.surface;
+        border-width: 1px;
+        border-color: input.has-focus ? Palette.accent : Palette.divider;
+        clip: true;
+        forward-focus: input;
+        HorizontalLayout {
+            padding: 9px;
+            input := TextInput {
+                color: Palette.text;
+                font-size: 14px;
+                single-line: !root.multiline;
+                wrap: root.multiline ? word-wrap : no-wrap;
+                input-type: root.password ? InputType.password : InputType.text;
+                vertical-alignment: root.multiline ? top : center;
+            }
+        }
+        if root.text == "": Text {
+            text: root.placeholder;
+            color: Palette.muted;
+            font-size: 14px;
+            x: 9px;
+            y: root.multiline ? 9px : (parent.height - self.height) / 2;
+        }
     }
 
     export component Main inherits Window {
@@ -667,21 +702,21 @@ slint::slint! {
                                 wrap: word-wrap;
                             }
                             Text { text: "Email"; color: Palette.muted; font-size: 12px; }
-                            LineEdit { placeholder-text: "you@example.com"; text <=> root.f-email; }
+                            Field { placeholder: "you@example.com"; text <=> root.f-email; }
                             Text { text: "Display name (optional)"; color: Palette.muted; font-size: 12px; }
-                            LineEdit { placeholder-text: "Your name"; text <=> root.f-name; }
+                            Field { placeholder: "Your name"; text <=> root.f-name; }
                             Text { text: "IMAP server"; color: Palette.muted; font-size: 12px; }
-                            LineEdit { placeholder-text: "imap.example.com"; text <=> root.f-host; }
+                            Field { placeholder: "imap.example.com"; text <=> root.f-host; }
                             Text { text: "Port"; color: Palette.muted; font-size: 12px; }
-                            LineEdit { placeholder-text: "993"; text <=> root.f-port; }
+                            Field { placeholder: "993"; text <=> root.f-port; }
                             Text { text: "Username"; color: Palette.muted; font-size: 12px; }
-                            LineEdit { placeholder-text: "usually your email"; text <=> root.f-user; }
+                            Field { placeholder: "usually your email"; text <=> root.f-user; }
                             Text { text: "Password"; color: Palette.muted; font-size: 12px; }
-                            LineEdit { input-type: password; text <=> root.f-pass; }
+                            Field { password: true; text <=> root.f-pass; }
                             Text { text: "SMTP server (for sending)"; color: Palette.muted; font-size: 12px; }
-                            LineEdit { placeholder-text: "smtp.example.com"; text <=> root.f-smtp-host; }
+                            Field { placeholder: "smtp.example.com"; text <=> root.f-smtp-host; }
                             Text { text: "SMTP port"; color: Palette.muted; font-size: 12px; }
-                            LineEdit { placeholder-text: root.f-smtp-starttls ? "587" : "465"; text <=> root.f-smtp-port; }
+                            Field { placeholder: root.f-smtp-starttls ? "587" : "465"; text <=> root.f-smtp-port; }
                             HorizontalLayout {
                                 spacing: 8px;
                                 Rectangle {
@@ -708,12 +743,11 @@ slint::slint! {
                                 }
                             }
                             Text { text: "Signature (optional)"; color: Palette.muted; font-size: 12px; }
-                            Rectangle {
+                            Field {
                                 height: 72px;
-                                border-radius: 6px;
-                                border-width: 1px;
-                                border-color: Palette.divider;
-                                TextEdit { text <=> root.f-signature; wrap: word-wrap; }
+                                multiline: true;
+                                placeholder: "e.g. — Your Name";
+                                text <=> root.f-signature;
                             }
                             if root.setup-error != "": Text {
                                 text: root.setup-error;
@@ -768,15 +802,16 @@ slint::slint! {
                         font-weight: 700;
                     }
                     Text { text: "To"; color: Palette.muted; font-size: 12px; }
-                    LineEdit { placeholder-text: "name@example.com, …"; text <=> root.c-to; }
+                    Field { placeholder: "name@example.com, …"; text <=> root.c-to; }
                     Text { text: "Cc (optional)"; color: Palette.muted; font-size: 12px; }
-                    LineEdit { placeholder-text: "name@example.com, …"; text <=> root.c-cc; }
+                    Field { placeholder: "name@example.com, …"; text <=> root.c-cc; }
                     Text { text: "Subject"; color: Palette.muted; font-size: 12px; }
-                    LineEdit { text <=> root.c-subject; }
-                    TextEdit {
+                    Field { text <=> root.c-subject; }
+                    Field {
+                        multiline: true;
+                        placeholder: "Write your message…";
                         text <=> root.c-body;
                         vertical-stretch: 1;
-                        wrap: word-wrap;
                     }
                     if root.compose-status != "": Text {
                         text: root.compose-status;
