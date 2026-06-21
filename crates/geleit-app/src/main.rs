@@ -156,6 +156,9 @@ slint::slint! {
         in-out property <string> f-port;
         in-out property <string> f-user;
         in-out property <string> f-pass;
+        in-out property <string> f-smtp-host;
+        in-out property <string> f-smtp-port;
+        in-out property <bool> f-smtp-starttls;
         in property <bool> setup-busy;
         in property <string> setup-error;
         private property <bool> confirm-remove;
@@ -588,6 +591,35 @@ slint::slint! {
                             LineEdit { placeholder-text: "usually your email"; text <=> root.f-user; }
                             Text { text: "Password"; color: Palette.muted; font-size: 12px; }
                             LineEdit { input-type: password; text <=> root.f-pass; }
+                            Text { text: "SMTP server (for sending)"; color: Palette.muted; font-size: 12px; }
+                            LineEdit { placeholder-text: "smtp.example.com"; text <=> root.f-smtp-host; }
+                            Text { text: "SMTP port"; color: Palette.muted; font-size: 12px; }
+                            LineEdit { placeholder-text: root.f-smtp-starttls ? "587" : "465"; text <=> root.f-smtp-port; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Rectangle {
+                                    width: 18px;
+                                    height: 18px;
+                                    border-radius: 4px;
+                                    border-width: 1px;
+                                    border-color: Palette.divider;
+                                    background: root.f-smtp-starttls ? Palette.accent : Palette.surface;
+                                    Text {
+                                        text: root.f-smtp-starttls ? "✓" : "";
+                                        color: white;
+                                        font-size: 12px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    TouchArea { clicked => { root.f-smtp-starttls = !root.f-smtp-starttls; } }
+                                }
+                                Text {
+                                    text: "Use STARTTLS (port 587). Off = implicit TLS (465).";
+                                    color: Palette.muted;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                }
+                            }
                             if root.setup-error != "": Text {
                                 text: root.setup-error;
                                 color: Palette.danger-strong;
@@ -938,6 +970,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.set_f_host(settings.host.clone().into());
                 ui.set_f_port(settings.port.to_string().into());
                 ui.set_f_user(settings.username.clone().into());
+                if let Some(smtp) = store.smtp_settings(account.id).ok().flatten() {
+                    ui.set_f_smtp_host(smtp.host.clone().into());
+                    ui.set_f_smtp_port(smtp.port.to_string().into());
+                    ui.set_f_smtp_starttls(
+                        smtp.security == geleit_store::SmtpSecurityKind::StartTls,
+                    );
+                }
                 ui.set_f_pass(SharedString::new());
                 ui.set_setup_error("Enter your password to reconnect.".into());
                 ui.set_needs_setup(true);
@@ -1032,6 +1071,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
             };
+            let smtp = match refresh::build_smtp_settings(
+                &ui.get_f_smtp_host(),
+                &ui.get_f_smtp_port(),
+                ui.get_f_smtp_starttls(),
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    ui.set_setup_error(e.into());
+                    return;
+                }
+            };
             let password = ui.get_f_pass().to_string();
             if password.is_empty() {
                 ui.set_setup_error("Enter your password.".into());
@@ -1053,6 +1103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &email,
                         display.as_deref(),
                         settings,
+                        smtp,
                         &password,
                     )
                 }))

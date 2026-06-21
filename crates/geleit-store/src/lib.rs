@@ -94,6 +94,14 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE message ADD COLUMN in_reply_to TEXT;
     ",
+    // 6 — per-account SMTP settings (M4, sending). Nullable until configured. Username + password +
+    // the self-signed escape are shared with IMAP; only host/port/security differ. `smtp_security`
+    // is 'implicit' or 'starttls'.
+    "
+    ALTER TABLE account ADD COLUMN smtp_host TEXT;
+    ALTER TABLE account ADD COLUMN smtp_port INTEGER;
+    ALTER TABLE account ADD COLUMN smtp_security TEXT;
+    ",
 ];
 
 /// An account row.
@@ -112,6 +120,40 @@ pub struct ImapSettings {
     pub port: u16,
     pub username: String,
     pub allow_invalid_certs: bool,
+}
+
+/// Transport security for SMTP (the username/password/self-signed flag are shared with IMAP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmtpSecurityKind {
+    /// Implicit TLS (typically port 465).
+    Implicit,
+    /// STARTTLS upgrade (typically port 587).
+    StartTls,
+}
+
+impl SmtpSecurityKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            SmtpSecurityKind::Implicit => "implicit",
+            SmtpSecurityKind::StartTls => "starttls",
+        }
+    }
+    fn from_str(s: &str) -> Self {
+        // default to the safer implicit-TLS reading of any unrecognised value
+        match s {
+            "starttls" => SmtpSecurityKind::StartTls,
+            _ => SmtpSecurityKind::Implicit,
+        }
+    }
+}
+
+/// Per-account SMTP connection settings (host/port/security). Username, password, and the
+/// self-signed escape are shared with [`ImapSettings`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub security: SmtpSecurityKind,
 }
 
 /// A folder/mailbox row.
@@ -315,6 +357,44 @@ impl Store {
                             username,
                             allow_invalid_certs: allow_invalid,
                         }))
+                },
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Replace an account's SMTP settings (for sending, M4).
+    pub fn update_smtp_settings(
+        &self,
+        account_id: i64,
+        smtp: &SmtpConfig,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE account SET smtp_host = ?2, smtp_port = ?3, smtp_security = ?4 WHERE id = ?1",
+            (account_id, &smtp.host, smtp.port, smtp.security.as_str()),
+        )?;
+        Ok(())
+    }
+
+    /// An account's SMTP settings, or `None` if not configured (host unset).
+    pub fn smtp_settings(&self, account_id: i64) -> Result<Option<SmtpConfig>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT smtp_host, smtp_port, smtp_security FROM account WHERE id = ?1",
+                [account_id],
+                |r| {
+                    let host: Option<String> = r.get(0)?;
+                    let port: Option<i64> = r.get(1)?;
+                    let security: Option<String> = r.get(2)?;
+                    Ok(host.zip(port).map(|(host, port)| SmtpConfig {
+                        host,
+                        port: port as u16,
+                        security: security
+                            .as_deref()
+                            .map(SmtpSecurityKind::from_str)
+                            .unwrap_or(SmtpSecurityKind::Implicit),
+                    }))
                 },
             )
             .optional()?
@@ -1028,6 +1108,31 @@ mod tests {
         };
         s.update_imap_settings(acc, &updated).unwrap();
         assert_eq!(s.imap_settings(acc).unwrap(), Some(updated));
+    }
+
+    #[test]
+    fn smtp_settings_roundtrip_update_and_default_none() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("me@example.com", None).unwrap();
+        // unconfigured → None
+        assert_eq!(s.smtp_settings(acc).unwrap(), None);
+
+        let starttls = SmtpConfig {
+            host: "smtp.example.com".to_owned(),
+            port: 587,
+            security: SmtpSecurityKind::StartTls,
+        };
+        s.update_smtp_settings(acc, &starttls).unwrap();
+        assert_eq!(s.smtp_settings(acc).unwrap(), Some(starttls));
+
+        // update + the other security kind round-trips
+        let implicit = SmtpConfig {
+            host: "smtp2.example.com".to_owned(),
+            port: 465,
+            security: SmtpSecurityKind::Implicit,
+        };
+        s.update_smtp_settings(acc, &implicit).unwrap();
+        assert_eq!(s.smtp_settings(acc).unwrap(), Some(implicit));
     }
 
     #[test]
