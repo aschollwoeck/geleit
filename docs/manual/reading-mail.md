@@ -48,6 +48,10 @@ Messages written in rich (HTML) formatting are shown **formatted**, in a protect
 **remote images, trackers, and scripts already stripped out** — so opening a message can't quietly
 load anything from the internet or run code. Plain-text messages show as before.
 
+When a message *did* contain remote content, you'll see a small **"Remote content blocked"** note
+with a **Load remote images** button. Nothing remote loads until you choose to: click it and that
+one message is re-shown with its images fetched. (Scripts are never run, even then.)
+
 ## Getting new mail
 
 Choose **Refresh** at the top of the message list to fetch new mail from your provider. While it

@@ -28,10 +28,16 @@ struct HtmlView {
 fn body_rect(ui: &Main) -> wry::Rect {
     let scale = ui.window().scale_factor();
     let phys = ui.window().size();
+    // leave room for the "remote content blocked" cue bar when it's shown
+    let top = if ui.get_remote_blocked() {
+        168.0
+    } else {
+        132.0
+    };
     let w = (phys.width as f32 / scale) - 620.0;
-    let h = (phys.height as f32 / scale) - 132.0;
+    let h = (phys.height as f32 / scale) - top;
     wry::Rect {
-        position: wry::dpi::LogicalPosition::new(620.0_f32, 132.0_f32).into(),
+        position: wry::dpi::LogicalPosition::new(620.0_f32, top).into(),
         size: wry::dpi::LogicalSize::new(w.max(0.0), h.max(0.0)).into(),
     }
 }
@@ -117,6 +123,7 @@ slint::slint! {
         in property <bool> refreshing;
         in property <string> status; // non-empty = error to show (danger banner)
         in property <string> sync-status; // non-empty = calm sync-progress line
+        in property <bool> remote-blocked; // HTML message had remote content stripped (PRIV-3)
         // add-account form
         in property <bool> needs-setup;
         in-out property <string> f-email;
@@ -135,6 +142,7 @@ slint::slint! {
         callback connect();
         callback reload();
         callback remove-account();
+        callback load-remote();
 
         preferred-width: 1100px;
         preferred-height: 720px;
@@ -460,6 +468,36 @@ slint::slint! {
                             Text { text: "Mark as unread"; color: Palette.accent-strong; font-size: 13px; }
                         }
                     }
+                    // remote content blocked (PRIV-3) + per-message opt-in (PRIV-2)
+                    if root.remote-blocked: Rectangle {
+                        height: 32px;
+                        border-radius: 8px;
+                        background: Palette.accent-quiet;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            Text {
+                                text: "Remote content blocked";
+                                color: Palette.text;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            TouchArea {
+                                width: 140px;
+                                clicked => { root.load-remote(); }
+                                Text {
+                                    text: "Load remote images";
+                                    color: Palette.text;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
+                                }
+                            }
+                        }
+                    }
                     ScrollView {
                         Text {
                             text: root.r-body;
@@ -624,6 +662,7 @@ fn reload_all(
 ) {
     ui.set_status(SharedString::new()); // clear any stale main-view banner
     ui.set_sync_status(SharedString::new());
+    ui.set_remote_blocked(false);
     match store
         .list_accounts()
         .ok()
@@ -683,6 +722,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let folder_ids = Rc::new(RefCell::new(Vec::<i64>::new()));
     let messages = Rc::new(VecModel::<MessageItem>::default());
     let html_view = Rc::new(HtmlView::default());
+    // the open HTML message's remote-allowed document, rendered if the user opts in (PRIV-2)
+    let current_allowed = Rc::new(RefCell::new(Option::<String>::None));
     ui.set_folders(ModelRc::from(folders_model.clone()));
     ui.set_messages(ModelRc::from(messages.clone()));
 
@@ -741,6 +782,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             ui.set_selected_folder(idx);
             ui.set_selected_message(0);
+            ui.set_remote_blocked(false);
             model.set_vec(load_messages(&store, fid));
             hide_html(&view); // selection cleared
         });
@@ -752,6 +794,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let model = messages.clone();
         let view = html_view.clone();
+        let current_allowed = current_allowed.clone();
         ui.on_message_selected(move |item| {
             let Some(ui) = weak.upgrade() else { return };
             ui.set_selected_message(item.id);
@@ -768,14 +811,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             ui.set_r_body(body_text.into());
             // HTML messages render in the sandboxed webview; text messages use the Slint pane.
+            // Default = remote blocked; if the message had remote content, offer to load it (PRIV-2/3).
+            use geleit_engine::safehtml;
             match html {
                 Some(h) => {
-                    let doc = geleit_engine::safehtml::document(
-                        &geleit_engine::safehtml::sanitize_html(&h),
-                    );
-                    show_html(&ui, &view, &doc);
+                    // Compare the sanitized BODIES (not the wrapped docs, whose CSP always differs):
+                    // they differ iff the message had remote content → show the cue (PRIV-3).
+                    let body_blocked = safehtml::sanitize_html(&h);
+                    let body_allowed = safehtml::sanitize_html_allowing_remote(&h);
+                    ui.set_remote_blocked(body_blocked != body_allowed);
+                    *current_allowed.borrow_mut() = Some(safehtml::document(&body_allowed, true));
+                    show_html(&ui, &view, &safehtml::document(&body_blocked, false));
                 }
-                None => hide_html(&view),
+                None => {
+                    ui.set_remote_blocked(false);
+                    *current_allowed.borrow_mut() = None;
+                    hide_html(&view);
+                }
             }
             let labels: Vec<SharedString> = store
                 .attachments_for(item.id.into())
@@ -798,6 +850,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_mark_unread(move |id| {
             let _ = store.set_seen(id.into(), false);
             flip_unread(&model, id, true);
+        });
+    }
+
+    // "Load remote images" → re-render the open message with remote content allowed (PRIV-2 opt-in).
+    {
+        let weak = ui.as_weak();
+        let view = html_view.clone();
+        let current_allowed = current_allowed.clone();
+        ui.on_load_remote(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_remote_blocked(false); // hide the cue first so body_rect repositions the webview
+            if let Some(doc) = current_allowed.borrow().as_ref() {
+                show_html(&ui, &view, doc);
+            }
         });
     }
 
