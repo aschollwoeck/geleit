@@ -1879,6 +1879,7 @@ dependencies = [
  "geleit-platform",
  "geleit-store",
  "lettre",
+ "mail-builder",
  "mail-parser",
  "proptest",
  "rustls",
@@ -3294,6 +3295,15 @@ name = "mac"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
+
+[[package]]
+name = "mail-builder"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "900998f307338c4013a28ab14d760b784067324b164448c6d98a89e44810473b"
+dependencies = [
+ "gethostname",
+]
 
 [[package]]
 name = "mail-parser"
