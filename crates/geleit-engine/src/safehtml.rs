@@ -18,9 +18,27 @@ pub fn sanitize_html(raw: &str) -> String {
         .to_string()
 }
 
+/// Wrap already-sanitized body HTML in a minimal document carrying a strict Content-Security-Policy
+/// (defense-in-depth, S3.2). `default-src 'none'` covers all *fetch* directives (script/connect/
+/// img/font/frame/object…) so nothing loads or executes even if sanitization missed something;
+/// `form-action`/`base-uri` are added explicitly because they don't fall back to `default-src`.
+/// `style-src 'unsafe-inline'` is only for this trusted wrapper's `<style>` — body `<style>`/`style=`
+/// are stripped by the sanitizer. The CSP `<meta>` lives in this trusted wrapper (the sanitized body
+/// can't contain `<meta>`), so it governs.
+pub fn document(sanitized_body: &str) -> String {
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+         <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; \
+img-src data: cid:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'\">\
+         <style>html{{font-family:system-ui,sans-serif;color:#1f2a2e;background:#fbfaf7;\
+margin:0;padding:12px;line-height:1.5}}a{{color:#1c7e7b}}img{{max-width:100%;height:auto}}</style>\
+         </head><body>{sanitized_body}</body></html>"
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sanitize_html;
+    use super::{document, sanitize_html};
 
     #[test]
     fn strips_scripts() {
@@ -73,6 +91,51 @@ mod tests {
         assert!(!out.contains("<base"), "out: {out}");
         assert!(!out.contains("<meta"), "out: {out}");
         assert!(!out.contains("http://x"), "out: {out}");
+    }
+
+    #[test]
+    fn document_wraps_with_strict_csp() {
+        let doc = document("<p>body here</p>");
+        assert!(doc.contains("Content-Security-Policy"), "doc: {doc}");
+        assert!(doc.contains("default-src 'none'"), "doc: {doc}");
+        assert!(doc.contains("form-action 'none'"), "doc: {doc}");
+        assert!(doc.contains("base-uri 'none'"), "doc: {doc}");
+        assert!(
+            !doc.contains("script-src"),
+            "no script-src allowance: {doc}"
+        );
+        assert!(doc.contains("<p>body here</p>"), "body included: {doc}");
+        assert!(doc.starts_with("<!doctype html>"));
+    }
+
+    #[test]
+    fn sandbox_escape_vectors_are_neutralised() {
+        let out = sanitize_html(
+            "<a href=\"javascript:steal()\">x</a>\
+             <svg onload=\"steal()\"><circle/></svg>\
+             <button formaction=\"http://evil/\">y</button>\
+             <div style=\"width:expression(steal())\">z</div>\
+             <a href=\"vbscript:bad\">w</a>",
+        );
+        assert!(!out.contains("javascript:"), "out: {out}");
+        assert!(!out.contains("vbscript:"), "out: {out}");
+        assert!(!out.contains("onload"), "out: {out}");
+        assert!(!out.contains("formaction"), "out: {out}");
+        assert!(!out.contains("expression"), "out: {out}");
+        assert!(!out.contains("steal"), "out: {out}");
+    }
+
+    #[test]
+    fn obfuscated_script_schemes_and_svg_links_are_neutralised() {
+        // case-variant + entity-encoded scheme, and SVG xlink:href — the allowlist must catch these
+        let out = sanitize_html(
+            "<a href=\"JaVaScRiPt:bad()\">a</a>\
+             <a href=\"java&#115;cript:bad()\">b</a>\
+             <svg><a xlink:href=\"javascript:bad()\">c</a></svg>",
+        );
+        assert!(!out.to_lowercase().contains("javascript:"), "out: {out}");
+        assert!(!out.contains("bad()"), "out: {out}");
+        assert!(!out.contains("<svg"), "out: {out}");
     }
 
     #[test]

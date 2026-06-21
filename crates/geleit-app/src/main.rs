@@ -769,7 +769,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_r_body(body_text.into());
             // HTML messages render in the sandboxed webview; text messages use the Slint pane.
             match html {
-                Some(h) => show_html(&ui, &view, &geleit_engine::safehtml::sanitize_html(&h)),
+                Some(h) => {
+                    let doc = geleit_engine::safehtml::document(
+                        &geleit_engine::safehtml::sanitize_html(&h),
+                    );
+                    show_html(&ui, &view, &doc);
+                }
                 None => hide_html(&view),
             }
             let labels: Vec<SharedString> = store
