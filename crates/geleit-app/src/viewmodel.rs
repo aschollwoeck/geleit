@@ -62,6 +62,21 @@ pub fn attachment_label(filename: Option<&str>, size: u64) -> String {
     format!("{} · {}", filename.unwrap_or("(unnamed)"), human_size(size))
 }
 
+/// The address token currently being typed in a recipients field — the part after the last comma or
+/// semicolon, trimmed. Used to drive autocomplete (SEND-9).
+pub fn last_token(field: &str) -> &str {
+    field.rsplit([',', ';']).next().unwrap_or("").trim()
+}
+
+/// Replace the last token in `field` with the chosen `addr`, leaving a trailing ", " so the next
+/// recipient can be typed.
+pub fn complete_last_token(field: &str, addr: &str) -> String {
+    match field.rsplit_once([',', ';']) {
+        Some((head, _)) => format!("{}, {addr}, ", head.trim_end()),
+        None => format!("{addr}, "),
+    }
+}
+
 /// Human-readable byte size (B / KB / MB, 1 decimal above 1 KB).
 fn human_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -77,7 +92,24 @@ fn human_size(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{attachment_label, body_display, format_date, human_size, message_vm};
+    use super::{
+        attachment_label, body_display, complete_last_token, format_date, human_size, last_token,
+        message_vm,
+    };
+
+    #[test]
+    fn last_token_and_complete() {
+        assert_eq!(last_token("bo"), "bo");
+        assert_eq!(last_token("a@x, bo"), "bo");
+        assert_eq!(last_token("a@x ,  ca "), "ca");
+        assert_eq!(last_token(""), "");
+        assert_eq!(complete_last_token("bo", "bob@y"), "bob@y, ");
+        assert_eq!(complete_last_token("a@x, bo", "bob@y"), "a@x, bob@y, ");
+        assert_eq!(
+            complete_last_token("a@x, b@y, ca", "carol@z"),
+            "a@x, b@y, carol@z, "
+        );
+    }
     use geleit_store::{MessageHeader, StoredBody};
 
     #[test]

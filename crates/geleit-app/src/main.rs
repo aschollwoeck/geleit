@@ -148,6 +148,7 @@ slint::slint! {
         in property <string> placeholder;
         in property <bool> password;
         in property <bool> multiline;
+        callback edited;
         min-height: 38px;
         border-radius: 8px;
         background: Palette.surface;
@@ -164,6 +165,7 @@ slint::slint! {
                 wrap: root.multiline ? word-wrap : no-wrap;
                 input-type: root.password ? InputType.password : InputType.text;
                 vertical-alignment: root.multiline ? top : center;
+                edited => { root.edited(); }
             }
         }
         if root.text == "": Text {
@@ -200,6 +202,7 @@ slint::slint! {
         in property <string> compose-status; // non-empty = send error
         in property <[string]> c-attachments; // "name · size" per attached file (SEND-4)
         in-out property <string> c-attach-path;
+        in property <[string]> c-suggestions; // address autocomplete for To (SEND-9)
         // drafts (SEND-5)
         in property <[DraftItem]> drafts;
         in property <bool> viewing-drafts;
@@ -238,6 +241,8 @@ slint::slint! {
         callback close-drafts();
         callback attach-file();
         callback remove-attachment(int);
+        callback to-edited();
+        callback pick-suggestion(string);
 
         preferred-width: 1100px;
         preferred-height: 720px;
@@ -806,7 +811,31 @@ slint::slint! {
                         font-weight: 700;
                     }
                     Text { text: "To"; color: Palette.muted; font-size: 12px; }
-                    Field { placeholder: "name@example.com, …"; text <=> root.c-to; }
+                    Field {
+                        placeholder: "name@example.com, …";
+                        text <=> root.c-to;
+                        edited => { root.to-edited(); }
+                    }
+                    if root.c-suggestions.length > 0: Rectangle {
+                        background: Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.divider;
+                        border-radius: 8px;
+                        VerticalLayout {
+                            for sug in root.c-suggestions: Rectangle {
+                                height: 28px;
+                                background: st.has-hover ? Palette.accent-quiet : transparent;
+                                st := TouchArea { clicked => { root.pick-suggestion(sug); } }
+                                Text {
+                                    text: sug;
+                                    x: 9px;
+                                    color: Palette.text;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
                     Text { text: "Cc (optional)"; color: Palette.muted; font-size: 12px; }
                     Field { placeholder: "name@example.com, …"; text <=> root.c-cc; }
                     Text { text: "Subject"; color: Palette.muted; font-size: 12px; }
@@ -1188,6 +1217,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     let attach_model = Rc::new(VecModel::<SharedString>::default());
     ui.set_c_attachments(ModelRc::from(attach_model.clone()));
+    let suggest_model = Rc::new(VecModel::<SharedString>::default());
+    ui.set_c_suggestions(ModelRc::from(suggest_model.clone()));
     ui.set_folders(ModelRc::from(folders_model.clone()));
     ui.set_messages(ModelRc::from(messages.clone()));
 
@@ -1345,6 +1376,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let draft_id = current_draft_id.clone();
         let atts = compose_attachments.clone();
         let amodel = attach_model.clone();
+        let smodel = suggest_model.clone();
         ui.on_compose(move || {
             let Some(ui) = weak.upgrade() else { return };
             hide_html(&view);
@@ -1352,6 +1384,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             *draft_id.borrow_mut() = None; // not editing an existing draft
             atts.borrow_mut().clear();
             refresh_attachments(&amodel, &atts.borrow());
+            smodel.set_vec(Vec::<SharedString>::new());
             ui.set_c_attach_path(SharedString::new());
             ui.set_c_to(SharedString::new());
             ui.set_c_cc(SharedString::new());
@@ -1373,6 +1406,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let draft_id = current_draft_id.clone();
         let atts = compose_attachments.clone();
         let amodel = attach_model.clone();
+        let smodel = suggest_model.clone();
         // kind: 0 = reply, 1 = reply-all, 2 = forward
         let open_compose = move |kind: u8| {
             let Some(ui) = weak.upgrade() else { return };
@@ -1413,6 +1447,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             *draft_id.borrow_mut() = None; // a reply/forward is a new draft
             atts.borrow_mut().clear();
             refresh_attachments(&amodel, &atts.borrow());
+            smodel.set_vec(Vec::<SharedString>::new());
             ui.set_c_attach_path(SharedString::new());
             *thread.borrow_mut() = (draft.in_reply_to.clone(), draft.references.clone());
             ui.set_c_to(draft.to.join(", ").into());
@@ -1568,6 +1603,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let view = html_view.clone();
         let atts = compose_attachments.clone();
         let amodel = attach_model.clone();
+        let smodel = suggest_model.clone();
         ui.on_resume_draft(move |id| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(d) = store.draft_by_id(id.into()).ok().flatten() else {
@@ -1578,6 +1614,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             *thread.borrow_mut() = (d.content.in_reply_to.clone(), d.content.references.clone());
             atts.borrow_mut().clear(); // drafts don't persist attachments yet (follow-up)
             refresh_attachments(&amodel, &atts.borrow());
+            smodel.set_vec(Vec::<SharedString>::new());
             ui.set_c_attach_path(SharedString::new());
             ui.set_c_to(d.content.to.into());
             ui.set_c_cc(d.content.cc.into());
@@ -1635,6 +1672,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             drop(a);
             refresh_attachments(&amodel, &atts.borrow());
+        });
+    }
+
+    // Address autocomplete for To (SEND-9): suggest as you type, fill on click.
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let model = suggest_model.clone();
+        ui.on_to_edited(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let to = ui.get_c_to().to_string();
+            let token = viewmodel::last_token(&to);
+            let acc = store
+                .list_accounts()
+                .ok()
+                .and_then(|a| a.into_iter().next());
+            let suggestions = match acc {
+                Some(acc) if !token.is_empty() => store
+                    .suggest_addresses(acc.id, token, 6)
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            // don't suggest when the only match is exactly what's typed
+            let rows: Vec<SharedString> = suggestions
+                .into_iter()
+                .filter(|s| !s.eq_ignore_ascii_case(token))
+                .map(Into::into)
+                .collect();
+            model.set_vec(rows);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let model = suggest_model.clone();
+        ui.on_pick_suggestion(move |addr| {
+            let Some(ui) = weak.upgrade() else { return };
+            let completed = viewmodel::complete_last_token(&ui.get_c_to(), &addr);
+            ui.set_c_to(completed.into());
+            model.set_vec(Vec::new());
         });
     }
 
