@@ -19,6 +19,16 @@ pub struct Draft {
     pub in_reply_to: Option<String>,
     /// `References` chain (oldest → newest) — set for replies.
     pub references: Vec<String>,
+    /// Files attached to the message (SEND-4).
+    pub attachments: Vec<Attachment>,
+}
+
+/// A file attached to an outgoing message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attachment {
+    pub filename: String,
+    pub content_type: String,
+    pub data: Vec<u8>,
 }
 
 /// The fields of the message being replied to / forwarded that we need to build the new draft.
@@ -48,6 +58,7 @@ pub fn reply(orig: &Original, from_name: Option<String>, from_addr: String) -> D
         body_text: quote(orig),
         in_reply_to: orig.message_id.map(str::to_owned),
         references: references_chain(orig),
+        attachments: Vec::new(),
     }
 }
 
@@ -111,6 +122,7 @@ pub fn forward(orig: &Original, from_name: Option<String>, from_addr: String) ->
         body_text: body,
         in_reply_to: None,
         references: Vec::new(),
+        attachments: Vec::new(),
     }
 }
 
@@ -207,10 +219,41 @@ pub fn build(draft: &Draft) -> Result<Vec<u8>, String> {
         let refs: Vec<&str> = draft.references.iter().map(String::as_str).collect();
         builder = builder.references(refs);
     }
+    for a in &draft.attachments {
+        builder = builder.attachment(a.content_type.as_str(), a.filename.as_str(), a.data.clone());
+    }
 
     builder
         .write_to_vec()
         .map_err(|_| "Couldn't build the message.".to_owned())
+}
+
+/// Guess a MIME content-type from a filename's extension, falling back to a generic binary type.
+pub fn guess_content_type(filename: &str) -> String {
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let ty = match ext.as_str() {
+        "txt" | "text" | "log" => "text/plain",
+        "html" | "htm" => "text/html",
+        "csv" => "text/csv",
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        "zip" => "application/zip",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        _ => "application/octet-stream",
+    };
+    ty.to_owned()
 }
 
 /// The signature block to append to a composed body: a blank line, the standard `-- ` delimiter, then
@@ -261,6 +304,22 @@ mod tests {
         // mail-builder auto-fills the RFC-required headers
         assert!(s.contains("Date:"), "auto Date: {s}");
         assert!(s.contains("Message-ID:"), "auto Message-ID: {s}");
+    }
+
+    #[test]
+    fn attachment_is_included_and_parseable() {
+        let mut d = sample();
+        d.attachments = vec![Attachment {
+            filename: "notes.txt".into(),
+            content_type: "text/plain".into(),
+            data: b"hello file".to_vec(),
+        }];
+        use mail_parser::MimeHeaders;
+        let bytes = build(&d).unwrap();
+        let msg = mail_parser::MessageParser::default().parse(&bytes).unwrap();
+        let att = msg.attachments().next().expect("an attachment");
+        assert_eq!(att.attachment_name(), Some("notes.txt"));
+        assert_eq!(att.contents(), b"hello file");
     }
 
     #[test]
@@ -390,6 +449,41 @@ mod tests {
         let mut o = orig();
         o.subject = "Fw: Lunch";
         assert_eq!(forward(&o, None, "me@x".into()).subject, "Fw: Lunch");
+    }
+
+    #[test]
+    fn guess_content_type_by_extension() {
+        for (name, ty) in [
+            ("a.txt", "text/plain"),
+            ("a.text", "text/plain"),
+            ("a.log", "text/plain"),
+            ("a.html", "text/html"),
+            ("a.htm", "text/html"),
+            ("a.csv", "text/csv"),
+            ("a.PDF", "application/pdf"), // case-insensitive
+            ("a.json", "application/json"),
+            ("a.zip", "application/zip"),
+            ("a.doc", "application/msword"),
+            (
+                "a.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            ("a.xls", "application/vnd.ms-excel"),
+            (
+                "a.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+            ("a.png", "image/png"),
+            ("a.jpg", "image/jpeg"),
+            ("a.jpeg", "image/jpeg"),
+            ("a.gif", "image/gif"),
+            ("a.webp", "image/webp"),
+            ("a.svg", "image/svg+xml"),
+            ("noext", "application/octet-stream"),
+            ("a.unknown", "application/octet-stream"),
+        ] {
+            assert_eq!(guess_content_type(name), ty, "for {name}");
+        }
     }
 
     #[test]

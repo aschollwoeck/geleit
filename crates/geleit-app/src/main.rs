@@ -198,6 +198,8 @@ slint::slint! {
         in-out property <string> c-body;
         in property <bool> sending;
         in property <string> compose-status; // non-empty = send error
+        in property <[string]> c-attachments; // "name · size" per attached file (SEND-4)
+        in-out property <string> c-attach-path;
         // drafts (SEND-5)
         in property <[DraftItem]> drafts;
         in property <bool> viewing-drafts;
@@ -234,6 +236,8 @@ slint::slint! {
         callback resume-draft(int);
         callback save-draft();
         callback close-drafts();
+        callback attach-file();
+        callback remove-attachment(int);
 
         preferred-width: 1100px;
         preferred-height: 720px;
@@ -813,6 +817,47 @@ slint::slint! {
                         text <=> root.c-body;
                         vertical-stretch: 1;
                     }
+                    // attachments (SEND-4): type/paste a path + Attach (native picker is a follow-up)
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Field {
+                            placeholder: "/path/to/a/file to attach";
+                            text <=> root.c-attach-path;
+                            horizontal-stretch: 1;
+                        }
+                        Rectangle {
+                            width: 90px;
+                            height: 38px;
+                            border-radius: 8px;
+                            background: Palette.bg;
+                            border-width: 1px;
+                            border-color: Palette.divider;
+                            Text {
+                                text: "Attach";
+                                color: Palette.text;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                            TouchArea { clicked => { root.attach-file(); } }
+                        }
+                    }
+                    for a[i] in root.c-attachments: HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: a;
+                            color: Palette.muted;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: "Remove";
+                            color: Palette.accent-strong;
+                            font-size: 12px;
+                            TouchArea { clicked => { root.remove-attachment(i); } }
+                        }
+                    }
                     if root.compose-status != "": Text {
                         text: root.compose-status;
                         color: Palette.danger-strong;
@@ -975,6 +1020,18 @@ fn load_draft_items(store: &Store) -> Vec<DraftItem> {
         .collect()
 }
 
+/// Refresh the compose attachment display model ("name · size" per file) from the real list.
+fn refresh_attachments(
+    model: &VecModel<SharedString>,
+    atts: &[geleit_engine::message::Attachment],
+) {
+    let rows: Vec<SharedString> = atts
+        .iter()
+        .map(|a| viewmodel::attachment_label(Some(&a.filename), a.data.len() as u64).into())
+        .collect();
+    model.set_vec(rows);
+}
+
 /// The first account's signature (empty if none) — appended to composed messages.
 fn account_signature(store: &Store) -> String {
     store
@@ -1125,6 +1182,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_draft_id = Rc::new(RefCell::new(Option::<i64>::None));
     let drafts_model = Rc::new(VecModel::<DraftItem>::default());
     ui.set_drafts(ModelRc::from(drafts_model.clone()));
+    // files attached to the message being composed (bytes live here, not in Slint), + a display model
+    let compose_attachments = Rc::new(RefCell::new(
+        Vec::<geleit_engine::message::Attachment>::new(),
+    ));
+    let attach_model = Rc::new(VecModel::<SharedString>::default());
+    ui.set_c_attachments(ModelRc::from(attach_model.clone()));
     ui.set_folders(ModelRc::from(folders_model.clone()));
     ui.set_messages(ModelRc::from(messages.clone()));
 
@@ -1280,11 +1343,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let thread = compose_thread.clone();
         let store = store.clone();
         let draft_id = current_draft_id.clone();
+        let atts = compose_attachments.clone();
+        let amodel = attach_model.clone();
         ui.on_compose(move || {
             let Some(ui) = weak.upgrade() else { return };
             hide_html(&view);
             *thread.borrow_mut() = (None, Vec::new()); // a fresh message, not a reply
             *draft_id.borrow_mut() = None; // not editing an existing draft
+            atts.borrow_mut().clear();
+            refresh_attachments(&amodel, &atts.borrow());
+            ui.set_c_attach_path(SharedString::new());
             ui.set_c_to(SharedString::new());
             ui.set_c_cc(SharedString::new());
             ui.set_c_subject(SharedString::new());
@@ -1303,6 +1371,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let view = html_view.clone();
         let thread = compose_thread.clone();
         let draft_id = current_draft_id.clone();
+        let atts = compose_attachments.clone();
+        let amodel = attach_model.clone();
         // kind: 0 = reply, 1 = reply-all, 2 = forward
         let open_compose = move |kind: u8| {
             let Some(ui) = weak.upgrade() else { return };
@@ -1341,6 +1411,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             hide_html(&view);
             *draft_id.borrow_mut() = None; // a reply/forward is a new draft
+            atts.borrow_mut().clear();
+            refresh_attachments(&amodel, &atts.borrow());
+            ui.set_c_attach_path(SharedString::new());
             *thread.borrow_mut() = (draft.in_reply_to.clone(), draft.references.clone());
             ui.set_c_to(draft.to.join(", ").into());
             ui.set_c_cc(draft.cc.join(", ").into());
@@ -1376,6 +1449,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let secrets = secrets.clone();
         let thread = compose_thread.clone();
         let draft_id = current_draft_id.clone();
+        let atts = compose_attachments.clone();
         ui.on_send_message(move || {
             let Some(ui) = weak.upgrade() else { return };
             if ui.get_sending() {
@@ -1392,6 +1466,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.get_c_body().to_string(),
             );
             let (in_reply_to, references) = thread.borrow().clone();
+            let attachments = atts.borrow().clone();
             let draft = *draft_id.borrow();
             ui.set_compose_status(SharedString::new());
             ui.set_sending(true);
@@ -1410,6 +1485,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &body,
                         in_reply_to,
                         references,
+                        attachments,
                         draft,
                     )
                 }))
@@ -1490,6 +1566,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let thread = compose_thread.clone();
         let draft_id = current_draft_id.clone();
         let view = html_view.clone();
+        let atts = compose_attachments.clone();
+        let amodel = attach_model.clone();
         ui.on_resume_draft(move |id| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(d) = store.draft_by_id(id.into()).ok().flatten() else {
@@ -1498,6 +1576,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hide_html(&view);
             *draft_id.borrow_mut() = Some(d.id);
             *thread.borrow_mut() = (d.content.in_reply_to.clone(), d.content.references.clone());
+            atts.borrow_mut().clear(); // drafts don't persist attachments yet (follow-up)
+            refresh_attachments(&amodel, &atts.borrow());
+            ui.set_c_attach_path(SharedString::new());
             ui.set_c_to(d.content.to.into());
             ui.set_c_cc(d.content.cc.into());
             ui.set_c_subject(d.content.subject.into());
@@ -1505,6 +1586,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_compose_status(SharedString::new());
             ui.set_viewing_drafts(false);
             ui.set_composing(true);
+        });
+    }
+
+    // Attach a file by path (SEND-4) / remove one. (A native file picker is a follow-up.)
+    {
+        let weak = ui.as_weak();
+        let atts = compose_attachments.clone();
+        let amodel = attach_model.clone();
+        ui.on_attach_file(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let path = ui.get_c_attach_path().to_string();
+            let path = path.trim();
+            if path.is_empty() {
+                return;
+            }
+            match std::fs::read(path) {
+                Ok(data) => {
+                    let filename = std::path::Path::new(path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("attachment")
+                        .to_owned();
+                    let content_type = geleit_engine::message::guess_content_type(&filename);
+                    atts.borrow_mut().push(geleit_engine::message::Attachment {
+                        filename,
+                        content_type,
+                        data,
+                    });
+                    refresh_attachments(&amodel, &atts.borrow());
+                    ui.set_c_attach_path(SharedString::new());
+                    ui.set_compose_status(SharedString::new());
+                }
+                Err(_) => ui.set_compose_status("Couldn't read that file — check the path.".into()),
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let atts = compose_attachments.clone();
+        let amodel = attach_model.clone();
+        ui.on_remove_attachment(move |i| {
+            let Some(_ui) = weak.upgrade() else { return };
+            let idx = i as usize;
+            let mut a = atts.borrow_mut();
+            if idx < a.len() {
+                a.remove(idx);
+            }
+            drop(a);
+            refresh_attachments(&amodel, &atts.borrow());
         });
     }
 

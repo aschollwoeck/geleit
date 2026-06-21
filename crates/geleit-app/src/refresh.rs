@@ -222,6 +222,7 @@ pub fn run_send(
     body: &str,
     in_reply_to: Option<String>,
     references: Vec<String>,
+    attachments: Vec<message::Attachment>,
     draft_id: Option<i64>,
 ) -> Result<(), String> {
     let store = open_store(db_path, secrets)?;
@@ -257,6 +258,7 @@ pub fn run_send(
         body_text: body.to_owned(),
         in_reply_to,
         references,
+        attachments,
     };
     let bytes = message::build(&draft)?;
     let envelope = smtp::envelope(&draft.from_addr, &message::recipients(&draft))?;
