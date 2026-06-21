@@ -243,6 +243,7 @@ slint::slint! {
         callback remove-attachment(int);
         callback to-edited();
         callback pick-suggestion(string);
+        callback browse-file();
 
         preferred-width: 1100px;
         preferred-height: 720px;
@@ -862,6 +863,21 @@ slint::slint! {
                             border-width: 1px;
                             border-color: Palette.divider;
                             Text {
+                                text: "Browse…";
+                                color: Palette.text;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                            TouchArea { clicked => { root.browse-file(); } }
+                        }
+                        Rectangle {
+                            width: 90px;
+                            height: 38px;
+                            border-radius: 8px;
+                            background: Palette.bg;
+                            border-width: 1px;
+                            border-color: Palette.divider;
+                            Text {
                                 text: "Attach";
                                 color: Palette.text;
                                 vertical-alignment: center;
@@ -1059,6 +1075,26 @@ fn refresh_attachments(
         .map(|a| viewmodel::attachment_label(Some(&a.filename), a.data.len() as u64).into())
         .collect();
     model.set_vec(rows);
+}
+
+/// Open the desktop's native file chooser (zenity, then kdialog) and return the chosen path. Runs
+/// the chooser as a **separate process** (no in-process GTK loop to clash with Slint/webkit). `None`
+/// if the user cancelled or no chooser is installed (the manual path field is the fallback).
+fn pick_file_via_dialog() -> Option<String> {
+    for (cmd, args) in [
+        ("zenity", &["--file-selection"][..]),
+        ("kdialog", &["--getopenfilename"][..]),
+    ] {
+        match std::process::Command::new(cmd).args(args).output() {
+            Ok(out) if out.status.success() => {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                return (!path.is_empty()).then_some(path);
+            }
+            Ok(_) => return None, // chooser ran but the user cancelled
+            Err(_) => continue,   // not installed → try the next
+        }
+    }
+    None
 }
 
 /// The first account's signature (empty if none) — appended to composed messages.
@@ -1672,6 +1708,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             drop(a);
             refresh_attachments(&amodel, &atts.borrow());
+        });
+    }
+
+    // Browse… → open the native file chooser on a worker (it blocks), then reuse the attach path.
+    {
+        let weak = ui.as_weak();
+        ui.on_browse_file(move || {
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                if let Some(path) = pick_file_via_dialog() {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_c_attach_path(path.into());
+                            ui.invoke_attach_file(); // reuse the read-and-attach path
+                        }
+                    });
+                }
+            });
         });
     }
 
