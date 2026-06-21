@@ -361,7 +361,7 @@ mod tests {
         let me = vec!["me@x".to_owned()];
         let d = reply_all(&o, &me, None, "me@x".into());
         assert_eq!(d.to, vec!["bob@x", "alice@x"]); // sender + To, minus me
-        // Cc drops alice (already in To) + the duplicate dave + me
+                                                    // Cc drops alice (already in To) + the duplicate dave + me
         assert_eq!(d.cc, vec!["dave@x"]);
     }
 
