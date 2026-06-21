@@ -170,6 +170,16 @@ pub fn build(draft: &Draft) -> Result<Vec<u8>, String> {
         .map_err(|_| "Couldn't build the message.".to_owned())
 }
 
+/// The signature block to append to a composed body: a blank line, the standard `-- ` delimiter, then
+/// the signature. Empty (no delimiter) when the signature is blank.
+pub fn signature_block(signature: &str) -> String {
+    if signature.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\n-- \n{signature}")
+    }
+}
+
 /// Every recipient (To + Cc) as a bare address — for the SMTP envelope (`smtp::envelope`).
 pub fn recipients(draft: &Draft) -> Vec<String> {
     draft.to.iter().chain(draft.cc.iter()).cloned().collect()
@@ -305,6 +315,13 @@ mod tests {
         let mut o = orig();
         o.subject = "Fw: Lunch";
         assert_eq!(forward(&o, None, "me@x".into()).subject, "Fw: Lunch");
+    }
+
+    #[test]
+    fn signature_block_uses_standard_delimiter_and_is_empty_when_blank() {
+        assert_eq!(signature_block("  "), "");
+        assert_eq!(signature_block(""), "");
+        assert_eq!(signature_block("Alice"), "\n\n-- \nAlice");
     }
 
     #[test]

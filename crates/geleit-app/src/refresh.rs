@@ -131,6 +131,7 @@ pub fn open_store(db_path: &str, secrets: &dyn SecretStore) -> Result<Store, Str
 /// Add (or reconnect) an account: persist its settings, store the password in the shared secrets,
 /// and do the first sync of the inbox. Blocking + network: **run on a worker thread.** A *newly*
 /// created account is rolled back if the first connection fails, so a bad attempt leaves no trace.
+#[allow(clippy::too_many_arguments)]
 pub fn run_setup(
     db_path: &str,
     secrets: &dyn SecretStore,
@@ -138,6 +139,7 @@ pub fn run_setup(
     display_name: Option<&str>,
     settings: ImapSettings,
     smtp: SmtpConfig,
+    signature: &str,
     password: &str,
 ) -> Result<(), String> {
     let store = open_store(db_path, secrets)?;
@@ -165,8 +167,10 @@ pub fn run_setup(
             (id, true)
         }
     };
-    // Persist SMTP settings (sending, M4). A failure here on a new account rolls back below.
-    if store.update_smtp_settings(account_id, &smtp).is_err() {
+    // Persist SMTP settings + signature (sending, M4). A failure on a new account rolls back below.
+    if store.update_smtp_settings(account_id, &smtp).is_err()
+        || store.update_signature(account_id, signature).is_err()
+    {
         if is_new {
             let _ = store.delete_account(account_id);
         }
@@ -545,6 +549,7 @@ mod tests {
             Some("geleittest"),
             settings,
             smtp,
+            "",
             "testpass123",
         )
         .expect("setup");
