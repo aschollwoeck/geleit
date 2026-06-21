@@ -714,6 +714,35 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Address suggestions for autocomplete (SEND-9): distinct senders seen in this account's mail
+    /// whose address starts with `prefix` (case-insensitive), alphabetically, up to `limit`.
+    pub fn suggest_addresses(
+        &self,
+        account_id: i64,
+        prefix: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, StoreError> {
+        let prefix = prefix.trim();
+        if prefix.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Escape LIKE wildcards so a literal % / _ in the prefix doesn't match everything.
+        let escaped = prefix
+            .to_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("{escaped}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT from_addr FROM message \
+             WHERE account_id = ?1 AND from_addr IS NOT NULL \
+               AND lower(from_addr) LIKE ?2 ESCAPE '\\' \
+             ORDER BY from_addr LIMIT ?3",
+        )?;
+        let rows = stmt.query_map((account_id, pattern, limit), |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// A single message header by its store-row id (for reply/forward), or `None`.
     pub fn header_by_id(&self, id: i64) -> Result<Option<MessageHeader>, StoreError> {
         Ok(self
@@ -1152,6 +1181,39 @@ mod tests {
         );
         s.update_signature(acc, "").unwrap(); // empty clears it
         assert_eq!(s.signature(acc).unwrap(), None);
+    }
+
+    #[test]
+    fn suggest_addresses_prefix_distinct_sorted() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        for (uid, addr) in [(1, "alice@x"), (2, "bob@y"), (3, "alan@z"), (4, "alice@x")] {
+            s.upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(uid),
+                    from_addr: Some(addr.to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        // prefix, case-insensitive, distinct, alphabetical
+        assert_eq!(
+            s.suggest_addresses(acc, "al", 10).unwrap(),
+            ["alan@z", "alice@x"]
+        );
+        assert_eq!(
+            s.suggest_addresses(acc, "AL", 10).unwrap(),
+            ["alan@z", "alice@x"]
+        );
+        assert_eq!(s.suggest_addresses(acc, "bob", 10).unwrap(), ["bob@y"]);
+        assert!(s.suggest_addresses(acc, "zzz", 10).unwrap().is_empty());
+        assert!(s.suggest_addresses(acc, "  ", 10).unwrap().is_empty());
+        // literal % is escaped (doesn't match-all)
+        assert!(s.suggest_addresses(acc, "%", 10).unwrap().is_empty());
     }
 
     #[test]
