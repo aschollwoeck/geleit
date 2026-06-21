@@ -42,25 +42,49 @@ fn body_rect(ui: &Main) -> wry::Rect {
     }
 }
 
-/// Render `sanitized_html` in the embedded sandboxed webview over the reading-pane body. Lazily
-/// builds the child webview on first use; a no-op (text fallback stays) if embedding is unavailable
-/// (e.g. Wayland — `build_as_child` is X11-only).
-fn show_html(ui: &Main, view: &HtmlView, sanitized_html: &str) {
-    let rect = body_rect(ui);
-    if view.webview.borrow().is_none() {
-        let built = ui.window().with_winit_window(|win| {
-            wry::WebViewBuilder::new()
-                // defense-in-depth (guidelines §13): sanitization already removes scripts, but
-                // disable JS in the webview too so a sanitizer miss still can't execute.
-                .with_javascript_disabled()
-                .with_bounds(rect)
-                .build_as_child(win)
-        });
-        match built {
-            Some(Ok(w)) => *view.webview.borrow_mut() = Some(w),
-            _ => return, // embedding unavailable → leave the plain-text pane showing
-        }
+/// Build the child webview **once, up front** (hidden, pre-painted with the reading-pane background),
+/// so the first mail open is instant — no webkit init on the UI thread mid-click, and no black
+/// flash. No-op if already built or embedding is unavailable (e.g. Wayland — `build_as_child` is
+/// X11-only), in which case the plain-text pane is the fallback.
+fn ensure_webview(ui: &Main, view: &HtmlView) {
+    if view.webview.borrow().is_some() {
+        return;
     }
+    let rect = body_rect(ui);
+    let built = ui.window().with_winit_window(|win| {
+        wry::WebViewBuilder::new()
+            // defense-in-depth (guidelines §13): sanitization already removes scripts, but disable
+            // JS in the webview too so a sanitizer miss still can't execute.
+            .with_javascript_disabled()
+            // Open real links in the system browser; never let the pane navigate away from our CSP'd
+            // document (that would drop the sandbox + load remote content). Our own content loads
+            // (about:blank / data:) return true and render normally.
+            .with_navigation_handler(|url: String| {
+                if url.starts_with("http://")
+                    || url.starts_with("https://")
+                    || url.starts_with("mailto:")
+                {
+                    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                    false // handled externally — don't navigate in-pane
+                } else {
+                    true
+                }
+            })
+            .with_bounds(rect)
+            .build_as_child(win)
+    });
+    if let Some(Ok(w)) = built {
+        // pre-paint the calm page background so revealing it never flashes black
+        let _ = w.load_html(&geleit_engine::safehtml::document("", false));
+        let _ = w.set_visible(false);
+        *view.webview.borrow_mut() = Some(w);
+    }
+}
+
+/// Render `sanitized_html` in the embedded sandboxed webview over the reading-pane body.
+fn show_html(ui: &Main, view: &HtmlView, sanitized_html: &str) {
+    ensure_webview(ui, view);
+    let rect = body_rect(ui);
     if let Some(w) = view.webview.borrow().as_ref() {
         let _ = w.load_html(sanitized_html);
         let _ = w.set_bounds(rect);
@@ -746,6 +770,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let (Some(ui), Some(w)) = (weak.upgrade(), view.webview.borrow().as_ref()) {
                         let _ = w.set_bounds(body_rect(&ui));
                     }
+                }
+            },
+        );
+    }
+
+    // Build the webview once, just after the window is up, so the first mail open is instant.
+    let webview_init = slint::Timer::default();
+    {
+        let weak = ui.as_weak();
+        let view = html_view.clone();
+        webview_init.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(150),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    ensure_webview(&ui, &view);
                 }
             },
         );
