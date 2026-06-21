@@ -193,6 +193,7 @@ slint::slint! {
         in property <bool> picking-folder; // "Move to…" folder picker open (ORG-3)
         in property <[string]> move-folders;
         in property <bool> viewing-trash; // current folder is Trash → show Empty Trash (ORG-2)
+        in property <bool> viewing-junk; // current folder is Junk → action reads "Not spam" (ORG-5)
         in property <bool> refreshing;
         in property <string> status; // non-empty = error to show (danger banner)
         in property <string> sync-status; // non-empty = calm sync-progress line
@@ -237,6 +238,7 @@ slint::slint! {
         callback move-to(string);
         callback close-move();
         callback empty-trash();
+        callback toggle-junk(int);
         callback refresh();
         callback connect();
         callback reload();
@@ -680,6 +682,13 @@ slint::slint! {
                             font-size: 13px;
                             font-weight: 600;
                             TouchArea { clicked => { root.open-move(root.selected-message); } }
+                        }
+                        Text {
+                            text: root.viewing-junk ? "Not spam" : "Spam";
+                            color: Palette.accent-strong;
+                            font-size: 13px;
+                            font-weight: 600;
+                            TouchArea { clicked => { root.toggle-junk(root.selected-message); } }
                         }
                         Text {
                             text: "Mark as unread";
@@ -1551,9 +1560,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .row_data(idx as usize)
                 .map(|s| s.to_string())
                 .unwrap_or_default();
+            let one = std::slice::from_ref(&name);
             ui.set_viewing_trash(
-                viewmodel::find_folder(&[name], &["trash", "deleted", "bin"]).is_some(),
+                viewmodel::find_folder(one, &["trash", "deleted", "bin"]).is_some(),
             );
+            ui.set_viewing_junk(viewmodel::find_folder(one, &["junk", "spam"]).is_some());
             model.set_vec(load_messages(&store, fid));
             hide_html(&view); // selection cleared
         });
@@ -1788,6 +1799,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                 }
             });
+        });
+    }
+
+    // Spam / Not spam (ORG-5): move to Junk, or back to Inbox when already in Junk.
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let messages = messages.clone();
+        let fm = folders_model.clone();
+        let view = html_view.clone();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        ui.on_toggle_junk(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let names = folder_names(&fm);
+            if ui.get_viewing_junk() {
+                // Not spam → back to Inbox
+                match viewmodel::find_folder(&names, &["inbox"]) {
+                    Some(target) => perform_move(
+                        &ui, &store, &messages, &fm, &view, &db_path, &secrets, id, target,
+                    ),
+                    None => ui.set_status("No Inbox folder found.".into()),
+                }
+            } else {
+                match viewmodel::find_folder(&names, &["junk", "spam"]) {
+                    Some(target) => perform_move(
+                        &ui, &store, &messages, &fm, &view, &db_path, &secrets, id, target,
+                    ),
+                    None => ui.set_status("This account has no Junk folder.".into()),
+                }
+            }
         });
     }
 
