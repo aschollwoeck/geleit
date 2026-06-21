@@ -114,18 +114,24 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 > **M3 follow-ups:** full thread-navigation view; save-attachments-to-disk; trusted-sender persistence
 > (always-load); CSS-aware sanitization (fidelity); Wayland embedding.
 
-## M4 — Send
+## M4 — Send ✅ COMPLETE
 **Delivers:** SEND-1…SEND-9, ACC-7.
-**Outcome:** full compose / reply / forward for one account.
+**Outcome:** full compose / reply / reply-all / forward for one account.
 
-- **S4.1** SMTP send (`lettre`); Sent-folder handling (SEND-8); outbox + retry.
-- **S4.2** Compose window — new message (SEND-1); MIME build (`mail-builder`).
-- **S4.3** Reply / reply-all / forward with correct quoting (SEND-2, SEND-3).
-- **S4.4** Attachments in compose (SEND-4).
-- **S4.5** Drafts: save and resume (SEND-5).
-- **S4.6** Basic formatting — bold, lists, links (SEND-6).
-- **S4.7** Per-account display name + signature, auto-included (SEND-7, ACC-7).
-- **S4.8** Address autocomplete from history (SEND-9).
+- **S4.1** ✅ SMTP transport (`lettre` + rustls, ADR-0009); in-process sink test (CI).
+- **S4.2** ✅ Message building (`mail-builder`) + compose window — new message (SEND-1).
+- **S4.3/S4.5/S4.9** ✅ Reply / reply-all / forward with quoting + threading (SEND-2, SEND-3).
+- **S4.4/S4.11/S4.13** ✅ Attachments in compose + native file picker (zenity/kdialog) (SEND-4).
+- **S4.5/S4.10** ✅ Drafts: save and resume (SEND-5).
+- **S4.6** ✅ Basic formatting via **Markdown** → multipart/alternative (SEND-6).
+- **S4.7** ✅ Per-account signature, auto-included (SEND-7, ACC-7).
+- **S4.8** ✅ Save sent mail to Sent via IMAP APPEND (SEND-8).
+- **S4.12** ✅ Address autocomplete from history — To field (SEND-9).
+
+> **Follow-ups (backlog):** outbox + retry / offline-send (SEND-10); SPECIAL-USE Sent detection;
+> persist attachments in drafts; Cc autocomplete; in-process file-picker (rfd/portal). The webview
+> uses Slint's **software renderer** to coexist with webkit's GL (X11; PR #53). Sending verified
+> end-to-end by the in-process SMTP sink; live IMAP APPEND has an `#[ignore]` test.
 
 ## M5 — Organize
 **Delivers:** ORG-1…ORG-7, SYNC-5.
