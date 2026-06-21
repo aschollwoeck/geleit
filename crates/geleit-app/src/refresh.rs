@@ -262,14 +262,29 @@ pub fn run_send(
     let settings = SmtpSettings {
         host: smtp.host,
         port: smtp.port,
-        username: imap.username,
+        username: imap.username.clone(),
         security: match smtp.security {
             SmtpSecurityKind::Implicit => SmtpSecurity::Implicit,
             SmtpSecurityKind::StartTls => SmtpSecurity::StartTls,
         },
         allow_invalid_certs: imap.allow_invalid_certs,
     };
-    runtime()?.block_on(smtp::send(&settings, &password, &envelope, &bytes))
+    // A Sent folder to save a copy in (SEND-8), by name (SPECIAL-USE detection is a follow-up).
+    let sent_folder = store.folders_for_account(account.id).ok().and_then(|fs| {
+        fs.into_iter()
+            .map(|f| f.name)
+            .find(|n| n.eq_ignore_ascii_case("sent") || n.to_ascii_lowercase().contains("sent"))
+    });
+    let imap_config = to_config(&imap);
+    runtime()?.block_on(async {
+        smtp::send(&settings, &password, &envelope, &bytes).await?;
+        // Best-effort: the message is already sent; failing to save a Sent copy must not report
+        // failure (it would mislead the person into resending).
+        if let Some(folder) = sent_folder {
+            let _ = imap::append_message(&imap_config, secrets, &folder, &bytes).await;
+        }
+        Ok::<(), String>(())
+    })
 }
 
 /// Sync the first account's `folder` (+ folder list), reading settings from the store and the
