@@ -8,6 +8,7 @@ mod envelope;
 pub mod imap;
 mod mime;
 pub mod safehtml;
+pub mod smtp;
 mod sync;
 pub mod thread;
 

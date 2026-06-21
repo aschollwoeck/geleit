@@ -12,6 +12,11 @@
 # rather than splitting this thin module.
 exclude_globs = [
     "**/imap.rs",
+    # smtp.rs is SMTP/TLS transport glue. The plaintext `send` path is covered by an in-process sink
+    # test, but the Implicit/StartTls + dangerous-TLS branches can't run in CI (no TLS server), so
+    # their mutants would survive spuriously. The pure `envelope()` helper is unit-tested; excluding
+    # the whole file forgoes its *mutation* coverage — an accepted small gap (cf. refresh.rs).
+    "**/smtp.rs",
     "**/geleit-app/src/main.rs",
     "**/geleit-app/src/refresh.rs",
     # os_secret.rs is external keychain glue (Secret Service); verified by a live #[ignore] test,
