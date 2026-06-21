@@ -194,6 +194,10 @@ slint::slint! {
         in property <[string]> move-folders;
         in property <bool> viewing-trash; // current folder is Trash → show Empty Trash (ORG-2)
         in property <bool> viewing-junk; // current folder is Junk → action reads "Not spam" (ORG-5)
+        // folder management (ORG-6)
+        in property <bool> managing-folders;
+        in-out property <string> mf-name;
+        in property <[string]> manage-folders;
         in property <bool> refreshing;
         in property <string> status; // non-empty = error to show (danger banner)
         in property <string> sync-status; // non-empty = calm sync-progress line
@@ -239,6 +243,11 @@ slint::slint! {
         callback close-move();
         callback empty-trash();
         callback toggle-junk(int);
+        callback open-manage-folders();
+        callback close-manage-folders();
+        callback create-folder();
+        callback rename-folder(string);
+        callback delete-folder(string);
         callback refresh();
         callback connect();
         callback reload();
@@ -343,6 +352,21 @@ slint::slint! {
                     }
 
                     Rectangle { vertical-stretch: 1; } // push the footer to the bottom
+
+                    // ---- MANAGE FOLDERS (ORG-6) ----
+                    TouchArea {
+                        height: 28px;
+                        clicked => { root.open-manage-folders(); }
+                        HorizontalLayout {
+                            padding-left: 4px;
+                            Text {
+                                text: "Manage folders…";
+                                color: Palette.muted;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
 
                     // ---- REMOVE ACCOUNT (destructive → confirm first) ----
                     if !root.confirm-remove: TouchArea {
@@ -1177,6 +1201,94 @@ slint::slint! {
                 }
             }
         }
+
+        // ---- MANAGE FOLDERS (ORG-6) — create / rename / delete ----
+        if root.managing-folders: Rectangle {
+            background: #0d171b99;
+            TouchArea {}
+            Rectangle {
+                width: min(480px, parent.width - 80px);
+                height: min(520px, parent.height - 80px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Palette.surface;
+                border-radius: 12px;
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 10px;
+                    HorizontalLayout {
+                        Text {
+                            text: "Manage folders";
+                            color: Palette.text;
+                            font-size: 18px;
+                            font-weight: 700;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: "Close";
+                            color: Palette.accent-strong;
+                            font-size: 14px;
+                            font-weight: 600;
+                            TouchArea { clicked => { root.close-manage-folders(); } }
+                        }
+                    }
+                    Text {
+                        text: "Folder name (for Create, or Rename target):";
+                        color: Palette.muted;
+                        font-size: 12px;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Field { placeholder: "e.g. Projects"; text <=> root.mf-name; horizontal-stretch: 1; }
+                        Rectangle {
+                            width: 90px;
+                            height: 38px;
+                            border-radius: 8px;
+                            background: Palette.accent-strong;
+                            Text {
+                                text: "Create";
+                                color: white;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                            TouchArea { clicked => { root.create-folder(); } }
+                        }
+                    }
+                    ListView {
+                        vertical-stretch: 1;
+                        for f in root.manage-folders: Rectangle {
+                            height: 38px;
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                spacing: 10px;
+                                Text {
+                                    text: f;
+                                    color: Palette.text;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: "Rename→";
+                                    color: Palette.accent-strong;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    TouchArea { clicked => { root.rename-folder(f); } }
+                                }
+                                Text {
+                                    text: "Delete";
+                                    color: Palette.danger-strong;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    TouchArea { clicked => { root.delete-folder(f); } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1327,6 +1439,29 @@ fn remove_row(model: &VecModel<MessageItem>, id: i32) {
             break;
         }
     }
+}
+
+/// Run a folder create/rename/delete on a worker; on success reload the rail + close the manager,
+/// on failure surface a calm status. (ORG-6.)
+fn spawn_folder_op(
+    weak: slint::Weak<Main>,
+    op: impl FnOnce() -> Result<(), String> + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(op))
+            .unwrap_or_else(|_| Err("Something went wrong.".to_owned()));
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                match res {
+                    Ok(()) => {
+                        ui.invoke_reload();
+                        ui.set_managing_folders(false);
+                    }
+                    Err(msg) => ui.set_status(msg.into()),
+                }
+            }
+        });
+    });
 }
 
 /// The folder names currently in the rail, as owned strings.
@@ -1490,6 +1625,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pending_move_id = Rc::new(RefCell::new(Option::<i32>::None));
     let move_folders_model = Rc::new(VecModel::<SharedString>::default());
     ui.set_move_folders(ModelRc::from(move_folders_model.clone()));
+    let manage_folders_model = Rc::new(VecModel::<SharedString>::default());
+    ui.set_manage_folders(ModelRc::from(manage_folders_model.clone()));
     ui.set_folders(ModelRc::from(folders_model.clone()));
     ui.set_messages(ModelRc::from(messages.clone()));
 
@@ -1880,6 +2017,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(ui) = weak.upgrade() {
                 ui.set_picking_folder(false);
             }
+        });
+    }
+
+    // Manage folders (ORG-6): open the manager, create / rename / delete on the server.
+    {
+        let weak = ui.as_weak();
+        let fm = folders_model.clone();
+        let mfm = manage_folders_model.clone();
+        ui.on_open_manage_folders(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let rows: Vec<SharedString> = folder_names(&fm).into_iter().map(Into::into).collect();
+            mfm.set_vec(rows);
+            ui.set_mf_name(SharedString::new());
+            ui.set_managing_folders(true);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_close_manage_folders(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_managing_folders(false);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        ui.on_create_folder(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let name = ui.get_mf_name().trim().to_owned();
+            if name.is_empty() {
+                ui.set_status("Enter a folder name.".into());
+                return;
+            }
+            let (db_path, secrets) = (db_path.clone(), secrets.clone());
+            spawn_folder_op(weak.clone(), move || {
+                refresh::run_create_folder(&db_path, &*secrets, &name)
+            });
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        ui.on_rename_folder(move |from| {
+            let Some(ui) = weak.upgrade() else { return };
+            let to = ui.get_mf_name().trim().to_owned();
+            if to.is_empty() {
+                ui.set_status("Type the new name above, then choose Rename.".into());
+                return;
+            }
+            let (db_path, secrets, from) = (db_path.clone(), secrets.clone(), from.to_string());
+            spawn_folder_op(weak.clone(), move || {
+                refresh::run_rename_folder(&db_path, &*secrets, &from, &to)
+            });
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        ui.on_delete_folder(move |name| {
+            let Some(_ui) = weak.upgrade() else { return };
+            let (db_path, secrets, name) = (db_path.clone(), secrets.clone(), name.to_string());
+            spawn_folder_op(weak.clone(), move || {
+                refresh::run_delete_folder(&db_path, &*secrets, &name)
+            });
         });
     }
 

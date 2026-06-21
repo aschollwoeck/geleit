@@ -375,6 +375,81 @@ pub fn run_empty_folder(
         .map_err(|_| "Couldn't empty the folder on the server.".to_owned())
 }
 
+/// Create / rename / delete a server folder (ORG-6), then re-sync the folder list so the local rail
+/// reflects it. Blocking + network: **worker thread.** `op` runs the IMAP folder command.
+fn folder_op(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    err: &str,
+    op: impl std::future::Future<Output = Result<(), imap::ImapError>>,
+) -> Result<(), String> {
+    let store = open_store(db_path, secrets)?;
+    let account = store
+        .list_accounts()
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No account is set up yet.".to_owned())?;
+    let imap = store
+        .imap_settings(account.id)
+        .ok()
+        .flatten()
+        .ok_or_else(|| "This account isn't set up.".to_owned())?;
+    let config = to_config(&imap);
+    runtime()?
+        .block_on(async {
+            op.await?;
+            imap::sync_folders(&config, secrets, &store, account.id).await // reconcile local list
+        })
+        .map_err(|_| err.to_owned())
+}
+
+/// Create a folder (ORG-6). Worker thread.
+pub fn run_create_folder(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    name: &str,
+) -> Result<(), String> {
+    let config = first_account_imap(db_path, secrets)?;
+    folder_op(
+        db_path,
+        secrets,
+        "Couldn't create the folder.",
+        imap::create_folder(&config, secrets, name),
+    )
+}
+
+/// Rename a folder (ORG-6). Worker thread.
+pub fn run_rename_folder(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    from: &str,
+    to: &str,
+) -> Result<(), String> {
+    let config = first_account_imap(db_path, secrets)?;
+    folder_op(
+        db_path,
+        secrets,
+        "Couldn't rename the folder.",
+        imap::rename_folder(&config, secrets, from, to),
+    )
+}
+
+/// Delete a folder (ORG-6). Worker thread.
+pub fn run_delete_folder(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    name: &str,
+) -> Result<(), String> {
+    let config = first_account_imap(db_path, secrets)?;
+    folder_op(
+        db_path,
+        secrets,
+        "Couldn't delete the folder.",
+        imap::delete_folder(&config, secrets, name),
+    )
+}
+
 /// The first account's IMAP config (host/port/username/allow-invalid), for write-back ops.
 fn first_account_imap(db_path: &str, secrets: &dyn SecretStore) -> Result<ImapConfig, String> {
     let store = open_store(db_path, secrets)?;
