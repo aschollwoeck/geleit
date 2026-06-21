@@ -556,6 +556,33 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// A single message header by its store-row id (for reply/forward), or `None`.
+    pub fn header_by_id(&self, id: i64) -> Result<Option<MessageHeader>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, uid, message_id, in_reply_to, subject, from_name, from_addr, date, \
+                 seen, has_attachments, snippet FROM message WHERE id = ?1",
+                [id],
+                |r| {
+                    Ok(MessageHeader {
+                        id: r.get(0)?,
+                        uid: r.get(1)?,
+                        message_id: r.get(2)?,
+                        in_reply_to: r.get(3)?,
+                        subject: r.get(4)?,
+                        from_name: r.get(5)?,
+                        from_addr: r.get(6)?,
+                        date: r.get(7)?,
+                        seen: r.get(8)?,
+                        has_attachments: r.get(9)?,
+                        snippet: r.get(10)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     /// The store-row id of a message identified by its IMAP UID, or `None`.
     pub fn message_id_by_uid(
         &self,
@@ -915,6 +942,31 @@ mod tests {
             .collect();
         assert_eq!(subs, ["new", "mid", "old"]); // date DESC
         assert_eq!(s.messages_in_folder(sent, 50).unwrap().len(), 1); // folder-scoped
+    }
+
+    #[test]
+    fn header_by_id_fetches_one_or_none() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let id = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(1),
+                    subject: Some("Hello".to_owned()),
+                    from_addr: Some("bob@x.com".to_owned()),
+                    message_id: Some("<m1@x>".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let h = s.header_by_id(id).unwrap().expect("found");
+        assert_eq!(h.subject.as_deref(), Some("Hello"));
+        assert_eq!(h.from_addr.as_deref(), Some("bob@x.com"));
+        assert_eq!(h.message_id.as_deref(), Some("<m1@x>"));
+        assert_eq!(s.header_by_id(999_999).unwrap(), None);
     }
 
     #[test]

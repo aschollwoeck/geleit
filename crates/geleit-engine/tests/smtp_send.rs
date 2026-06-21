@@ -117,6 +117,7 @@ async fn builds_and_sends_a_drafted_message_end_to_end() {
         cc: vec!["carol@test.local".into()],
         subject: "Lunch?".into(),
         body_text: "Are you free at noon?".into(),
+        ..Default::default()
     };
     let bytes = message::build(&draft).unwrap();
     let env = smtp::envelope(&draft.from_addr, &message::recipients(&draft)).unwrap();

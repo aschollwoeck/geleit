@@ -15,6 +15,120 @@ pub struct Draft {
     pub cc: Vec<String>,
     pub subject: String,
     pub body_text: String,
+    /// `In-Reply-To` (the parent's Message-ID) — set for replies, for conversation threading.
+    pub in_reply_to: Option<String>,
+    /// `References` chain (oldest → newest) — set for replies.
+    pub references: Vec<String>,
+}
+
+/// The fields of the message being replied to / forwarded that we need to build the new draft.
+#[derive(Clone, Debug, Default)]
+pub struct Original<'a> {
+    pub from_name: Option<&'a str>,
+    pub from_addr: &'a str,
+    pub subject: &'a str,
+    pub date: Option<&'a str>,
+    pub message_id: Option<&'a str>,
+    pub in_reply_to: Option<&'a str>,
+    pub body_text: &'a str,
+}
+
+/// Build a **reply** draft (to the original sender). `Re:`-prefixed subject (no doubling), the
+/// original quoted with an attribution line, and the threading headers set.
+pub fn reply(orig: &Original, from_name: Option<String>, from_addr: String) -> Draft {
+    Draft {
+        from_name,
+        from_addr,
+        to: vec![orig.from_addr.trim().to_owned()],
+        cc: Vec::new(),
+        subject: prefixed_subject("Re:", orig.subject),
+        body_text: quote(orig),
+        in_reply_to: orig.message_id.map(str::to_owned),
+        references: references_chain(orig),
+    }
+}
+
+/// Build a **forward** draft. `Fwd:`-prefixed subject and the original included below a header block;
+/// recipients are left empty for the person to fill. Forwards start a new thread (no In-Reply-To).
+pub fn forward(orig: &Original, from_name: Option<String>, from_addr: String) -> Draft {
+    let who = display_from(orig);
+    let mut body = String::from("\n\n---------- Forwarded message ----------\n");
+    body.push_str(&format!("From: {who}\n"));
+    if let Some(date) = orig.date {
+        body.push_str(&format!("Date: {date}\n"));
+    }
+    body.push_str(&format!("Subject: {}\n\n", orig.subject));
+    body.push_str(orig.body_text);
+    Draft {
+        from_name,
+        from_addr,
+        to: Vec::new(),
+        cc: Vec::new(),
+        subject: prefixed_subject("Fwd:", orig.subject),
+        body_text: body,
+        in_reply_to: None,
+        references: Vec::new(),
+    }
+}
+
+/// Add `prefix` (e.g. `Re:`) unless the subject already carries it (case-insensitively; also treats
+/// `Fw:` as a forward marker). Empty subjects become just the prefix.
+fn prefixed_subject(prefix: &str, subject: &str) -> String {
+    let s = subject.trim();
+    let lower = s.to_ascii_lowercase();
+    let marker = prefix.trim_end_matches(':').to_ascii_lowercase(); // "re" / "fwd"
+    let already =
+        lower.starts_with(&format!("{marker}:")) || (marker == "fwd" && lower.starts_with("fw:"));
+    if already {
+        s.to_owned()
+    } else if s.is_empty() {
+        prefix.trim_end().to_owned()
+    } else {
+        format!("{prefix} {s}")
+    }
+}
+
+fn display_from(orig: &Original) -> String {
+    match orig.from_name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(name) => format!("{name} <{}>", orig.from_addr.trim()),
+        None => orig.from_addr.trim().to_owned(),
+    }
+}
+
+/// Quote the original body: an attribution line followed by each line prefixed with `> `.
+fn quote(orig: &Original) -> String {
+    let attribution = match orig.date {
+        Some(date) => format!("On {date}, {} wrote:", display_from(orig)),
+        None => format!("{} wrote:", display_from(orig)),
+    };
+    let quoted: String = orig
+        .body_text
+        .lines()
+        .map(|l| {
+            if l.is_empty() {
+                ">".to_owned()
+            } else {
+                format!("> {l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("\n\n{attribution}\n{quoted}")
+}
+
+/// The `References` chain for a reply: the original's own References (we keep what we have — its
+/// In-Reply-To) followed by the original's Message-ID, de-duplicated in order.
+fn references_chain(orig: &Original) -> Vec<String> {
+    let mut chain = Vec::new();
+    if let Some(parent) = orig.in_reply_to.map(str::trim).filter(|s| !s.is_empty()) {
+        chain.push(parent.to_owned());
+    }
+    if let Some(mid) = orig.message_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if !chain.contains(&mid.to_owned()) {
+            chain.push(mid.to_owned());
+        }
+    }
+    chain
 }
 
 /// Build the RFC 5322 bytes for `draft`, or a calm error if it's missing a sender/recipient.
@@ -43,6 +157,13 @@ pub fn build(draft: &Draft) -> Result<Vec<u8>, String> {
     builder = builder
         .subject(draft.subject.as_str())
         .text_body(draft.body_text.as_str());
+    if let Some(irt) = draft.in_reply_to.as_deref().filter(|s| !s.is_empty()) {
+        builder = builder.in_reply_to(irt);
+    }
+    if !draft.references.is_empty() {
+        let refs: Vec<&str> = draft.references.iter().map(String::as_str).collect();
+        builder = builder.references(refs);
+    }
 
     builder
         .write_to_vec()
@@ -70,6 +191,7 @@ mod tests {
             cc: vec!["carol@test.local".into()],
             subject: "Hi".into(),
             body_text: "Hello Bob.".into(),
+            ..Default::default()
         }
     }
 
@@ -122,6 +244,81 @@ mod tests {
         assert_eq!(
             recipients(&sample()),
             vec!["bob@test.local".to_owned(), "carol@test.local".to_owned()]
+        );
+    }
+
+    fn orig() -> Original<'static> {
+        Original {
+            from_name: Some("Bob"),
+            from_addr: "bob@test.local",
+            subject: "Lunch",
+            date: Some("Mon, 1 Jun 2026 12:00:00 +0000"),
+            message_id: Some("<abc@test.local>"),
+            in_reply_to: Some("<parent@test.local>"),
+            body_text: "Are you free?\n\nBob",
+        }
+    }
+
+    #[test]
+    fn reply_targets_sender_prefixes_subject_and_threads() {
+        let d = reply(&orig(), Some("Me".into()), "me@test.local".into());
+        assert_eq!(d.to, vec!["bob@test.local"]);
+        assert_eq!(d.subject, "Re: Lunch");
+        assert_eq!(d.in_reply_to.as_deref(), Some("<abc@test.local>"));
+        // References = parent's In-Reply-To, then the original's Message-ID
+        assert_eq!(
+            d.references,
+            vec!["<parent@test.local>", "<abc@test.local>"]
+        );
+        // body is quoted with an attribution line
+        assert!(
+            d.body_text.contains("Bob <bob@test.local> wrote:"),
+            "{}",
+            d.body_text
+        );
+        assert!(d.body_text.contains("> Are you free?"), "{}", d.body_text);
+        assert_eq!(d.from_addr, "me@test.local");
+    }
+
+    #[test]
+    fn reply_does_not_double_the_re_prefix() {
+        let mut o = orig();
+        o.subject = "RE: Lunch";
+        assert_eq!(reply(&o, None, "me@x".into()).subject, "RE: Lunch");
+    }
+
+    #[test]
+    fn forward_prefixes_includes_original_and_has_no_recipients() {
+        let d = forward(&orig(), Some("Me".into()), "me@test.local".into());
+        assert_eq!(d.subject, "Fwd: Lunch");
+        assert!(d.to.is_empty());
+        assert!(d.in_reply_to.is_none());
+        assert!(d.references.is_empty());
+        assert!(d.body_text.contains("Forwarded message"), "{}", d.body_text);
+        assert!(
+            d.body_text.contains("From: Bob <bob@test.local>"),
+            "{}",
+            d.body_text
+        );
+        assert!(d.body_text.contains("Are you free?"), "{}", d.body_text);
+        // "Fw:" is also treated as an existing forward marker
+        let mut o = orig();
+        o.subject = "Fw: Lunch";
+        assert_eq!(forward(&o, None, "me@x".into()).subject, "Fw: Lunch");
+    }
+
+    #[test]
+    fn reply_emits_threading_headers_in_built_bytes() {
+        let d = reply(&orig(), None, "me@test.local".into());
+        let bytes = build(&d).unwrap();
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(
+            s.contains("In-Reply-To:") && s.contains("<abc@test.local>"),
+            "{s}"
+        );
+        assert!(
+            s.contains("References:") && s.contains("<parent@test.local>"),
+            "{s}"
         );
     }
 }

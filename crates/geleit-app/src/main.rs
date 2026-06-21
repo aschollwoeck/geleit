@@ -181,6 +181,8 @@ slint::slint! {
         callback compose();
         callback send-message();
         callback cancel-compose();
+        callback reply();
+        callback forward();
 
         preferred-width: 1100px;
         preferred-height: 720px;
@@ -516,12 +518,29 @@ slint::slint! {
                         color: Palette.muted;
                         font-size: 13px;
                     }
-                    TouchArea {
+                    HorizontalLayout {
                         height: 22px;
-                        clicked => { root.mark-unread(root.selected-message); }
-                        HorizontalLayout {
-                            alignment: start;
-                            Text { text: "Mark as unread"; color: Palette.accent-strong; font-size: 13px; }
+                        alignment: start;
+                        spacing: 16px;
+                        Text {
+                            text: "Reply";
+                            color: Palette.accent-strong;
+                            font-size: 13px;
+                            font-weight: 600;
+                            TouchArea { clicked => { root.reply(); } }
+                        }
+                        Text {
+                            text: "Forward";
+                            color: Palette.accent-strong;
+                            font-size: 13px;
+                            font-weight: 600;
+                            TouchArea { clicked => { root.forward(); } }
+                        }
+                        Text {
+                            text: "Mark as unread";
+                            color: Palette.muted;
+                            font-size: 13px;
+                            TouchArea { clicked => { root.mark-unread(root.selected-message); } }
                         }
                     }
                     // remote content blocked (PRIV-3) + per-message opt-in (PRIV-2)
@@ -890,6 +909,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let html_view = Rc::new(HtmlView::default());
     // the open HTML message's remote-allowed document, rendered if the user opts in (PRIV-2)
     let current_allowed = Rc::new(RefCell::new(Option::<String>::None));
+    // threading headers (in_reply_to, references) for the message being composed, if it's a reply
+    type ComposeThread = Rc<RefCell<(Option<String>, Vec<String>)>>;
+    let compose_thread: ComposeThread = Rc::new(RefCell::new((None, Vec::new())));
     ui.set_folders(ModelRc::from(folders_model.clone()));
     ui.set_messages(ModelRc::from(messages.clone()));
 
@@ -1053,9 +1075,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let view = html_view.clone();
+        let thread = compose_thread.clone();
         ui.on_compose(move || {
             let Some(ui) = weak.upgrade() else { return };
             hide_html(&view);
+            *thread.borrow_mut() = (None, Vec::new()); // a fresh message, not a reply
             ui.set_c_to(SharedString::new());
             ui.set_c_cc(SharedString::new());
             ui.set_c_subject(SharedString::new());
@@ -1063,6 +1087,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_compose_status(SharedString::new());
             ui.set_composing(true);
         });
+    }
+
+    // Reply / Forward → pre-fill the compose overlay from the open message (threading via the engine).
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let view = html_view.clone();
+        let thread = compose_thread.clone();
+        let open_compose = move |is_reply: bool| {
+            let Some(ui) = weak.upgrade() else { return };
+            let id: i64 = ui.get_selected_message().into();
+            if id == 0 {
+                return;
+            }
+            let Some(header) = store.header_by_id(id).ok().flatten() else {
+                return;
+            };
+            let body = store
+                .body_for(id)
+                .ok()
+                .flatten()
+                .and_then(|b| b.plain)
+                .unwrap_or_default();
+            let date = viewmodel::format_date(header.date);
+            let date = (!date.is_empty()).then_some(date);
+            let orig = geleit_engine::message::Original {
+                from_name: header.from_name.as_deref(),
+                from_addr: header.from_addr.as_deref().unwrap_or(""),
+                subject: header.subject.as_deref().unwrap_or(""),
+                date: date.as_deref(),
+                message_id: header.message_id.as_deref(),
+                in_reply_to: header.in_reply_to.as_deref(),
+                body_text: &body,
+            };
+            // from_* are set by run_send from the account; we only use to/subject/body + threading
+            let draft = if is_reply {
+                geleit_engine::message::reply(&orig, None, String::new())
+            } else {
+                geleit_engine::message::forward(&orig, None, String::new())
+            };
+            hide_html(&view);
+            *thread.borrow_mut() = (draft.in_reply_to.clone(), draft.references.clone());
+            ui.set_c_to(draft.to.join(", ").into());
+            ui.set_c_cc(SharedString::new());
+            ui.set_c_subject(draft.subject.into());
+            ui.set_c_body(draft.body_text.into());
+            ui.set_compose_status(SharedString::new());
+            ui.set_composing(true);
+        };
+        let reply = open_compose.clone();
+        ui.on_reply(move || reply(true));
+        ui.on_forward(move || open_compose(false));
     }
     {
         let weak = ui.as_weak();
@@ -1078,6 +1154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let db_path = db.clone();
         let secrets = secrets.clone();
+        let thread = compose_thread.clone();
         ui.on_send_message(move || {
             let Some(ui) = weak.upgrade() else { return };
             if ui.get_sending() {
@@ -1093,6 +1170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.get_c_subject().to_string(),
                 ui.get_c_body().to_string(),
             );
+            let (in_reply_to, references) = thread.borrow().clone();
             ui.set_compose_status(SharedString::new());
             ui.set_sending(true);
 
@@ -1101,7 +1179,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let secrets = secrets.clone();
             std::thread::spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    refresh::run_send(&db_path, &*secrets, &to, &cc, &subject, &body)
+                    refresh::run_send(
+                        &db_path,
+                        &*secrets,
+                        &to,
+                        &cc,
+                        &subject,
+                        &body,
+                        in_reply_to,
+                        references,
+                    )
                 }))
                 .unwrap_or_else(|_| Err("Couldn't send — something went wrong.".to_owned()));
                 let _ = slint::invoke_from_event_loop(move || {

@@ -208,6 +208,7 @@ fn parse_addrs(field: &str) -> Vec<String> {
 /// Send a composed message via the first account's SMTP server (M4). Reads SMTP settings from the
 /// store and reuses the IMAP username/password from the keychain. Blocking + network: **run on a
 /// worker thread.** Calm, PII-free errors.
+#[allow(clippy::too_many_arguments)]
 pub fn run_send(
     db_path: &str,
     secrets: &dyn SecretStore,
@@ -215,6 +216,8 @@ pub fn run_send(
     cc: &str,
     subject: &str,
     body: &str,
+    in_reply_to: Option<String>,
+    references: Vec<String>,
 ) -> Result<(), String> {
     let store = open_store(db_path, secrets)?;
     let account = store
@@ -247,6 +250,8 @@ pub fn run_send(
         cc: parse_addrs(cc),
         subject: subject.to_owned(),
         body_text: body.to_owned(),
+        in_reply_to,
+        references,
     };
     let bytes = message::build(&draft)?;
     let envelope = smtp::envelope(&draft.from_addr, &message::recipients(&draft))?;
