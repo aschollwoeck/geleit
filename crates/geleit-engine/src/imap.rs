@@ -253,13 +253,57 @@ pub async fn move_message(
     Ok(())
 }
 
+/// Permanently delete one message by UID (ORG-2): mark `\Deleted` then `UID EXPUNGE`.
+pub async fn delete_permanently(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    uid: u32,
+) -> Result<(), ImapError> {
+    let mut session = connect(config, secrets).await?;
+    session.select(folder).await?;
+    let res = match drain(
+        session
+            .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
+            .await,
+    )
+    .await
+    {
+        Ok(()) => drain(session.uid_expunge(uid.to_string()).await).await,
+        Err(e) => Err(e),
+    };
+    let _ = session.logout().await; // best-effort
+    res
+}
+
+/// Empty a folder (ORG-2, empty-trash): mark every message `\Deleted` then `EXPUNGE`.
+pub async fn empty_folder(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    folder: &str,
+) -> Result<(), ImapError> {
+    let mut session = connect(config, secrets).await?;
+    let mailbox = session.select(folder).await?;
+    let res = if mailbox.exists > 0 {
+        match drain(session.store("1:*", "+FLAGS (\\Deleted)").await).await {
+            Ok(()) => drain(session.expunge().await).await,
+            Err(e) => Err(e),
+        }
+    } else {
+        Ok(())
+    };
+    let _ = session.logout().await; // best-effort
+    res
+}
+
 /// Consume an IMAP response stream (e.g. STORE's FETCH replies) to completion, surfacing the first
 /// error. We don't need the per-message data, only that the command succeeded.
 async fn drain<S, T>(stream: Result<S, async_imap::error::Error>) -> Result<(), ImapError>
 where
-    S: futures::Stream<Item = Result<T, async_imap::error::Error>> + Unpin,
+    S: futures::Stream<Item = Result<T, async_imap::error::Error>>,
 {
-    let mut stream = stream?;
+    let stream = stream?;
+    futures::pin_mut!(stream); // expunge/uid_expunge streams are !Unpin
     while let Some(item) = stream.next().await {
         item?;
     }

@@ -192,6 +192,7 @@ slint::slint! {
         in property <[string]> r-attachments;
         in property <bool> picking-folder; // "Move to…" folder picker open (ORG-3)
         in property <[string]> move-folders;
+        in property <bool> viewing-trash; // current folder is Trash → show Empty Trash (ORG-2)
         in property <bool> refreshing;
         in property <string> status; // non-empty = error to show (danger banner)
         in property <string> sync-status; // non-empty = calm sync-progress line
@@ -235,6 +236,7 @@ slint::slint! {
         callback open-move(int);
         callback move-to(string);
         callback close-move();
+        callback empty-trash();
         callback refresh();
         callback connect();
         callback reload();
@@ -433,6 +435,26 @@ slint::slint! {
                                 font-weight: 600;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
+                            }
+                            if root.viewing-trash: Rectangle {
+                                width: 110px;
+                                height: 32px;
+                                y: 10px;
+                                border-radius: 8px;
+                                background: Palette.surface;
+                                border-width: 1px;
+                                border-color: Palette.danger-strong;
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: "Empty Trash";
+                                        color: Palette.danger-strong;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                TouchArea { clicked => { root.empty-trash(); } }
                             }
                             Rectangle {
                                 width: 104px;
@@ -1515,6 +1537,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let fids = folder_ids.clone();
         let model = messages.clone();
         let view = html_view.clone();
+        let fm = folders_model.clone();
         ui.on_folder_selected(move |idx| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(fid) = fids.borrow().get(idx as usize).copied() else {
@@ -1523,6 +1546,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_selected_folder(idx);
             ui.set_selected_message(0);
             ui.set_remote_blocked(false);
+            // is this the Trash folder? → offer Empty Trash + make Delete permanent (ORG-2)
+            let name = fm
+                .row_data(idx as usize)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            ui.set_viewing_trash(
+                viewmodel::find_folder(&[name], &["trash", "deleted", "bin"]).is_some(),
+            );
             model.set_vec(load_messages(&store, fid));
             hide_html(&view); // selection cleared
         });
@@ -1672,6 +1703,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let secrets = secrets.clone();
         ui.on_trash_message(move |id| {
             let Some(ui) = weak.upgrade() else { return };
+            // In Trash already → permanent delete; otherwise move to Trash.
+            if ui.get_viewing_trash() {
+                let folder = fm
+                    .row_data(ui.get_selected_folder() as usize)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let uid = store
+                    .header_by_id(id.into())
+                    .ok()
+                    .flatten()
+                    .and_then(|h| h.uid);
+                let _ = store.delete_message(id.into());
+                remove_row(&messages, id);
+                ui.set_selected_message(0);
+                hide_html(&view);
+                if let Some(uid) = uid {
+                    let weak = weak.clone();
+                    let db_path = db_path.clone();
+                    let secrets = secrets.clone();
+                    std::thread::spawn(move || {
+                        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            refresh::run_delete_permanently(
+                                &db_path, &*secrets, &folder, uid as u32,
+                            )
+                        }))
+                        .unwrap_or_else(|_| Err("Couldn't delete the message.".to_owned()));
+                        if let Err(msg) = res {
+                            let w = weak.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = w.upgrade() {
+                                    ui.set_status(msg.into());
+                                }
+                            });
+                        }
+                    });
+                }
+                return;
+            }
             let names = folder_names(&fm);
             match viewmodel::find_folder(&names, &["trash", "deleted", "bin"]) {
                 Some(target) => perform_move(
@@ -1679,6 +1748,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ),
                 None => ui.set_status("This account has no Trash folder.".into()),
             }
+        });
+    }
+
+    // Empty Trash (ORG-2) → clear the local Trash folder + expunge it on the server.
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let messages = messages.clone();
+        let fm = folders_model.clone();
+        let fids = folder_ids.clone();
+        let view = html_view.clone();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        ui.on_empty_trash(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let idx = ui.get_selected_folder() as usize;
+            let folder = fm.row_data(idx).map(|s| s.to_string()).unwrap_or_default();
+            if let Some(fid) = fids.borrow().get(idx).copied() {
+                let _ = store.clear_folder(fid); // optimistic local empty
+            }
+            messages.set_vec(Vec::new());
+            ui.set_selected_message(0);
+            hide_html(&view);
+            let weak = weak.clone();
+            let db_path = db_path.clone();
+            let secrets = secrets.clone();
+            std::thread::spawn(move || {
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    refresh::run_empty_folder(&db_path, &*secrets, &folder)
+                }))
+                .unwrap_or_else(|_| Err("Couldn't empty the Trash on the server.".to_owned()));
+                if let Err(msg) = res {
+                    let w = weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = w.upgrade() {
+                            ui.set_status(msg.into());
+                        }
+                    });
+                }
+            });
         });
     }
 
