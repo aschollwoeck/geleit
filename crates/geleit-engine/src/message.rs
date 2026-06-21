@@ -30,6 +30,9 @@ pub struct Original<'a> {
     pub date: Option<&'a str>,
     pub message_id: Option<&'a str>,
     pub in_reply_to: Option<&'a str>,
+    /// The original To / Cc (comma-joined bare addresses) — used by [`reply_all`].
+    pub to: &'a str,
+    pub cc: &'a str,
     pub body_text: &'a str,
 }
 
@@ -46,6 +49,46 @@ pub fn reply(orig: &Original, from_name: Option<String>, from_addr: String) -> D
         in_reply_to: orig.message_id.map(str::to_owned),
         references: references_chain(orig),
     }
+}
+
+/// Build a **reply-all** draft: To = the original sender + the original `To` (minus your own
+/// addresses); Cc = the original `Cc` (minus you and anyone already in To). De-duplicated
+/// case-insensitively. Subject/quote/threading match a plain reply.
+pub fn reply_all(
+    orig: &Original,
+    my_addrs: &[String],
+    from_name: Option<String>,
+    from_addr: String,
+) -> Draft {
+    let mut draft = reply(orig, from_name, from_addr);
+    let is_mine = |a: &str| my_addrs.iter().any(|m| m.eq_ignore_ascii_case(a));
+    let mut to = draft.to.clone(); // starts as [original sender]
+    for a in split_addrs(orig.to) {
+        if !is_mine(&a) && !to.iter().any(|x| x.eq_ignore_ascii_case(&a)) {
+            to.push(a);
+        }
+    }
+    let mut cc: Vec<String> = Vec::new();
+    for a in split_addrs(orig.cc) {
+        if !is_mine(&a)
+            && !to.iter().any(|x| x.eq_ignore_ascii_case(&a))
+            && !cc.iter().any(|x| x.eq_ignore_ascii_case(&a))
+        {
+            cc.push(a);
+        }
+    }
+    draft.to = to;
+    draft.cc = cc;
+    draft
+}
+
+/// Split a comma/semicolon-separated address field into trimmed, non-empty addresses.
+fn split_addrs(field: &str) -> Vec<String> {
+    field
+        .split([',', ';'])
+        .map(|a| a.trim().to_owned())
+        .filter(|a| !a.is_empty())
+        .collect()
 }
 
 /// Build a **forward** draft. `Fwd:`-prefixed subject and the original included below a header block;
@@ -265,6 +308,8 @@ mod tests {
             date: Some("Mon, 1 Jun 2026 12:00:00 +0000"),
             message_id: Some("<abc@test.local>"),
             in_reply_to: Some("<parent@test.local>"),
+            to: "me@test.local, carol@test.local",
+            cc: "dave@test.local",
             body_text: "Are you free?\n\nBob",
         }
     }
@@ -288,6 +333,36 @@ mod tests {
         );
         assert!(d.body_text.contains("> Are you free?"), "{}", d.body_text);
         assert_eq!(d.from_addr, "me@test.local");
+    }
+
+    #[test]
+    fn reply_all_includes_others_and_excludes_me() {
+        let me = vec!["me@test.local".to_owned()];
+        let d = reply_all(&orig(), &me, Some("Me".into()), "me@test.local".into());
+        // To = sender + original To (minus me, deduped)
+        assert_eq!(d.to, vec!["bob@test.local", "carol@test.local"]);
+        // Cc = original Cc minus me
+        assert_eq!(d.cc, vec!["dave@test.local"]);
+        // still threaded + Re:-prefixed like a reply
+        assert_eq!(d.subject, "Re: Lunch");
+        assert_eq!(d.in_reply_to.as_deref(), Some("<abc@test.local>"));
+    }
+
+    #[test]
+    fn reply_all_dedups_cc_against_to_and_itself() {
+        let o = Original {
+            from_addr: "bob@x",
+            subject: "S",
+            message_id: Some("<m>"),
+            to: "alice@x, me@x",
+            cc: "alice@x, dave@x, dave@x", // alice is also in To; dave is duplicated
+            ..Default::default()
+        };
+        let me = vec!["me@x".to_owned()];
+        let d = reply_all(&o, &me, None, "me@x".into());
+        assert_eq!(d.to, vec!["bob@x", "alice@x"]); // sender + To, minus me
+                                                    // Cc drops alice (already in To) + the duplicate dave + me
+        assert_eq!(d.cc, vec!["dave@x"]);
     }
 
     #[test]
