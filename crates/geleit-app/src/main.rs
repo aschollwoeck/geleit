@@ -1059,6 +1059,13 @@ fn post_reload(weak: &slint::Weak<Main>, status: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Render Slint in **software** (no GL context) so it can't collide with the embedded webview's
+    // GL (webkit) — that clash caused GLXBadWindow crashes. Set before any Slint call; only if the
+    // user hasn't chosen a backend, so an explicit `SLINT_BACKEND` still wins.
+    if std::env::var_os("SLINT_BACKEND").is_none() {
+        std::env::set_var("SLINT_BACKEND", "winit-software");
+    }
+
     // The embedded HTML webview (S3.1) uses webkit2gtk, which needs GTK initialised + its loop
     // pumped. Best-effort: if GTK isn't available the app still runs (HTML falls back to text).
     let gtk_ready = gtk::init().is_ok();
