@@ -6,6 +6,7 @@ mod refresh;
 mod viewmodel;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -132,6 +133,7 @@ slint::slint! {
         attachment: bool,
         thread-count: int, // messages in this conversation (1 = not threaded)
         starred: bool,
+        selected: bool, // multi-select for bulk actions (ORG-7)
     }
 
     struct DraftItem {
@@ -198,6 +200,7 @@ slint::slint! {
         in property <bool> managing-folders;
         in-out property <string> mf-name;
         in property <[string]> manage-folders;
+        in property <int> selected-count; // # messages multi-selected (ORG-7); 0 = bar hidden
         in property <bool> refreshing;
         in property <string> status; // non-empty = error to show (danger banner)
         in property <string> sync-status; // non-empty = calm sync-progress line
@@ -248,6 +251,11 @@ slint::slint! {
         callback create-folder();
         callback rename-folder(string);
         callback delete-folder(string);
+        callback toggle-select(int);
+        callback clear-selection();
+        callback bulk-archive();
+        callback bulk-trash();
+        callback bulk-star();
         callback refresh();
         callback connect();
         callback reload();
@@ -551,6 +559,54 @@ slint::slint! {
                         }
                         Rectangle { y: parent.height - 1px; height: 1px; background: Palette.divider; }
                     }
+                    // bulk-action bar (ORG-7) — shown while messages are multi-selected
+                    if root.selected-count > 0: Rectangle {
+                        height: 36px;
+                        background: Palette.accent-quiet;
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 16px;
+                            Text {
+                                text: root.selected-count + " selected";
+                                color: Palette.text;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Text {
+                                text: "Archive";
+                                color: Palette.accent-strong;
+                                font-size: 13px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                TouchArea { clicked => { root.bulk-archive(); } }
+                            }
+                            Text {
+                                text: "Delete";
+                                color: Palette.danger-strong;
+                                font-size: 13px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                TouchArea { clicked => { root.bulk-trash(); } }
+                            }
+                            Text {
+                                text: "Star";
+                                color: Palette.accent-strong;
+                                font-size: 13px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                TouchArea { clicked => { root.bulk-star(); } }
+                            }
+                            Text {
+                                text: "Clear";
+                                color: Palette.muted;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                TouchArea { clicked => { root.clear-selection(); } }
+                            }
+                        }
+                    }
                     ListView {
                         for m in root.messages: Rectangle {
                             height: 72px;
@@ -562,9 +618,33 @@ slint::slint! {
                                 visible: m.id == root.selected-message;
                                 background: Palette.accent;
                             }
+                            // open-message hit area — declared BELOW the content so the per-row
+                            // checkbox (declared later, inside the layout) wins in its corner.
+                            TouchArea { clicked => { root.message-selected(m); } }
                             HorizontalLayout {
                                 padding: 12px;
                                 spacing: 10px;
+                                // multi-select checkbox (ORG-7)
+                                Rectangle {
+                                    width: 18px;
+                                    Rectangle {
+                                        y: (parent.height - 16px) / 2;
+                                        width: 16px;
+                                        height: 16px;
+                                        border-radius: 4px;
+                                        border-width: 1px;
+                                        border-color: m.selected ? Palette.accent : Palette.divider;
+                                        background: m.selected ? Palette.accent : Palette.surface;
+                                        Text {
+                                            text: m.selected ? "✓" : "";
+                                            color: white;
+                                            font-size: 11px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    TouchArea { clicked => { root.toggle-select(m.id); } }
+                                }
                                 Rectangle {
                                     width: 10px;
                                     Rectangle {
@@ -625,7 +705,6 @@ slint::slint! {
                                 height: 1px;
                                 background: Palette.divider;
                             }
-                            TouchArea { clicked => { root.message-selected(m); } }
                         }
                     }
                 }
@@ -1399,6 +1478,7 @@ fn load_messages(store: &Store, folder_id: i64) -> Vec<MessageItem> {
                 attachment: vm.attachment,
                 thread_count: thread_size[i] as i32,
                 starred: vm.starred,
+                selected: false,
             }
         })
         .collect()
@@ -1429,6 +1509,121 @@ fn flip_starred(model: &VecModel<MessageItem>, id: i32, starred: bool) {
             }
         }
     }
+}
+
+/// Flip one row's `selected` flag in place (multi-select, ORG-7).
+fn flip_selected_row(model: &VecModel<MessageItem>, id: i32, selected: bool) {
+    for i in 0..model.row_count() {
+        if let Some(mut row) = model.row_data(i) {
+            if row.id == id {
+                row.selected = selected;
+                model.set_row_data(i, row);
+                break;
+            }
+        }
+    }
+}
+
+/// Bulk-move all `selected` messages to `target` (archive/trash): optimistic local-remove of each,
+/// clear the selection, then one worker writes the moves back. Failures return on refresh.
+#[allow(clippy::too_many_arguments)]
+fn bulk_move(
+    ui: &Main,
+    store: &Store,
+    messages: &VecModel<MessageItem>,
+    folders: &VecModel<SharedString>,
+    view: &HtmlView,
+    db_path: &str,
+    secrets: &Arc<OsSecretStore>,
+    selected: &Rc<RefCell<HashSet<i32>>>,
+    target: &str,
+) {
+    let source = folders
+        .row_data(ui.get_selected_folder() as usize)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "INBOX".to_owned());
+    let ids: Vec<i32> = selected.borrow().iter().copied().collect();
+    let mut uids = Vec::new();
+    for id in ids {
+        if let Some(uid) = store
+            .header_by_id(id.into())
+            .ok()
+            .flatten()
+            .and_then(|h| h.uid)
+        {
+            uids.push(uid);
+        }
+        let _ = store.delete_message(id.into());
+        remove_row(messages, id);
+    }
+    selected.borrow_mut().clear();
+    ui.set_selected_count(0);
+    ui.set_selected_message(0);
+    hide_html(view);
+    if uids.is_empty() {
+        return;
+    }
+    let weak = ui.as_weak();
+    let (db_path, secrets, target) = (db_path.to_owned(), secrets.clone(), target.to_owned());
+    std::thread::spawn(move || {
+        let mut any_err = false;
+        for uid in uids {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                refresh::run_move(&db_path, &*secrets, &source, uid as u32, &target)
+            }))
+            .unwrap_or(Err(String::new()));
+            any_err |= r.is_err();
+        }
+        if any_err {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_status(
+                        "Some messages couldn't be moved — they'll return on the next refresh."
+                            .into(),
+                    );
+                }
+            });
+        }
+    });
+}
+
+/// Bulk-star all `selected` messages (ORG-7): optimistic local flag + clear selection + write-back.
+#[allow(clippy::too_many_arguments)]
+fn bulk_star(
+    ui: &Main,
+    store: &Store,
+    messages: &VecModel<MessageItem>,
+    folders: &VecModel<SharedString>,
+    db_path: &str,
+    secrets: &Arc<OsSecretStore>,
+    selected: &Rc<RefCell<HashSet<i32>>>,
+) {
+    let source = folders
+        .row_data(ui.get_selected_folder() as usize)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "INBOX".to_owned());
+    let ids: Vec<i32> = selected.borrow().iter().copied().collect();
+    let mut uids = Vec::new();
+    for id in ids {
+        if let Ok(Some(uid)) = store.set_flagged(id.into(), true) {
+            uids.push(uid);
+        }
+        flip_starred(messages, id, true);
+        flip_selected_row(messages, id, false);
+    }
+    selected.borrow_mut().clear();
+    ui.set_selected_count(0);
+    if uids.is_empty() {
+        return;
+    }
+    let (db_path, secrets) = (db_path.to_owned(), secrets.clone());
+    std::thread::spawn(move || {
+        for uid in uids {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                refresh::run_set_flag(&db_path, &*secrets, &source, uid as u32, true)
+            }));
+        }
+    });
 }
 
 /// Remove one row by id (optimistic archive/trash/move — keeps scroll).
@@ -1627,6 +1822,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_move_folders(ModelRc::from(move_folders_model.clone()));
     let manage_folders_model = Rc::new(VecModel::<SharedString>::default());
     ui.set_manage_folders(ModelRc::from(manage_folders_model.clone()));
+    // multi-selected message ids for bulk actions (ORG-7)
+    let selected_ids = Rc::new(RefCell::new(HashSet::<i32>::new()));
     ui.set_folders(ModelRc::from(folders_model.clone()));
     ui.set_messages(ModelRc::from(messages.clone()));
 
@@ -1684,6 +1881,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let model = messages.clone();
         let view = html_view.clone();
         let fm = folders_model.clone();
+        let selected = selected_ids.clone();
         ui.on_folder_selected(move |idx| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(fid) = fids.borrow().get(idx as usize).copied() else {
@@ -1692,6 +1890,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_selected_folder(idx);
             ui.set_selected_message(0);
             ui.set_remote_blocked(false);
+            selected.borrow_mut().clear(); // a new folder starts with nothing selected
+            ui.set_selected_count(0);
             // is this the Trash folder? → offer Empty Trash + make Delete permanent (ORG-2)
             let name = fm
                 .row_data(idx as usize)
@@ -2085,6 +2285,93 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             spawn_folder_op(weak.clone(), move || {
                 refresh::run_delete_folder(&db_path, &*secrets, &name)
             });
+        });
+    }
+
+    // Multi-select + bulk actions (ORG-7).
+    {
+        let weak = ui.as_weak();
+        let model = messages.clone();
+        let selected = selected_ids.clone();
+        ui.on_toggle_select(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let now = {
+                let mut set = selected.borrow_mut();
+                if set.remove(&id) {
+                    false
+                } else {
+                    set.insert(id);
+                    true
+                }
+            };
+            flip_selected_row(&model, id, now);
+            ui.set_selected_count(selected.borrow().len() as i32);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let model = messages.clone();
+        let selected = selected_ids.clone();
+        ui.on_clear_selection(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            for id in selected.borrow().iter() {
+                flip_selected_row(&model, *id, false);
+            }
+            selected.borrow_mut().clear();
+            ui.set_selected_count(0);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let messages = messages.clone();
+        let fm = folders_model.clone();
+        let view = html_view.clone();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        let selected = selected_ids.clone();
+        ui.on_bulk_archive(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            match viewmodel::find_folder(&folder_names(&fm), &["archive"]).map(str::to_owned) {
+                Some(target) => bulk_move(
+                    &ui, &store, &messages, &fm, &view, &db_path, &secrets, &selected, &target,
+                ),
+                None => ui.set_status("This account has no Archive folder.".into()),
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let messages = messages.clone();
+        let fm = folders_model.clone();
+        let view = html_view.clone();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        let selected = selected_ids.clone();
+        ui.on_bulk_trash(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            match viewmodel::find_folder(&folder_names(&fm), &["trash", "deleted", "bin"])
+                .map(str::to_owned)
+            {
+                Some(target) => bulk_move(
+                    &ui, &store, &messages, &fm, &view, &db_path, &secrets, &selected, &target,
+                ),
+                None => ui.set_status("This account has no Trash folder.".into()),
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let messages = messages.clone();
+        let fm = folders_model.clone();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        let selected = selected_ids.clone();
+        ui.on_bulk_star(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            bulk_star(&ui, &store, &messages, &fm, &db_path, &secrets, &selected);
         });
     }
 
