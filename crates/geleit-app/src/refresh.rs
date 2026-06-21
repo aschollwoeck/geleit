@@ -9,7 +9,7 @@
 
 use geleit_engine::imap::{self, ImapConfig};
 use geleit_platform::secret::SecretStore;
-use geleit_store::{ImapSettings, Store, StoreError};
+use geleit_store::{ImapSettings, SmtpConfig, SmtpSecurityKind, Store, StoreError};
 
 /// Validate raw Add-account form fields into `(email, ImapSettings)`. Pure — unit-tested. (Email
 /// format is checked by the store on insert; here we reject empty host/username and bad ports.)
@@ -49,6 +49,34 @@ pub fn build_settings(
             allow_invalid_certs,
         },
     ))
+}
+
+/// Validate raw SMTP form fields into an `SmtpConfig`. Pure — unit-tested. An empty port defaults to
+/// the standard for the chosen security (465 implicit / 587 STARTTLS).
+pub fn build_smtp_settings(host: &str, port: &str, starttls: bool) -> Result<SmtpConfig, String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("Enter your outgoing mail server (SMTP host).".to_owned());
+    }
+    let security = if starttls {
+        SmtpSecurityKind::StartTls
+    } else {
+        SmtpSecurityKind::Implicit
+    };
+    let port: u16 = match port.trim() {
+        "" if starttls => 587,
+        "" => 465,
+        p => p
+            .parse()
+            .ok()
+            .filter(|&n| n != 0)
+            .ok_or_else(|| "Enter a valid SMTP port (1–65535).".to_owned())?,
+    };
+    Ok(SmtpConfig {
+        host: host.to_owned(),
+        port,
+        security,
+    })
 }
 
 fn to_config(s: &ImapSettings) -> ImapConfig {
@@ -107,6 +135,7 @@ pub fn run_setup(
     email: &str,
     display_name: Option<&str>,
     settings: ImapSettings,
+    smtp: SmtpConfig,
     password: &str,
 ) -> Result<(), String> {
     let store = open_store(db_path, secrets)?;
@@ -134,6 +163,13 @@ pub fn run_setup(
             (id, true)
         }
     };
+    // Persist SMTP settings (sending, M4). A failure here on a new account rolls back below.
+    if store.update_smtp_settings(account_id, &smtp).is_err() {
+        if is_new {
+            let _ = store.delete_account(account_id);
+        }
+        return Err("Couldn't save the account.".to_owned());
+    }
 
     if imap::store_password(secrets, &settings.username, password.as_bytes()).is_err() {
         if is_new {
@@ -244,7 +280,30 @@ pub fn run_remove_account(db_path: &str, secrets: &dyn SecretStore) -> Result<bo
 
 #[cfg(test)]
 mod tests {
-    use super::build_settings;
+    use super::{build_settings, build_smtp_settings};
+    use geleit_store::SmtpSecurityKind;
+
+    #[test]
+    fn smtp_defaults_and_security() {
+        // STARTTLS, empty port → 587
+        let s = build_smtp_settings(" smtp.example.com ", "", true).unwrap();
+        assert_eq!(s.host, "smtp.example.com");
+        assert_eq!(s.port, 587);
+        assert_eq!(s.security, SmtpSecurityKind::StartTls);
+        // implicit, empty port → 465
+        let s = build_smtp_settings("smtp.example.com", "", false).unwrap();
+        assert_eq!(s.port, 465);
+        assert_eq!(s.security, SmtpSecurityKind::Implicit);
+        // explicit port honoured
+        assert_eq!(build_smtp_settings("h", "2525", false).unwrap().port, 2525);
+    }
+
+    #[test]
+    fn smtp_rejects_empty_host_and_bad_port() {
+        assert!(build_smtp_settings("  ", "587", true).is_err());
+        assert!(build_smtp_settings("h", "0", false).is_err());
+        assert!(build_smtp_settings("h", "abc", false).is_err());
+    }
 
     #[test]
     fn valid_settings() {
@@ -376,7 +435,7 @@ mod tests {
     fn live_setup_then_refresh() {
         use super::{run_refresh, run_setup};
         use geleit_platform::secret::InMemorySecretStore;
-        use geleit_store::{ImapSettings, Store};
+        use geleit_store::{ImapSettings, SmtpConfig, SmtpSecurityKind, Store};
 
         let path = std::env::temp_dir().join("geleit-setup-test.db");
         let path = path.to_str().unwrap();
@@ -389,12 +448,18 @@ mod tests {
             username: "geleittest".to_owned(),
             allow_invalid_certs: true,
         };
+        let smtp = SmtpConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 465,
+            security: SmtpSecurityKind::Implicit,
+        };
         run_setup(
             path,
             &secrets,
             "geleittest@localhost",
             Some("geleittest"),
             settings,
+            smtp,
             "testpass123",
         )
         .expect("setup");
