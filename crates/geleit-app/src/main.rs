@@ -131,6 +131,7 @@ slint::slint! {
         unread: bool,
         attachment: bool,
         thread-count: int, // messages in this conversation (1 = not threaded)
+        starred: bool,
     }
 
     struct DraftItem {
@@ -187,6 +188,7 @@ slint::slint! {
         in property <string> r-sender;
         in property <string> r-date;
         in property <string> r-body;
+        in property <bool> r-starred; // the open message is starred (ORG-4)
         in property <[string]> r-attachments;
         in property <bool> refreshing;
         in property <string> status; // non-empty = error to show (danger banner)
@@ -225,6 +227,7 @@ slint::slint! {
         callback folder-selected(int);
         callback message-selected(MessageItem);
         callback mark-unread(int);
+        callback toggle-star(int);
         callback refresh();
         callback connect();
         callback reload();
@@ -527,7 +530,7 @@ slint::slint! {
                                         overflow: elide;
                                     }
                                     Text {
-                                        text: m.subject;
+                                        text: (m.starred ? "★ " : "") + m.subject;
                                         color: Palette.text;
                                         font-weight: m.unread ? 600 : 500;
                                         overflow: elide;
@@ -620,6 +623,13 @@ slint::slint! {
                             font-size: 13px;
                             font-weight: 600;
                             TouchArea { clicked => { root.forward(); } }
+                        }
+                        Text {
+                            text: root.r-starred ? "★ Starred" : "☆ Star";
+                            color: root.r-starred ? Palette.accent-strong : Palette.muted;
+                            font-size: 13px;
+                            font-weight: 600;
+                            TouchArea { clicked => { root.toggle-star(root.selected-message); } }
                         }
                         Text {
                             text: "Mark as unread";
@@ -1168,6 +1178,7 @@ fn load_messages(store: &Store, folder_id: i64) -> Vec<MessageItem> {
                 unread: vm.unread,
                 attachment: vm.attachment,
                 thread_count: thread_size[i] as i32,
+                starred: vm.starred,
             }
         })
         .collect()
@@ -1180,6 +1191,19 @@ fn flip_unread(model: &VecModel<MessageItem>, id: i32, unread: bool) {
         if let Some(mut row) = model.row_data(i) {
             if row.id == id {
                 row.unread = unread;
+                model.set_row_data(i, row);
+                break;
+            }
+        }
+    }
+}
+
+/// Flip one row's `starred` flag in place (keeps scroll, avoids a full re-query).
+fn flip_starred(model: &VecModel<MessageItem>, id: i32, starred: bool) {
+    for i in 0..model.row_count() {
+        if let Some(mut row) = model.row_data(i) {
+            if row.id == id {
+                row.starred = starred;
                 model.set_row_data(i, row);
                 break;
             }
@@ -1362,6 +1386,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(ui) = weak.upgrade() else { return };
             ui.set_selected_message(item.id);
             ui.set_r_subject(item.subject.clone());
+            ui.set_r_starred(item.starred);
             ui.set_r_sender(item.sender.clone());
             ui.set_r_date(item.date.clone());
             let stored = store.body_for(item.id.into());
@@ -1413,6 +1438,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_mark_unread(move |id| {
             let _ = store.set_seen(id.into(), false);
             flip_unread(&model, id, true);
+        });
+    }
+
+    // Star / unstar (ORG-4): optimistic local flip, then write \Flagged back to the server.
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let model = messages.clone();
+        let folders_model = folders_model.clone();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
+        ui.on_toggle_star(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(header) = store.header_by_id(id.into()).ok().flatten() else {
+                return;
+            };
+            let new_flag = !header.flagged;
+            let Ok(uid) = store.set_flagged(id.into(), new_flag) else {
+                return;
+            };
+            ui.set_r_starred(new_flag);
+            flip_starred(&model, id, new_flag);
+            // server write-back (skip if the message has no UID, e.g. not yet synced)
+            let Some(uid) = uid else { return };
+            let folder = folders_model
+                .row_data(ui.get_selected_folder() as usize)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "INBOX".to_owned());
+            let weak = weak.clone();
+            let db_path = db_path.clone();
+            let secrets = secrets.clone();
+            std::thread::spawn(move || {
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    refresh::run_set_flag(&db_path, &*secrets, &folder, uid as u32, new_flag)
+                }))
+                .unwrap_or_else(|_| Err("Couldn't update the star.".to_owned()));
+                if let Err(msg) = res {
+                    let w = weak.clone();
+                    // the star stays set locally (preserved on re-sync); just note the sync miss
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = w.upgrade() {
+                            ui.set_sync_status(msg.into());
+                        }
+                    });
+                }
+            });
         });
     }
 

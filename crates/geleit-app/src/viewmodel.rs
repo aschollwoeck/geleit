@@ -13,6 +13,7 @@ pub struct MessageVm {
     pub date: String,
     pub unread: bool,
     pub attachment: bool,
+    pub starred: bool,
 }
 
 /// Map a stored message header to its display row, applying sensible fallbacks.
@@ -32,6 +33,7 @@ pub fn message_vm(h: &MessageHeader) -> MessageVm {
         date: format_date(h.date),
         unread: !h.seen,
         attachment: h.has_attachments,
+        starred: h.flagged,
     }
 }
 
@@ -143,6 +145,7 @@ mod tests {
             cc_addrs: None,
             date: None,
             seen: false,
+            flagged: false,
             has_attachments: false,
             snippet: None,
         }
@@ -173,11 +176,13 @@ mod tests {
         let mut h = header();
         h.seen = true;
         h.has_attachments = true;
+        h.flagged = true;
         h.subject = Some("Hi".to_owned());
         h.snippet = Some("preview".to_owned());
         let vm = message_vm(&h);
         assert!(!vm.unread);
         assert!(vm.attachment);
+        assert!(vm.starred);
         assert_eq!(vm.subject, "Hi");
         assert_eq!(vm.snippet, "preview");
     }

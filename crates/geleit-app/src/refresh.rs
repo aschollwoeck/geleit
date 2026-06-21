@@ -297,6 +297,32 @@ pub fn run_send(
     Ok(())
 }
 
+/// Write a star (`\Flagged`) change back to the server (ORG-4). Blocking + network: **worker thread.**
+pub fn run_set_flag(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    uid: u32,
+    flagged: bool,
+) -> Result<(), String> {
+    let store = open_store(db_path, secrets)?;
+    let account = store
+        .list_accounts()
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No account is set up yet.".to_owned())?;
+    let imap = store
+        .imap_settings(account.id)
+        .ok()
+        .flatten()
+        .ok_or_else(|| "This account isn't set up.".to_owned())?;
+    let config = to_config(&imap);
+    runtime()?
+        .block_on(imap::set_flag(&config, secrets, folder, uid, flagged))
+        .map_err(|_| "Couldn't update the star on the server.".to_owned())
+}
+
 /// Sync the first account's `folder` (+ folder list), reading settings from the store and the
 /// password from the shared secrets. Blocking + network: **run on a worker thread.**
 pub fn run_refresh(db_path: &str, secrets: &dyn SecretStore, folder: &str) -> Result<(), String> {
