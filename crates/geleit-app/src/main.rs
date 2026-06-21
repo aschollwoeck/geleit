@@ -133,6 +133,13 @@ slint::slint! {
         thread-count: int, // messages in this conversation (1 = not threaded)
     }
 
+    struct DraftItem {
+        id: int,
+        subject: string,
+        recipients: string,
+        date: string,
+    }
+
     export component Main inherits Window {
         in property <string> account;
         in property <[string]> folders;
@@ -156,6 +163,9 @@ slint::slint! {
         in-out property <string> c-body;
         in property <bool> sending;
         in property <string> compose-status; // non-empty = send error
+        // drafts (SEND-5)
+        in property <[DraftItem]> drafts;
+        in property <bool> viewing-drafts;
         // add-account form
         in property <bool> needs-setup;
         in-out property <string> f-email;
@@ -185,6 +195,10 @@ slint::slint! {
         callback reply();
         callback reply-all();
         callback forward();
+        callback open-drafts();
+        callback resume-draft(int);
+        callback save-draft();
+        callback close-drafts();
 
         preferred-width: 1100px;
         preferred-height: 720px;
@@ -234,6 +248,22 @@ slint::slint! {
                             }
                         }
                         TouchArea { clicked => { root.compose(); } }
+                    }
+                    Rectangle { height: 6px; }
+                    Rectangle {
+                        height: 32px;
+                        border-radius: 8px;
+                        HorizontalLayout {
+                            alignment: center;
+                            Text {
+                                text: "Drafts";
+                                color: Palette.accent-strong;
+                                font-size: 13px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                        TouchArea { clicked => { root.open-drafts(); } }
                     }
                     Rectangle { height: 12px; }
                     for f[i] in root.folders: Rectangle {
@@ -776,6 +806,24 @@ slint::slint! {
                             }
                         }
                         Rectangle {
+                            width: 110px;
+                            height: 40px;
+                            border-radius: 8px;
+                            background: Palette.bg;
+                            border-width: 1px;
+                            border-color: Palette.divider;
+                            Text {
+                                text: "Save draft";
+                                color: Palette.text;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                            TouchArea {
+                                enabled: !root.sending;
+                                clicked => { root.save-draft(); }
+                            }
+                        }
+                        Rectangle {
                             width: 120px;
                             height: 40px;
                             border-radius: 8px;
@@ -797,7 +845,99 @@ slint::slint! {
                 }
             }
         }
+
+        // ---- DRAFTS (SEND-5) — pick a saved draft to resume ----
+        if root.viewing-drafts: Rectangle {
+            background: #0d171b99;
+            TouchArea {}
+            Rectangle {
+                width: min(560px, parent.width - 80px);
+                height: min(560px, parent.height - 80px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Palette.surface;
+                border-radius: 12px;
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 10px;
+                    HorizontalLayout {
+                        Text {
+                            text: "Drafts";
+                            color: Palette.text;
+                            font-size: 18px;
+                            font-weight: 700;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: "Close";
+                            color: Palette.accent-strong;
+                            font-size: 14px;
+                            font-weight: 600;
+                            TouchArea { clicked => { root.close-drafts(); } }
+                        }
+                    }
+                    if root.drafts.length == 0: Text {
+                        text: "No saved drafts.";
+                        color: Palette.muted;
+                    }
+                    ListView {
+                        vertical-stretch: 1;
+                        for d in root.drafts: Rectangle {
+                            height: 56px;
+                            border-radius: 8px;
+                            background: touch.has-hover ? Palette.accent-quiet : transparent;
+                            touch := TouchArea { clicked => { root.resume-draft(d.id); } }
+                            VerticalLayout {
+                                padding: 8px;
+                                Text {
+                                    text: d.subject == "" ? "(no subject)" : d.subject;
+                                    color: Palette.text;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: d.recipients == "" ? "(no recipients)" : d.recipients;
+                                    color: Palette.muted;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
+}
+
+/// Load the first account's drafts as display rows (newest first).
+fn load_draft_items(store: &Store) -> Vec<DraftItem> {
+    let Some(acc) = store
+        .list_accounts()
+        .ok()
+        .and_then(|a| a.into_iter().next())
+    else {
+        return Vec::new();
+    };
+    store
+        .list_drafts(acc.id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| {
+            let recipients = [d.content.to.as_str(), d.content.cc.as_str()]
+                .iter()
+                .filter(|s| !s.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            DraftItem {
+                id: d.id as i32,
+                subject: d.content.subject.into(),
+                recipients: recipients.into(),
+                date: viewmodel::format_date(Some(d.updated_at)).into(),
+            }
+        })
+        .collect()
 }
 
 /// The first account's signature (empty if none) — appended to composed messages.
@@ -939,6 +1079,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // threading headers (in_reply_to, references) for the message being composed, if it's a reply
     type ComposeThread = Rc<RefCell<(Option<String>, Vec<String>)>>;
     let compose_thread: ComposeThread = Rc::new(RefCell::new((None, Vec::new())));
+    // the draft being edited (Some = resuming/saving over an existing draft), and the drafts list
+    let current_draft_id = Rc::new(RefCell::new(Option::<i64>::None));
+    let drafts_model = Rc::new(VecModel::<DraftItem>::default());
+    ui.set_drafts(ModelRc::from(drafts_model.clone()));
     ui.set_folders(ModelRc::from(folders_model.clone()));
     ui.set_messages(ModelRc::from(messages.clone()));
 
@@ -1104,10 +1248,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let view = html_view.clone();
         let thread = compose_thread.clone();
         let store = store.clone();
+        let draft_id = current_draft_id.clone();
         ui.on_compose(move || {
             let Some(ui) = weak.upgrade() else { return };
             hide_html(&view);
             *thread.borrow_mut() = (None, Vec::new()); // a fresh message, not a reply
+            *draft_id.borrow_mut() = None; // not editing an existing draft
             ui.set_c_to(SharedString::new());
             ui.set_c_cc(SharedString::new());
             ui.set_c_subject(SharedString::new());
@@ -1125,6 +1271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let view = html_view.clone();
         let thread = compose_thread.clone();
+        let draft_id = current_draft_id.clone();
         // kind: 0 = reply, 1 = reply-all, 2 = forward
         let open_compose = move |kind: u8| {
             let Some(ui) = weak.upgrade() else { return };
@@ -1162,6 +1309,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => geleit_engine::message::forward(&orig, None, String::new()),
             };
             hide_html(&view);
+            *draft_id.borrow_mut() = None; // a reply/forward is a new draft
             *thread.borrow_mut() = (draft.in_reply_to.clone(), draft.references.clone());
             ui.set_c_to(draft.to.join(", ").into());
             ui.set_c_cc(draft.cc.join(", ").into());
@@ -1196,6 +1344,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let db_path = db.clone();
         let secrets = secrets.clone();
         let thread = compose_thread.clone();
+        let draft_id = current_draft_id.clone();
         ui.on_send_message(move || {
             let Some(ui) = weak.upgrade() else { return };
             if ui.get_sending() {
@@ -1212,6 +1361,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.get_c_body().to_string(),
             );
             let (in_reply_to, references) = thread.borrow().clone();
+            let draft = *draft_id.borrow();
             ui.set_compose_status(SharedString::new());
             ui.set_sending(true);
 
@@ -1229,6 +1379,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &body,
                         in_reply_to,
                         references,
+                        draft,
                     )
                 }))
                 .unwrap_or_else(|_| Err("Couldn't send — something went wrong.".to_owned()));
@@ -1244,6 +1395,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 });
             });
+        });
+    }
+
+    // Drafts (SEND-5): open the list, save the current compose, resume a saved one.
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let model = drafts_model.clone();
+        ui.on_open_drafts(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            model.set_vec(load_draft_items(&store));
+            ui.set_viewing_drafts(true);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_close_drafts(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_viewing_drafts(false);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let thread = compose_thread.clone();
+        let draft_id = current_draft_id.clone();
+        let view = html_view.clone();
+        ui.on_save_draft(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(acc) = store
+                .list_accounts()
+                .ok()
+                .and_then(|a| a.into_iter().next())
+            else {
+                return;
+            };
+            let (irt, refs) = thread.borrow().clone();
+            let content = geleit_store::DraftContent {
+                to: ui.get_c_to().to_string(),
+                cc: ui.get_c_cc().to_string(),
+                subject: ui.get_c_subject().to_string(),
+                body: ui.get_c_body().to_string(),
+                in_reply_to: irt,
+                references: refs,
+            };
+            let existing = *draft_id.borrow();
+            match store.save_draft(acc.id, existing, &content) {
+                Ok(id) => {
+                    *draft_id.borrow_mut() = Some(id);
+                    ui.set_composing(false);
+                    hide_html(&view);
+                    ui.set_sync_status("Draft saved.".into());
+                }
+                Err(_) => ui.set_compose_status("Couldn't save the draft.".into()),
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let thread = compose_thread.clone();
+        let draft_id = current_draft_id.clone();
+        let view = html_view.clone();
+        ui.on_resume_draft(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(d) = store.draft_by_id(id.into()).ok().flatten() else {
+                return;
+            };
+            hide_html(&view);
+            *draft_id.borrow_mut() = Some(d.id);
+            *thread.borrow_mut() = (d.content.in_reply_to.clone(), d.content.references.clone());
+            ui.set_c_to(d.content.to.into());
+            ui.set_c_cc(d.content.cc.into());
+            ui.set_c_subject(d.content.subject.into());
+            ui.set_c_body(d.content.body.into());
+            ui.set_compose_status(SharedString::new());
+            ui.set_viewing_drafts(false);
+            ui.set_composing(true);
         });
     }
 

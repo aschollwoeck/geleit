@@ -112,6 +112,22 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE message ADD COLUMN to_addrs TEXT;
     ALTER TABLE message ADD COLUMN cc_addrs TEXT;
     ",
+    // 9 — local drafts (SEND-5): unsent messages saved on this device. `reference_ids` is the
+    // comma-joined References chain (`references` is a SQL keyword).
+    "
+    CREATE TABLE draft (
+        id            INTEGER PRIMARY KEY,
+        account_id    INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+        to_addrs      TEXT NOT NULL DEFAULT '',
+        cc_addrs      TEXT NOT NULL DEFAULT '',
+        subject       TEXT NOT NULL DEFAULT '',
+        body          TEXT NOT NULL DEFAULT '',
+        in_reply_to   TEXT,
+        reference_ids TEXT,
+        updated_at    INTEGER NOT NULL
+    );
+    CREATE INDEX draft_account_updated ON draft(account_id, updated_at DESC);
+    ",
 ];
 
 /// An account row.
@@ -164,6 +180,25 @@ pub struct SmtpConfig {
     pub host: String,
     pub port: u16,
     pub security: SmtpSecurityKind,
+}
+
+/// The editable content of a draft message (SEND-5). Addresses are comma-joined, as typed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DraftContent {
+    pub to: String,
+    pub cc: String,
+    pub subject: String,
+    pub body: String,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+}
+
+/// A stored draft: its id, content, and last-saved time (unix seconds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftRow {
+    pub id: i64,
+    pub content: DraftContent,
+    pub updated_at: i64,
 }
 
 /// A folder/mailbox row.
@@ -439,6 +474,84 @@ impl Store {
             )
             .optional()?
             .flatten())
+    }
+
+    /// Save a draft (SEND-5): update `id` if given, else insert. Returns the draft's id.
+    pub fn save_draft(
+        &self,
+        account_id: i64,
+        id: Option<i64>,
+        c: &DraftContent,
+    ) -> Result<i64, StoreError> {
+        let refs: Option<String> = (!c.references.is_empty()).then(|| c.references.join(","));
+        match id {
+            Some(id) => {
+                self.conn.execute(
+                    "UPDATE draft SET to_addrs = ?2, cc_addrs = ?3, subject = ?4, body = ?5, \
+                     in_reply_to = ?6, reference_ids = ?7, updated_at = strftime('%s','now') \
+                     WHERE id = ?1",
+                    (id, &c.to, &c.cc, &c.subject, &c.body, &c.in_reply_to, &refs),
+                )?;
+                Ok(id)
+            }
+            None => {
+                self.conn.execute(
+                    "INSERT INTO draft \
+                     (account_id, to_addrs, cc_addrs, subject, body, in_reply_to, reference_ids, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%s','now'))",
+                    (account_id, &c.to, &c.cc, &c.subject, &c.body, &c.in_reply_to, &refs),
+                )?;
+                Ok(self.conn.last_insert_rowid())
+            }
+        }
+    }
+
+    /// All drafts for an account, newest-saved first.
+    pub fn list_drafts(&self, account_id: i64) -> Result<Vec<DraftRow>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, to_addrs, cc_addrs, subject, body, in_reply_to, reference_ids, updated_at \
+             FROM draft WHERE account_id = ?1 ORDER BY updated_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([account_id], Self::draft_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// A single draft by id, or `None`.
+    pub fn draft_by_id(&self, id: i64) -> Result<Option<DraftRow>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, to_addrs, cc_addrs, subject, body, in_reply_to, reference_ids, \
+                 updated_at FROM draft WHERE id = ?1",
+                [id],
+                Self::draft_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Delete a draft (e.g. after it's sent, or discarded). Idempotent.
+    pub fn delete_draft(&self, id: i64) -> Result<(), StoreError> {
+        self.conn.execute("DELETE FROM draft WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    fn draft_from_row(r: &rusqlite::Row) -> rusqlite::Result<DraftRow> {
+        let reference_ids: Option<String> = r.get(6)?;
+        Ok(DraftRow {
+            id: r.get(0)?,
+            content: DraftContent {
+                to: r.get(1)?,
+                cc: r.get(2)?,
+                subject: r.get(3)?,
+                body: r.get(4)?,
+                in_reply_to: r.get(5)?,
+                references: reference_ids
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.split(',').map(str::to_owned).collect())
+                    .unwrap_or_default(),
+            },
+            updated_at: r.get(7)?,
+        })
     }
 
     /// Delete an account and everything under it (folders/messages/bodies cascade).
@@ -989,6 +1102,41 @@ mod tests {
             .collect();
         assert_eq!(subs, ["new", "mid", "old"]); // date DESC
         assert_eq!(s.messages_in_folder(sent, 50).unwrap().len(), 1); // folder-scoped
+    }
+
+    #[test]
+    fn draft_save_list_resume_update_delete() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        assert!(s.list_drafts(acc).unwrap().is_empty());
+
+        let c = DraftContent {
+            to: "bob@x.com".into(),
+            cc: "carol@x.com".into(),
+            subject: "Hi".into(),
+            body: "draft body".into(),
+            in_reply_to: Some("<m1@x>".into()),
+            references: vec!["<m0@x>".into(), "<m1@x>".into()],
+        };
+        let id = s.save_draft(acc, None, &c).unwrap();
+        let row = s.draft_by_id(id).unwrap().expect("found");
+        assert_eq!(row.content, c); // full round-trip incl. references split/join
+        assert_eq!(s.list_drafts(acc).unwrap().len(), 1);
+
+        // update in place (same id, no new row)
+        let mut c2 = c.clone();
+        c2.subject = "Hi again".into();
+        c2.references = vec![]; // clearing references → None in DB → empty Vec back
+        let id2 = s.save_draft(acc, Some(id), &c2).unwrap();
+        assert_eq!(id2, id);
+        let row = s.draft_by_id(id).unwrap().unwrap();
+        assert_eq!(row.content.subject, "Hi again");
+        assert!(row.content.references.is_empty());
+        assert_eq!(s.list_drafts(acc).unwrap().len(), 1);
+
+        s.delete_draft(id).unwrap();
+        assert!(s.draft_by_id(id).unwrap().is_none());
+        assert!(s.list_drafts(acc).unwrap().is_empty());
     }
 
     #[test]
