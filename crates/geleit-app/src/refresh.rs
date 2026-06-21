@@ -222,6 +222,7 @@ pub fn run_send(
     body: &str,
     in_reply_to: Option<String>,
     references: Vec<String>,
+    draft_id: Option<i64>,
 ) -> Result<(), String> {
     let store = open_store(db_path, secrets)?;
     let account = store
@@ -284,7 +285,12 @@ pub fn run_send(
             let _ = imap::append_message(&imap_config, secrets, &folder, &bytes).await;
         }
         Ok::<(), String>(())
-    })
+    })?;
+    // The message went out — drop the draft it came from (best-effort).
+    if let Some(id) = draft_id {
+        let _ = store.delete_draft(id);
+    }
+    Ok(())
 }
 
 /// Sync the first account's `folder` (+ folder list), reading settings from the store and the
