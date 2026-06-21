@@ -194,6 +194,23 @@ pub fn password(secrets: &dyn SecretStore, username: &str) -> Result<Option<Vec<
     Ok(secrets.get(SECRET_SERVICE, username)?)
 }
 
+/// Append a (sent) message to `folder` — e.g. saving an outgoing message to Sent (SEND-8) — marked
+/// `\Seen`. `message` is the full RFC 5322 bytes. The mailbox must already exist on the server.
+pub async fn append_message(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    message: &[u8],
+) -> Result<(), ImapError> {
+    let mut session = connect(config, secrets).await?;
+    let result = session
+        .append(folder, Some("(\\Seen)"), None, message)
+        .await;
+    let _ = session.logout().await; // best-effort
+    result?;
+    Ok(())
+}
+
 /// Remove a stored IMAP password (e.g. on account removal, SEC-3). Idempotent — deleting an absent
 /// secret succeeds (the `SecretStore` contract).
 pub fn delete_password(secrets: &dyn SecretStore, username: &str) -> Result<(), ImapError> {
@@ -488,7 +505,6 @@ fn tls_config(allow_invalid_certs: bool) -> Result<ClientConfig, ImapError> {
         .with_no_client_auth())
 }
 
-/// Dev-only certificate verifier, compiled only with the `dangerous-tls` feature.
 #[cfg(feature = "dangerous-tls")]
 mod danger {
     //! Dev-only certificate verifier. It accepts ANY certificate: chain/name validation is
@@ -606,6 +622,28 @@ mod tests {
         };
         let folders = list_folders(&cfg, &secrets).await.expect("connect + list");
         assert!(folders.iter().any(|f| f == "INBOX"), "folders: {folders:?}");
+    }
+
+    /// Append a message to INBOX (proxy for Sent) and confirm it's accepted (SEND-8).
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn live_append_message_to_dovecot() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let msg =
+            b"From: geleittest@localhost\r\nTo: x@localhost\r\nSubject: Append test\r\n\r\nHi.\r\n";
+        append_message(&cfg, &secrets, "INBOX", msg)
+            .await
+            .expect("append accepted");
     }
 
     /// Append a known message to INBOX, sync envelopes, and assert it lands in the store.
