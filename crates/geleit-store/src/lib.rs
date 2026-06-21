@@ -106,6 +106,12 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE account ADD COLUMN signature TEXT;
     ",
+    // 8 — original To/Cc recipients (comma-joined bare addresses) for reply-all (SEND-2). NULL on
+    // messages synced before this migration; reply-all falls back to reply-to-sender for those.
+    "
+    ALTER TABLE message ADD COLUMN to_addrs TEXT;
+    ALTER TABLE message ADD COLUMN cc_addrs TEXT;
+    ",
 ];
 
 /// An account row.
@@ -177,6 +183,9 @@ pub struct NewMessage {
     pub subject: Option<String>,
     pub from_name: Option<String>,
     pub from_addr: Option<String>,
+    /// Comma-joined bare To/Cc addresses (for reply-all). Set on envelope sync.
+    pub to_addrs: Option<String>,
+    pub cc_addrs: Option<String>,
     pub date: Option<i64>,
     pub seen: bool,
     pub has_attachments: bool,
@@ -193,6 +202,10 @@ pub struct MessageHeader {
     pub subject: Option<String>,
     pub from_name: Option<String>,
     pub from_addr: Option<String>,
+    /// Comma-joined bare To/Cc addresses (for reply-all). Only populated by [`Store::header_by_id`];
+    /// the folder listing leaves these `None` (it doesn't need them).
+    pub to_addrs: Option<String>,
+    pub cc_addrs: Option<String>,
     pub date: Option<i64>,
     pub seen: bool,
     pub has_attachments: bool,
@@ -521,12 +534,13 @@ impl Store {
         self.conn.execute(
             "INSERT INTO message \
              (account_id, folder_id, uid, message_id, in_reply_to, subject, from_name, from_addr, \
-              date, seen, flagged, has_attachments, snippet) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12) \
+              to_addrs, cc_addrs, date, seen, flagged, has_attachments, snippet) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, ?14) \
              ON CONFLICT(account_id, folder_id, uid) DO UPDATE SET \
                message_id = excluded.message_id, in_reply_to = excluded.in_reply_to, \
                subject = excluded.subject, from_name = excluded.from_name, \
-               from_addr = excluded.from_addr, date = excluded.date, seen = excluded.seen",
+               from_addr = excluded.from_addr, to_addrs = excluded.to_addrs, \
+               cc_addrs = excluded.cc_addrs, date = excluded.date, seen = excluded.seen",
             (
                 account_id,
                 folder_id,
@@ -536,6 +550,8 @@ impl Store {
                 &m.subject,
                 &m.from_name,
                 &m.from_addr,
+                &m.to_addrs,
+                &m.cc_addrs,
                 m.date,
                 m.seen,
                 m.has_attachments,
@@ -574,6 +590,8 @@ impl Store {
                 subject: r.get(4)?,
                 from_name: r.get(5)?,
                 from_addr: r.get(6)?,
+                to_addrs: None, // not needed for the listing (header_by_id reads them)
+                cc_addrs: None,
                 date: r.get(7)?,
                 seen: r.get(8)?,
                 has_attachments: r.get(9)?,
@@ -589,7 +607,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT id, uid, message_id, in_reply_to, subject, from_name, from_addr, date, \
-                 seen, has_attachments, snippet FROM message WHERE id = ?1",
+                 seen, has_attachments, snippet, to_addrs, cc_addrs FROM message WHERE id = ?1",
                 [id],
                 |r| {
                     Ok(MessageHeader {
@@ -600,6 +618,8 @@ impl Store {
                         subject: r.get(4)?,
                         from_name: r.get(5)?,
                         from_addr: r.get(6)?,
+                        to_addrs: r.get(11)?,
+                        cc_addrs: r.get(12)?,
                         date: r.get(7)?,
                         seen: r.get(8)?,
                         has_attachments: r.get(9)?,
@@ -1000,6 +1020,8 @@ mod tests {
                     subject: Some("Hello".to_owned()),
                     from_addr: Some("bob@x.com".to_owned()),
                     message_id: Some("<m1@x>".to_owned()),
+                    to_addrs: Some("me@x.com, carol@x.com".to_owned()),
+                    cc_addrs: Some("dave@x.com".to_owned()),
                     ..Default::default()
                 },
             )
@@ -1008,6 +1030,8 @@ mod tests {
         assert_eq!(h.subject.as_deref(), Some("Hello"));
         assert_eq!(h.from_addr.as_deref(), Some("bob@x.com"));
         assert_eq!(h.message_id.as_deref(), Some("<m1@x>"));
+        assert_eq!(h.to_addrs.as_deref(), Some("me@x.com, carol@x.com"));
+        assert_eq!(h.cc_addrs.as_deref(), Some("dave@x.com"));
         assert_eq!(s.header_by_id(999_999).unwrap(), None);
     }
 

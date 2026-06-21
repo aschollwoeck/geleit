@@ -183,6 +183,7 @@ slint::slint! {
         callback send-message();
         callback cancel-compose();
         callback reply();
+        callback reply-all();
         callback forward();
 
         preferred-width: 1100px;
@@ -529,6 +530,13 @@ slint::slint! {
                             font-size: 13px;
                             font-weight: 600;
                             TouchArea { clicked => { root.reply(); } }
+                        }
+                        Text {
+                            text: "Reply all";
+                            color: Palette.accent-strong;
+                            font-size: 13px;
+                            font-weight: 600;
+                            TouchArea { clicked => { root.reply-all(); } }
                         }
                         Text {
                             text: "Forward";
@@ -1117,7 +1125,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let view = html_view.clone();
         let thread = compose_thread.clone();
-        let open_compose = move |is_reply: bool| {
+        // kind: 0 = reply, 1 = reply-all, 2 = forward
+        let open_compose = move |kind: u8| {
             let Some(ui) = weak.upgrade() else { return };
             let id: i64 = ui.get_selected_message().into();
             if id == 0 {
@@ -1141,18 +1150,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 date: date.as_deref(),
                 message_id: header.message_id.as_deref(),
                 in_reply_to: header.in_reply_to.as_deref(),
+                to: header.to_addrs.as_deref().unwrap_or(""),
+                cc: header.cc_addrs.as_deref().unwrap_or(""),
                 body_text: &body,
             };
-            // from_* are set by run_send from the account; we only use to/subject/body + threading
-            let draft = if is_reply {
-                geleit_engine::message::reply(&orig, None, String::new())
-            } else {
-                geleit_engine::message::forward(&orig, None, String::new())
+            // from_* are set by run_send from the account; we only use to/cc/subject/body + threading
+            let my_addrs = [ui.get_account().to_string()];
+            let draft = match kind {
+                0 => geleit_engine::message::reply(&orig, None, String::new()),
+                1 => geleit_engine::message::reply_all(&orig, &my_addrs, None, String::new()),
+                _ => geleit_engine::message::forward(&orig, None, String::new()),
             };
             hide_html(&view);
             *thread.borrow_mut() = (draft.in_reply_to.clone(), draft.references.clone());
             ui.set_c_to(draft.to.join(", ").into());
-            ui.set_c_cc(SharedString::new());
+            ui.set_c_cc(draft.cc.join(", ").into());
             ui.set_c_subject(draft.subject.into());
             let body = format!(
                 "{}{}",
@@ -1164,8 +1176,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_composing(true);
         };
         let reply = open_compose.clone();
-        ui.on_reply(move || reply(true));
-        ui.on_forward(move || open_compose(false));
+        let reply_all = open_compose.clone();
+        ui.on_reply(move || reply(0));
+        ui.on_reply_all(move || reply_all(1));
+        ui.on_forward(move || open_compose(2));
     }
     {
         let weak = ui.as_weak();

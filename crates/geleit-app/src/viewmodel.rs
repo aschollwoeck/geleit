@@ -107,6 +107,8 @@ mod tests {
             subject: None,
             from_name: None,
             from_addr: None,
+            to_addrs: None,
+            cc_addrs: None,
             date: None,
             seen: false,
             has_attachments: false,

@@ -103,6 +103,22 @@ pub async fn list_folders(
     Ok(folders)
 }
 
+/// Join a list of envelope addresses into comma-separated bare addr-specs (for reply-all storage).
+fn join_addrs(list: Option<&Vec<async_imap::imap_proto::types::Address>>) -> Option<String> {
+    let addrs: Vec<String> = list?
+        .iter()
+        .filter_map(|a| {
+            crate::envelope::address_parts(
+                a.name.as_deref(),
+                a.mailbox.as_deref(),
+                a.host.as_deref(),
+            )
+            .1
+        })
+        .collect();
+    (!addrs.is_empty()).then(|| addrs.join(", "))
+}
+
 /// Map an IMAP FETCH result to a storable envelope. Network-side (the pure decode/format bits live
 /// in [`crate::envelope`]). `has_attachments`/`snippet` need the body (S1.6), so are left empty.
 fn fetch_to_new_message(f: &async_imap::types::Fetch) -> NewMessage {
@@ -125,6 +141,8 @@ fn fetch_to_new_message(f: &async_imap::types::Fetch) -> NewMessage {
         subject: env.and_then(|e| crate::envelope::decode_header(e.subject.as_deref())),
         from_name,
         from_addr,
+        to_addrs: env.and_then(|e| join_addrs(e.to.as_ref())),
+        cc_addrs: env.and_then(|e| join_addrs(e.cc.as_ref())),
         date: f.internal_date().map(|d| d.timestamp()),
         seen: f
             .flags()
