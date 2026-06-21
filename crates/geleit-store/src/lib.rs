@@ -102,6 +102,10 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE account ADD COLUMN smtp_port INTEGER;
     ALTER TABLE account ADD COLUMN smtp_security TEXT;
     ",
+    // 7 — per-account signature (SEND-7/ACC-7), auto-appended to composed messages. NULL = none.
+    "
+    ALTER TABLE account ADD COLUMN signature TEXT;
+    ",
 ];
 
 /// An account row.
@@ -396,6 +400,29 @@ impl Store {
                             .unwrap_or(SmtpSecurityKind::Implicit),
                     }))
                 },
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Set an account's signature (SEND-7). An empty string clears it (stored as NULL).
+    pub fn update_signature(&self, account_id: i64, signature: &str) -> Result<(), StoreError> {
+        let value: Option<&str> = (!signature.is_empty()).then_some(signature);
+        self.conn.execute(
+            "UPDATE account SET signature = ?2 WHERE id = ?1",
+            (account_id, value),
+        )?;
+        Ok(())
+    }
+
+    /// An account's signature, or `None` if unset.
+    pub fn signature(&self, account_id: i64) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT signature FROM account WHERE id = ?1",
+                [account_id],
+                |r| r.get(0),
             )
             .optional()?
             .flatten())
@@ -942,6 +969,21 @@ mod tests {
             .collect();
         assert_eq!(subs, ["new", "mid", "old"]); // date DESC
         assert_eq!(s.messages_in_folder(sent, 50).unwrap().len(), 1); // folder-scoped
+    }
+
+    #[test]
+    fn signature_roundtrip_and_clear() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        assert_eq!(s.signature(acc).unwrap(), None);
+        s.update_signature(acc, "— Alice\nSent from GeleitMail")
+            .unwrap();
+        assert_eq!(
+            s.signature(acc).unwrap().as_deref(),
+            Some("— Alice\nSent from GeleitMail")
+        );
+        s.update_signature(acc, "").unwrap(); // empty clears it
+        assert_eq!(s.signature(acc).unwrap(), None);
     }
 
     #[test]

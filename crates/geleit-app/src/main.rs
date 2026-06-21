@@ -167,6 +167,7 @@ slint::slint! {
         in-out property <string> f-smtp-host;
         in-out property <string> f-smtp-port;
         in-out property <bool> f-smtp-starttls;
+        in-out property <string> f-signature;
         in property <bool> setup-busy;
         in property <string> setup-error;
         private property <bool> confirm-remove;
@@ -668,6 +669,14 @@ slint::slint! {
                                     vertical-alignment: center;
                                 }
                             }
+                            Text { text: "Signature (optional)"; color: Palette.muted; font-size: 12px; }
+                            Rectangle {
+                                height: 72px;
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: Palette.divider;
+                                TextEdit { text <=> root.f-signature; wrap: word-wrap; }
+                            }
                             if root.setup-error != "": Text {
                                 text: root.setup-error;
                                 color: Palette.danger-strong;
@@ -781,6 +790,16 @@ slint::slint! {
             }
         }
     }
+}
+
+/// The first account's signature (empty if none) — appended to composed messages.
+fn account_signature(store: &Store) -> String {
+    store
+        .list_accounts()
+        .ok()
+        .and_then(|a| a.into_iter().next())
+        .and_then(|acc| store.signature(acc.id).ok().flatten())
+        .unwrap_or_default()
 }
 
 fn load_messages(store: &Store, folder_id: i64) -> Vec<MessageItem> {
@@ -1076,6 +1095,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let view = html_view.clone();
         let thread = compose_thread.clone();
+        let store = store.clone();
         ui.on_compose(move || {
             let Some(ui) = weak.upgrade() else { return };
             hide_html(&view);
@@ -1083,7 +1103,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_c_to(SharedString::new());
             ui.set_c_cc(SharedString::new());
             ui.set_c_subject(SharedString::new());
-            ui.set_c_body(SharedString::new());
+            ui.set_c_body(
+                geleit_engine::message::signature_block(&account_signature(&store)).into(),
+            );
             ui.set_compose_status(SharedString::new());
             ui.set_composing(true);
         });
@@ -1132,7 +1154,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_c_to(draft.to.join(", ").into());
             ui.set_c_cc(SharedString::new());
             ui.set_c_subject(draft.subject.into());
-            ui.set_c_body(draft.body_text.into());
+            let body = format!(
+                "{}{}",
+                draft.body_text,
+                geleit_engine::message::signature_block(&account_signature(&store))
+            );
+            ui.set_c_body(body.into());
             ui.set_compose_status(SharedString::new());
             ui.set_composing(true);
         };
@@ -1244,6 +1271,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         smtp.security == geleit_store::SmtpSecurityKind::StartTls,
                     );
                 }
+                if let Some(sig) = store.signature(account.id).ok().flatten() {
+                    ui.set_f_signature(sig.into());
+                }
                 ui.set_f_pass(SharedString::new());
                 ui.set_setup_error("Enter your password to reconnect.".into());
                 ui.set_needs_setup(true);
@@ -1354,6 +1384,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.set_setup_error("Enter your password.".into());
                 return;
             }
+            let signature = ui.get_f_signature().to_string();
             let display = ui.get_f_name().to_string();
             let display = (!display.trim().is_empty()).then_some(display);
             ui.set_setup_busy(true);
@@ -1371,6 +1402,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         display.as_deref(),
                         settings,
                         smtp,
+                        &signature,
                         &password,
                     )
                 }))
