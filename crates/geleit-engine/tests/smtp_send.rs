@@ -102,6 +102,51 @@ async fn delivers_message_with_envelope_and_auth() {
 }
 
 #[tokio::test]
+async fn builds_and_sends_a_drafted_message_end_to_end() {
+    use geleit_engine::message::{self, Draft};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let cap = Arc::new(Mutex::new(Captured::default()));
+    let server = tokio::spawn(run_sink(listener, cap.clone()));
+
+    let draft = Draft {
+        from_name: Some("Alice".into()),
+        from_addr: "alice@test.local".into(),
+        to: vec!["bob@test.local".into()],
+        cc: vec!["carol@test.local".into()],
+        subject: "Lunch?".into(),
+        body_text: "Are you free at noon?".into(),
+    };
+    let bytes = message::build(&draft).unwrap();
+    let env = smtp::envelope(&draft.from_addr, &message::recipients(&draft)).unwrap();
+    let settings = SmtpSettings {
+        host: "127.0.0.1".into(),
+        port,
+        username: "alice".into(),
+        security: SmtpSecurity::Plaintext,
+        allow_invalid_certs: false,
+    };
+    smtp::send(&settings, "pw", &env, &bytes).await.unwrap();
+
+    server.await.unwrap();
+    let c = cap.lock().unwrap();
+    // both To and Cc become envelope recipients
+    assert!(
+        c.rcpt_to.iter().any(|r| r.contains("bob@test.local")),
+        "{:?}",
+        c.rcpt_to
+    );
+    assert!(
+        c.rcpt_to.iter().any(|r| r.contains("carol@test.local")),
+        "{:?}",
+        c.rcpt_to
+    );
+    assert!(c.data.contains("Subject: Lunch?"), "DATA: {}", c.data);
+    assert!(c.data.contains("Are you free at noon?"), "DATA: {}", c.data);
+}
+
+#[tokio::test]
 async fn unreachable_server_yields_a_calm_error() {
     let settings = SmtpSettings {
         host: "127.0.0.1".into(),
