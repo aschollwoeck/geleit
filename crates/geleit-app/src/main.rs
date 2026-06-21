@@ -203,6 +203,7 @@ slint::slint! {
         in property <[string]> c-attachments; // "name · size" per attached file (SEND-4)
         in-out property <string> c-attach-path;
         in property <[string]> c-suggestions; // address autocomplete for To (SEND-9)
+        in-out property <bool> c-markdown; // send a Markdown-rendered HTML alternative (SEND-6)
         // drafts (SEND-5)
         in property <[DraftItem]> drafts;
         in property <bool> viewing-drafts;
@@ -903,6 +904,32 @@ slint::slint! {
                             TouchArea { clicked => { root.remove-attachment(i); } }
                         }
                     }
+                    // Markdown formatting toggle (SEND-6)
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle {
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: Palette.divider;
+                            background: root.c-markdown ? Palette.accent : Palette.surface;
+                            Text {
+                                text: root.c-markdown ? "✓" : "";
+                                color: white;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            TouchArea { clicked => { root.c-markdown = !root.c-markdown; } }
+                        }
+                        Text {
+                            text: "Format with Markdown (bold, lists, links)";
+                            color: Palette.muted;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
                     if root.compose-status != "": Text {
                         text: root.compose-status;
                         color: Palette.danger-strong;
@@ -1422,6 +1449,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             refresh_attachments(&amodel, &atts.borrow());
             smodel.set_vec(Vec::<SharedString>::new());
             ui.set_c_attach_path(SharedString::new());
+            ui.set_c_markdown(false);
             ui.set_c_to(SharedString::new());
             ui.set_c_cc(SharedString::new());
             ui.set_c_subject(SharedString::new());
@@ -1538,6 +1566,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             let (in_reply_to, references) = thread.borrow().clone();
             let attachments = atts.borrow().clone();
+            let markdown = ui.get_c_markdown();
             let draft = *draft_id.borrow();
             ui.set_compose_status(SharedString::new());
             ui.set_sending(true);
@@ -1557,6 +1586,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         in_reply_to,
                         references,
                         attachments,
+                        markdown,
                         draft,
                     )
                 }))

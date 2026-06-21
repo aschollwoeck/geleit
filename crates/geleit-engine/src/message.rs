@@ -21,6 +21,9 @@ pub struct Draft {
     pub references: Vec<String>,
     /// Files attached to the message (SEND-4).
     pub attachments: Vec<Attachment>,
+    /// Optional HTML alternative (SEND-6). When set, the message is `multipart/alternative`:
+    /// `body_text` is the text/plain part and this is the text/html part.
+    pub html_body: Option<String>,
 }
 
 /// A file attached to an outgoing message.
@@ -59,6 +62,7 @@ pub fn reply(orig: &Original, from_name: Option<String>, from_addr: String) -> D
         in_reply_to: orig.message_id.map(str::to_owned),
         references: references_chain(orig),
         attachments: Vec::new(),
+        html_body: None,
     }
 }
 
@@ -123,6 +127,7 @@ pub fn forward(orig: &Original, from_name: Option<String>, from_addr: String) ->
         in_reply_to: None,
         references: Vec::new(),
         attachments: Vec::new(),
+        html_body: None,
     }
 }
 
@@ -212,6 +217,9 @@ pub fn build(draft: &Draft) -> Result<Vec<u8>, String> {
     builder = builder
         .subject(draft.subject.as_str())
         .text_body(draft.body_text.as_str());
+    if let Some(html) = draft.html_body.as_deref() {
+        builder = builder.html_body(html); // → multipart/alternative with the text part above
+    }
     if let Some(irt) = draft.in_reply_to.as_deref().filter(|s| !s.is_empty()) {
         builder = builder.in_reply_to(irt);
     }
@@ -226,6 +234,18 @@ pub fn build(draft: &Draft) -> Result<Vec<u8>, String> {
     builder
         .write_to_vec()
         .map_err(|_| "Couldn't build the message.".to_owned())
+}
+
+/// Render Markdown to an HTML fragment for the text/html alternative (SEND-6) — gives bold, lists,
+/// links, etc. from readable plain-text markup. Strikethrough + tables enabled.
+pub fn render_markdown(md: &str) -> String {
+    let mut opts = pulldown_cmark::Options::empty();
+    opts.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
+    opts.insert(pulldown_cmark::Options::ENABLE_TABLES);
+    let parser = pulldown_cmark::Parser::new_ext(md, opts);
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, parser);
+    html
 }
 
 /// Guess a MIME content-type from a filename's extension, falling back to a generic binary type.
@@ -320,6 +340,36 @@ mod tests {
         let att = msg.attachments().next().expect("an attachment");
         assert_eq!(att.attachment_name(), Some("notes.txt"));
         assert_eq!(att.contents(), b"hello file");
+    }
+
+    #[test]
+    fn render_markdown_basic_formatting() {
+        let html = render_markdown("**bold** and a [link](http://x.test)\n\n- one\n- two");
+        assert!(html.contains("<strong>bold</strong>"), "{html}");
+        assert!(
+            html.contains("<a href=\"http://x.test\">link</a>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<li>one</li>") && html.contains("<li>two</li>"),
+            "{html}"
+        );
+        // the enabled extensions: strikethrough + tables
+        assert!(render_markdown("~~gone~~").contains("<del>gone</del>"));
+        assert!(render_markdown("| a | b |\n|---|---|\n| 1 | 2 |").contains("<table>"));
+    }
+
+    #[test]
+    fn html_body_makes_a_multipart_alternative() {
+        let mut d = sample();
+        d.body_text = "**hi**".into();
+        d.html_body = Some(render_markdown("**hi**"));
+        let bytes = build(&d).unwrap();
+        let msg = mail_parser::MessageParser::default().parse(&bytes).unwrap();
+        assert_eq!(msg.text_body.len(), 1, "a text/plain part");
+        assert_eq!(msg.html_body.len(), 1, "a text/html part");
+        let html = msg.body_html(0).unwrap();
+        assert!(html.contains("<strong>hi</strong>"), "{html}");
     }
 
     #[test]
