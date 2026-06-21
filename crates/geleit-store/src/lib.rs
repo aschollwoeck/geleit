@@ -621,6 +621,18 @@ impl Store {
         )?)
     }
 
+    /// Remove this account's folders whose name is **not** in `keep` (their messages cascade). Used
+    /// to reconcile the local folder list with the server after folder create/rename/delete (ORG-6).
+    pub fn prune_folders(&self, account_id: i64, keep: &[String]) -> Result<(), StoreError> {
+        for f in self.folders_for_account(account_id)? {
+            if !keep.iter().any(|k| k == &f.name) {
+                self.conn
+                    .execute("DELETE FROM folder WHERE id = ?1", [f.id])?;
+            }
+        }
+        Ok(())
+    }
+
     /// Folders for an account, ordered by name.
     pub fn folders_for_account(&self, account_id: i64) -> Result<Vec<Folder>, StoreError> {
         let mut stmt = self.conn.prepare(
@@ -1211,6 +1223,24 @@ mod tests {
         );
         s.update_signature(acc, "").unwrap(); // empty clears it
         assert_eq!(s.signature(acc).unwrap(), None);
+    }
+
+    #[test]
+    fn prune_folders_removes_absent_keeps_listed() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        for n in ["INBOX", "Sent", "Old"] {
+            s.upsert_folder(acc, n).unwrap();
+        }
+        s.prune_folders(acc, &["INBOX".to_owned(), "Sent".to_owned()])
+            .unwrap();
+        let names: Vec<_> = s
+            .folders_for_account(acc)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert_eq!(names, ["INBOX", "Sent"]); // "Old" pruned
     }
 
     #[test]

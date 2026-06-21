@@ -578,6 +578,48 @@ pub fn persist_folders(
     for name in folders {
         store.upsert_folder(account_id, name)?;
     }
+    // Reconcile: drop local folders the server no longer lists (rename/delete, ORG-6).
+    store.prune_folders(account_id, folders)?;
+    Ok(())
+}
+
+/// Create a server folder (ORG-6).
+pub async fn create_folder(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    name: &str,
+) -> Result<(), ImapError> {
+    let mut session = connect(config, secrets).await?;
+    let result = session.create(name).await;
+    let _ = session.logout().await; // best-effort
+    result?;
+    Ok(())
+}
+
+/// Rename a server folder (ORG-6).
+pub async fn rename_folder(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    from: &str,
+    to: &str,
+) -> Result<(), ImapError> {
+    let mut session = connect(config, secrets).await?;
+    let result = session.rename(from, to).await;
+    let _ = session.logout().await; // best-effort
+    result?;
+    Ok(())
+}
+
+/// Delete a server folder (ORG-6).
+pub async fn delete_folder(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    name: &str,
+) -> Result<(), ImapError> {
+    let mut session = connect(config, secrets).await?;
+    let result = session.delete(name).await;
+    let _ = session.logout().await; // best-effort
+    result?;
     Ok(())
 }
 
