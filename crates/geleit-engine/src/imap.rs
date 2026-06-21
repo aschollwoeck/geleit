@@ -236,6 +236,23 @@ pub async fn set_flag(
     result
 }
 
+/// Move a message by UID from `source` to `target` (ORG-1/2/3 write-back; archive/trash/move all
+/// reduce to a move). Uses the IMAP `MOVE` extension (`UID MOVE`); the target mailbox must exist.
+pub async fn move_message(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    source: &str,
+    uid: u32,
+    target: &str,
+) -> Result<(), ImapError> {
+    let mut session = connect(config, secrets).await?;
+    session.select(source).await?;
+    let result = session.uid_mv(uid.to_string(), target).await;
+    let _ = session.logout().await; // best-effort
+    result?;
+    Ok(())
+}
+
 /// Consume an IMAP response stream (e.g. STORE's FETCH replies) to completion, surfacing the first
 /// error. We don't need the per-message data, only that the command succeeded.
 async fn drain<S, T>(stream: Result<S, async_imap::error::Error>) -> Result<(), ImapError>
