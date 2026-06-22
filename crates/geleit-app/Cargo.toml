@@ -1,15 +1,15 @@
 [package]
 name = "geleit-app"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
 
 [dependencies]
-geleit-store = { version = "0.0.0", path = "../geleit-store" }
-geleit-engine = { version = "0.0.0", path = "../geleit-engine" }
-geleit-platform = { version = "0.0.0", path = "../geleit-platform" }
+geleit-store = { path = "../geleit-store" }
+geleit-engine = { path = "../geleit-engine" }
+geleit-platform = { path = "../geleit-platform" }
 # unstable-winit-030 exposes the winit window so a sandboxed wry webview can embed as a child
 # (S3.1, ADR-0001). renderer-software lets us render Slint WITHOUT a GL context, so it can't collide
 # with the embedded webview's GL (the collision caused GLXBadWindow crashes); selected at runtime.

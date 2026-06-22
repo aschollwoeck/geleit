@@ -761,6 +761,20 @@ slint::slint! {
                             }
                         }
                     }
+                    // calm empty state (APP-2 polish): nothing in this folder / no search results
+                    if root.messages.length == 0: Rectangle {
+                        vertical-stretch: 1;
+                        background: Palette.surface;
+                        Text {
+                            text: root.searching
+                                ? "No messages match your search."
+                                : (root.refreshing ? "Loading…" : "No messages here yet.");
+                            color: Palette.muted;
+                            font-size: 14px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
                     ListView {
                         for m in root.messages: Rectangle {
                             height: 72px;

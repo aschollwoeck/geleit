@@ -183,16 +183,23 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 > **OAuth/onboarding** ones, which are blocked on registering app credentials with Google/Microsoft and
 > a real account to test against — a maintainer step, not a code one.
 
-## M8 — Release
-**Delivers:** READ-9, APP-2, APP-3, APP-4, APP-5, APP-6, PRIV-5†.
-**Outcome:** the first releasable GeleitMail.
+## M8 — Release ✅ (Linux; v0.1.0 ready to tag)
+**Delivers:** READ-9, APP-2, APP-3, APP-4, APP-6, PRIV-5; APP-5 (Linux).
+**Outcome:** the first releasable GeleitMail (Linux).
 
-- **S8.1** Keyboard navigation + shortcuts (READ-9, APP-6).
-- **S8.2** Light/dark theme (APP-3); settings / preferences (APP-4).
-- **S8.3** Calm/fast final pass (APP-2): RAM, startup, large-mailbox performance.
-- **S8.4** Cross-platform builds + installers — Windows, macOS, Linux (APP-5).
-- **S8.5** Security review of crypto / OAuth / HTML paths; confirm no telemetry (PRIV-5).
-- **S8.6** First-run polish, error/edge states; beta with real accounts; tag the first release.
+- **S8.1** ✅ Keyboard navigation + shortcuts — j/k(/arrows), c, r, Esc (READ-9, APP-6).
+- **S8.2** ✅ Light/dark theme + settings, persisted (APP-3, APP-4).
+- **S8.3** ✅ Calm/fast pass (APP-2): fat-LTO release (~32→26 MB) + documented perf posture.
+- **S8.4** 🟡 **Linux** packaging + tag-triggered release workflow (APP-5). **macOS/Windows blocked** on
+  webview (wry/webkit2gtk + X11) + keychain porting — scaffolded, see `packaging/README.md`.
+- **S8.5** ✅ Security/privacy review (`docs/security-review.md`) + **enforced no-telemetry** ban (PRIV-5).
+- **S8.6** ✅ First-run polish (empty states), version 0.1.0, `CHANGELOG.md`. **Tagging `v0.1.0` is the
+  maintainer's call** (pushing the tag triggers the public release build); a real-account beta is the
+  maintainer's to run.
+
+> First release is **Linux-only** and **manual IMAP/SMTP** (OAuth is M7 S7.1–S7.3, blocked on
+> Google/Microsoft credentials). Remaining cross-platform + OAuth work is tracked above and in
+> "Beyond the first release".
 
 ---
 
