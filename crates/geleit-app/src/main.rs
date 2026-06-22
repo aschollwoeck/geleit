@@ -227,6 +227,7 @@ slint::slint! {
         in property <[string]> c-attachments; // "name · size" per attached file (SEND-4)
         in-out property <string> c-attach-path;
         in property <[string]> c-suggestions; // address autocomplete for To (SEND-9)
+        in property <[string]> c-cc-suggestions; // …and for Cc
         in-out property <bool> c-markdown; // send a Markdown-rendered HTML alternative (SEND-6)
         // drafts (SEND-5)
         in property <[DraftItem]> drafts;
@@ -292,6 +293,8 @@ slint::slint! {
         callback remove-attachment(int);
         callback to-edited();
         callback pick-suggestion(string);
+        callback cc-edited();
+        callback pick-cc-suggestion(string);
         callback browse-file();
 
         preferred-width: 1100px;
@@ -1095,7 +1098,31 @@ slint::slint! {
                         }
                     }
                     Text { text: "Cc (optional)"; color: Palette.muted; font-size: 12px; }
-                    Field { placeholder: "name@example.com, …"; text <=> root.c-cc; }
+                    Field {
+                        placeholder: "name@example.com, …";
+                        text <=> root.c-cc;
+                        edited => { root.cc-edited(); }
+                    }
+                    if root.c-cc-suggestions.length > 0: Rectangle {
+                        background: Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.divider;
+                        border-radius: 8px;
+                        VerticalLayout {
+                            for sug in root.c-cc-suggestions: Rectangle {
+                                height: 28px;
+                                background: ct.has-hover ? Palette.accent-quiet : transparent;
+                                ct := TouchArea { clicked => { root.pick-cc-suggestion(sug); } }
+                                Text {
+                                    text: sug;
+                                    x: 9px;
+                                    color: Palette.text;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
                     Text { text: "Subject"; color: Palette.muted; font-size: 12px; }
                     Field { text <=> root.c-subject; }
                     Field {
@@ -1772,6 +1799,21 @@ fn spawn_folder_op(
     });
 }
 
+/// Address autocomplete rows for `token` in `account_id` (SEND-9): suggestions from mail history,
+/// minus an exact match of what's already typed. Empty token → no rows.
+fn address_suggestions(store: &Store, account_id: i64, token: &str) -> Vec<SharedString> {
+    if token.is_empty() {
+        return Vec::new();
+    }
+    store
+        .suggest_addresses(account_id, token, 6)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.eq_ignore_ascii_case(token))
+        .map(Into::into)
+        .collect()
+}
+
 /// The folder names currently in the rail, as owned strings.
 fn folder_names(folders: &VecModel<SharedString>) -> Vec<String> {
     (0..folders.row_count())
@@ -1948,6 +1990,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_c_attachments(ModelRc::from(attach_model.clone()));
     let suggest_model = Rc::new(VecModel::<SharedString>::default());
     ui.set_c_suggestions(ModelRc::from(suggest_model.clone()));
+    let cc_suggest_model = Rc::new(VecModel::<SharedString>::default());
+    ui.set_c_cc_suggestions(ModelRc::from(cc_suggest_model.clone()));
     // "Move to…" picker: the message awaiting a destination + the candidate folders
     let pending_move_id = Rc::new(RefCell::new(Option::<i32>::None));
     let move_folders_model = Rc::new(VecModel::<SharedString>::default());
@@ -2670,6 +2714,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let atts = compose_attachments.clone();
         let amodel = attach_model.clone();
         let smodel = suggest_model.clone();
+        let csmodel = cc_suggest_model.clone();
         ui.on_compose(move || {
             let Some(ui) = weak.upgrade() else { return };
             hide_html(&view);
@@ -2678,6 +2723,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             atts.borrow_mut().clear();
             refresh_attachments(&amodel, &atts.borrow());
             smodel.set_vec(Vec::<SharedString>::new());
+            csmodel.set_vec(Vec::<SharedString>::new());
             ui.set_c_attach_path(SharedString::new());
             ui.set_c_markdown(false);
             ui.set_c_to(SharedString::new());
@@ -2701,6 +2747,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let atts = compose_attachments.clone();
         let amodel = attach_model.clone();
         let smodel = suggest_model.clone();
+        let csmodel = cc_suggest_model.clone();
         // kind: 0 = reply, 1 = reply-all, 2 = forward
         let open_compose = move |kind: u8| {
             let Some(ui) = weak.upgrade() else { return };
@@ -2742,6 +2789,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             atts.borrow_mut().clear();
             refresh_attachments(&amodel, &atts.borrow());
             smodel.set_vec(Vec::<SharedString>::new());
+            csmodel.set_vec(Vec::<SharedString>::new());
             ui.set_c_attach_path(SharedString::new());
             *thread.borrow_mut() = (draft.in_reply_to.clone(), draft.references.clone());
             ui.set_c_to(draft.to.join(", ").into());
@@ -2902,6 +2950,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let atts = compose_attachments.clone();
         let amodel = attach_model.clone();
         let smodel = suggest_model.clone();
+        let csmodel = cc_suggest_model.clone();
         ui.on_resume_draft(move |id| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(d) = store.draft_by_id(id.into()).ok().flatten() else {
@@ -2913,6 +2962,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             atts.borrow_mut().clear(); // drafts don't persist attachments yet (follow-up)
             refresh_attachments(&amodel, &atts.borrow());
             smodel.set_vec(Vec::<SharedString>::new());
+            csmodel.set_vec(Vec::<SharedString>::new());
             ui.set_c_attach_path(SharedString::new());
             ui.set_c_to(d.content.to.into());
             ui.set_c_cc(d.content.cc.into());
@@ -3000,23 +3050,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(ui) = weak.upgrade() else { return };
             let to = ui.get_c_to().to_string();
             let token = viewmodel::last_token(&to);
-            let acc = store
-                .list_accounts()
-                .ok()
-                .and_then(|a| a.into_iter().next());
-            let suggestions = match acc {
-                Some(acc) if !token.is_empty() => store
-                    .suggest_addresses(acc.id, token, 6)
-                    .unwrap_or_default(),
-                _ => Vec::new(),
-            };
-            // don't suggest when the only match is exactly what's typed
-            let rows: Vec<SharedString> = suggestions
-                .into_iter()
-                .filter(|s| !s.eq_ignore_ascii_case(token))
-                .map(Into::into)
-                .collect();
-            model.set_vec(rows);
+            model.set_vec(address_suggestions(
+                &store,
+                ui.get_current_account() as i64,
+                token,
+            ));
         });
     }
     {
@@ -3026,6 +3064,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(ui) = weak.upgrade() else { return };
             let completed = viewmodel::complete_last_token(&ui.get_c_to(), &addr);
             ui.set_c_to(completed.into());
+            model.set_vec(Vec::new());
+        });
+    }
+
+    // …and the same for Cc.
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let model = cc_suggest_model.clone();
+        ui.on_cc_edited(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let cc = ui.get_c_cc().to_string();
+            let token = viewmodel::last_token(&cc);
+            model.set_vec(address_suggestions(
+                &store,
+                ui.get_current_account() as i64,
+                token,
+            ));
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let model = cc_suggest_model.clone();
+        ui.on_pick_cc_suggestion(move |addr| {
+            let Some(ui) = weak.upgrade() else { return };
+            let completed = viewmodel::complete_last_token(&ui.get_c_cc(), &addr);
+            ui.set_c_cc(completed.into());
             model.set_vec(Vec::new());
         });
     }
