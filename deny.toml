@@ -57,6 +57,19 @@ multiple-versions = "warn"
 wildcards = "deny"
 # Our internal crates are path deps (no version req); don't flag them as wildcards.
 allow-wildcard-paths = true
+# No-telemetry guard (PRIV-5, S8.5). The app's only network egress is IMAP/SMTP to the user's own
+# server (a raw TCP+TLS socket) and — opt-in — remote images in the sandboxed webview. Ban general
+# HTTP clients and any telemetry/analytics SDK so none can be pulled in (silently shipping egress)
+# without a deliberate, reviewed change here. If a future feature genuinely needs one, justify it.
+deny = [
+    { name = "reqwest" },
+    { name = "hyper" },
+    { name = "ureq" },
+    { name = "isahc" },
+    { name = "surf" },
+    { name = "sentry" },
+    { name = "opentelemetry" },
+]
 
 [sources]
 unknown-registry = "deny"
