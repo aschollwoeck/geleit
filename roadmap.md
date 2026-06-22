@@ -170,12 +170,18 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 **Delivers:** ACC-1, ACC-2, ACC-5, ACC-6, ACC-8, MULTI-1, MULTI-2, APP-1.
 **Outcome:** the effortless-setup hook is real — add Gmail/Outlook in a click, switch accounts.
 
-- **S7.1** Gmail OAuth (loopback redirect; tokens in keychain) (ACC-1).
-- **S7.2** Microsoft OAuth (gated on S0.6 approval) (ACC-2).
-- **S7.3** Token refresh + re-authentication without data loss (ACC-8).
-- **S7.4** Multiple accounts in store; sync scheduler handles N accounts (ACC-5); edit/remove (ACC-6).
-- **S7.5** Per-account switcher UI (MULTI-1); correct from-address on reply (MULTI-2).
-- **S7.6** One-click add-account onboarding flow (APP-1).
+- **S7.1** Gmail OAuth (loopback redirect; tokens in keychain) (ACC-1). ⏳ needs real Google creds.
+- **S7.2** Microsoft OAuth (gated on S0.6 approval) (ACC-2). ⏳ needs real Microsoft creds.
+- **S7.3** Token refresh + re-authentication without data loss (ACC-8). ⏳ follows S7.1/S7.2.
+- **S7.4/S7.5** ✅ Multiple accounts (ACC-5) + edit/remove (ACC-6) + per-account switcher (MULTI-1) +
+  correct from-address on send (MULTI-2). Every per-account worker takes an explicit `account_id`;
+  `current-account` prop is the source of truth; rail switcher + "+ Add account" + per-account
+  remove. *(Sync is on-demand per visible account; a background N-account scheduler is a follow-up.)*
+- **S7.6** One-click add-account onboarding flow (APP-1). ⏳ depends on OAuth (S7.1/S7.2).
+
+> **Multi-account works without OAuth** (manual IMAP/SMTP per account). The remaining M7 slices are the
+> **OAuth/onboarding** ones, which are blocked on registering app credentials with Google/Microsoft and
+> a real account to test against — a maintainer step, not a code one.
 
 ## M8 — Release
 **Delivers:** READ-9, APP-2, APP-3, APP-4, APP-5, APP-6, PRIV-5†.
