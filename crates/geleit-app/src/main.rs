@@ -2937,14 +2937,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let thread = compose_thread.clone();
         let draft_id = current_draft_id.clone();
         let view = html_view.clone();
+        let atts = compose_attachments.clone();
         ui.on_save_draft(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(acc) = store
-                .list_accounts()
-                .ok()
-                .and_then(|a| a.into_iter().next())
-            else {
-                return;
+            // Save under the account in view, falling back to the first if somehow unset.
+            let acc_id = ui.get_current_account() as i64;
+            let acc_id = if store.account_by_id(acc_id).ok().flatten().is_some() {
+                acc_id
+            } else {
+                match store
+                    .list_accounts()
+                    .ok()
+                    .and_then(|a| a.into_iter().next())
+                {
+                    Some(a) => a.id,
+                    None => return,
+                }
             };
             let (irt, refs) = thread.borrow().clone();
             let content = geleit_store::DraftContent {
@@ -2956,8 +2964,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 references: refs,
             };
             let existing = *draft_id.borrow();
-            match store.save_draft(acc.id, existing, &content) {
+            match store.save_draft(acc_id, existing, &content) {
                 Ok(id) => {
+                    // persist the composed attachments alongside the draft (SEND-4/5)
+                    let saved: Vec<geleit_store::DraftAttachment> = atts
+                        .borrow()
+                        .iter()
+                        .map(|a| geleit_store::DraftAttachment {
+                            filename: (!a.filename.is_empty()).then(|| a.filename.clone()),
+                            content_type: a.content_type.clone(),
+                            data: a.data.clone(),
+                        })
+                        .collect();
+                    let _ = store.replace_draft_attachments(id, &saved);
                     *draft_id.borrow_mut() = Some(id);
                     ui.set_composing(false);
                     hide_html(&view);
@@ -2985,7 +3004,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hide_html(&view);
             *draft_id.borrow_mut() = Some(d.id);
             *thread.borrow_mut() = (d.content.in_reply_to.clone(), d.content.references.clone());
-            atts.borrow_mut().clear(); // drafts don't persist attachments yet (follow-up)
+            // restore the draft's saved attachments (SEND-4/5)
+            *atts.borrow_mut() = store
+                .draft_attachments(d.id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| geleit_engine::message::Attachment {
+                    filename: a.filename.unwrap_or_default(),
+                    content_type: a.content_type,
+                    data: a.data,
+                })
+                .collect();
             refresh_attachments(&amodel, &atts.borrow());
             smodel.set_vec(Vec::<SharedString>::new());
             csmodel.set_vec(Vec::<SharedString>::new());
