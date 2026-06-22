@@ -109,18 +109,20 @@ slint::slint! {
     import { ListView, ScrollView } from "std-widgets.slint";
 
     // Soft-daylight tokens from design.md.
-    global Palette {
-        out property <color> bg: #f5f7f8;
-        out property <color> surface: #ffffff;
-        out property <color> surface-reading: #fbfaf7;
-        out property <color> text: #1f2a2e;
-        out property <color> muted: #5e7177;
-        out property <color> accent: #2e9e9b;
-        out property <color> accent-strong: #1c7e7b;
-        out property <color> accent-quiet: #e2f1f0;
-        out property <color> danger-strong: #b3472e;
-        out property <color> danger-quiet: #fbe9e4;
-        out property <color> divider: #e3eaec;
+    // "Soft daylight" (light) + "Soft dusk" (dark). `dark` is set from the persisted setting (APP-3).
+    export global Palette {
+        in property <bool> dark;
+        out property <color> bg: dark ? #11191c : #f5f7f8;
+        out property <color> surface: dark ? #18242a : #ffffff;
+        out property <color> surface-reading: dark ? #16211f : #fbfaf7;
+        out property <color> text: dark ? #e6eef0 : #1f2a2e;
+        out property <color> muted: dark ? #93a8ad : #5e7177;
+        out property <color> accent: dark ? #36b3af : #2e9e9b;
+        out property <color> accent-strong: dark ? #5fc7c4 : #1c7e7b;
+        out property <color> accent-quiet: dark ? #1e3a39 : #e2f1f0;
+        out property <color> danger-strong: dark ? #e08f7a : #b3472e;
+        out property <color> danger-quiet: dark ? #3a221d : #fbe9e4;
+        out property <color> divider: dark ? #25343a : #e3eaec;
     }
 
     struct MessageItem {
@@ -284,6 +286,11 @@ slint::slint! {
         callback nav-next();
         callback nav-prev();
         callback nav-escape();
+        // settings (APP-3/4)
+        in property <bool> showing-settings;
+        callback open-settings();
+        callback close-settings();
+        callback toggle-theme();
         callback load-remote();
         callback compose();
         callback send-message();
@@ -319,7 +326,8 @@ slint::slint! {
             key-pressed(event) => {
                 // don't hijack keys while composing / in an overlay (let fields type freely)
                 if root.composing || root.viewing-drafts || root.picking-folder
-                    || root.managing-folders || root.needs-setup || root.adding-account {
+                    || root.managing-folders || root.needs-setup || root.adding-account
+                    || root.showing-settings {
                     if event.text == Key.Escape {
                         root.nav-escape();
                         return accept;
@@ -465,6 +473,21 @@ slint::slint! {
                             padding-left: 4px;
                             Text {
                                 text: "Manage folders…";
+                                color: Palette.muted;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // ---- SETTINGS (APP-3/4) ----
+                    TouchArea {
+                        height: 28px;
+                        clicked => { root.open-settings(); }
+                        HorizontalLayout {
+                            padding-left: 4px;
+                            Text {
+                                text: "Settings…";
                                 color: Palette.muted;
                                 font-size: 13px;
                                 vertical-alignment: center;
@@ -1534,6 +1557,71 @@ slint::slint! {
                 }
             }
         }
+
+        // ---- SETTINGS (APP-3/4) ----
+        if root.showing-settings: Rectangle {
+            background: #0d171b99;
+            TouchArea {}
+            Rectangle {
+                width: min(420px, parent.width - 80px);
+                height: min(260px, parent.height - 80px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Palette.surface;
+                border-radius: 12px;
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 14px;
+                    HorizontalLayout {
+                        Text {
+                            text: "Settings";
+                            color: Palette.text;
+                            font-size: 18px;
+                            font-weight: 700;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: "Close";
+                            color: Palette.accent-strong;
+                            font-size: 14px;
+                            font-weight: 600;
+                            TouchArea { clicked => { root.close-settings(); } }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: "Theme";
+                            color: Palette.text;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Rectangle {
+                            width: 130px;
+                            height: 36px;
+                            border-radius: 8px;
+                            background: Palette.accent-strong;
+                            Text {
+                                text: Palette.dark ? "🌙 Dark" : "☀ Light";
+                                color: white;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                            TouchArea { clicked => { root.toggle-theme(); } }
+                        }
+                    }
+                    Text {
+                        text: "No telemetry, no tracking — settings stay on this device.";
+                        color: Palette.muted;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+            }
+        }
     }
 }
 
@@ -2060,6 +2148,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_accounts(ModelRc::from(accounts_model.clone()));
     ui.set_folders(ModelRc::from(folders_model.clone()));
     ui.set_messages(ModelRc::from(messages.clone()));
+    // Apply the persisted theme (APP-3) before the first paint.
+    ui.global::<Palette>()
+        .set_dark(store.get_setting("theme").ok().flatten().as_deref() == Some("dark"));
 
     // Pump GTK (so the embedded webview renders) under Slint's loop, and keep the webview's bounds
     // on the reading-pane body while it's shown. Kept alive for the app's lifetime.
@@ -3490,6 +3581,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+    // Settings (APP-3/4): open/close + theme toggle (persisted).
+    {
+        let weak = ui.as_weak();
+        ui.on_open_settings(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_showing_settings(true);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_close_settings(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_showing_settings(false);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        ui.on_toggle_theme(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let dark = !ui.global::<Palette>().get_dark();
+            ui.global::<Palette>().set_dark(dark);
+            let _ = store.set_setting("theme", if dark { "dark" } else { "light" });
+        });
+    }
+
     {
         let weak = ui.as_weak();
         ui.on_nav_escape(move || {
@@ -3499,6 +3618,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_picking_folder(false);
             ui.set_managing_folders(false);
             ui.set_adding_account(false);
+            ui.set_showing_settings(false);
             if ui.get_searching() {
                 ui.invoke_clear_search();
             }

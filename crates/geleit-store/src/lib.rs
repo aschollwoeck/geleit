@@ -155,6 +155,14 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX draft_attachment_draft ON draft_attachment(draft_id);
     ",
+    // 12 — app-wide settings (APP-4): a simple key/value table (e.g. theme = light/dark). Not
+    // account-scoped — these are device/app preferences.
+    "
+    CREATE TABLE setting (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    ",
 ];
 
 /// A parsed search query (SEARCH-1/4): an FTS5 `MATCH` string (`None` when there are no full-text
@@ -718,6 +726,26 @@ impl Store {
             },
             updated_at: r.get(7)?,
         })
+    }
+
+    /// Read an app-wide setting (APP-4), or `None` if unset.
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM setting WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    /// Write an app-wide setting (APP-4), replacing any previous value.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO setting (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )?;
+        Ok(())
     }
 
     /// Delete an account and everything under it (folders/messages/bodies cascade).
@@ -1761,6 +1789,17 @@ mod tests {
             .is_empty());
         assert_eq!(s.reindex_all().unwrap(), 1);
         assert_eq!(s.search_messages(acc, "reindexable", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn settings_get_set_upsert() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.get_setting("theme").unwrap(), None);
+        s.set_setting("theme", "dark").unwrap();
+        assert_eq!(s.get_setting("theme").unwrap().as_deref(), Some("dark"));
+        s.set_setting("theme", "light").unwrap(); // upsert replaces
+        assert_eq!(s.get_setting("theme").unwrap().as_deref(), Some("light"));
+        assert_eq!(s.get_setting("absent").unwrap(), None);
     }
 
     #[test]
