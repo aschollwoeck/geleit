@@ -626,6 +626,24 @@ impl Store {
             .optional()?)
     }
 
+    /// Fetch an account by id, or `None` if absent.
+    pub fn account_by_id(&self, account_id: i64) -> Result<Option<Account>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, email, display_name FROM account WHERE id = ?1",
+                [account_id],
+                |r| {
+                    Ok(Account {
+                        id: r.get(0)?,
+                        email: r.get(1)?,
+                        display_name: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     /// All accounts, ordered by id.
     pub fn list_accounts(&self) -> Result<Vec<Account>, StoreError> {
         let mut stmt = self
@@ -1481,6 +1499,31 @@ mod tests {
             .is_empty());
         assert_eq!(s.reindex_all().unwrap(), 1);
         assert_eq!(s.search_messages(acc, "reindexable", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn account_by_id_and_isolation_across_accounts() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.add_account("a@example.com", Some("Ann")).unwrap();
+        let b = s.add_account("b@example.com", None).unwrap();
+        assert_eq!(s.account_by_id(a).unwrap().unwrap().email, "a@example.com");
+        assert_eq!(s.account_by_id(b).unwrap().unwrap().display_name, None);
+        assert!(s.account_by_id(9999).unwrap().is_none());
+        // folders/messages are per-account: indexing/listing one doesn't bleed into the other
+        let inbox_a = s.upsert_folder(a, "INBOX").unwrap();
+        s.upsert_message(
+            a,
+            inbox_a,
+            &NewMessage {
+                uid: Some(1),
+                subject: Some("hi from a".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(s.search_messages(a, "hi", 10).unwrap().len(), 1);
+        assert!(s.search_messages(b, "hi", 10).unwrap().is_empty());
+        assert!(s.folders_for_account(b).unwrap().is_empty());
     }
 
     #[test]
