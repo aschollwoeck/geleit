@@ -215,6 +215,30 @@ pub fn password(secrets: &dyn SecretStore, username: &str) -> Result<Option<Vec<
     Ok(secrets.get(SECRET_SERVICE, username)?)
 }
 
+/// Add or remove an IMAP system flag (e.g. `\Flagged`, `\Seen`) on a message by UID in `folder` —
+/// the shared `UID STORE +/-FLAGS` write-back. `flag` must be a valid flag token (we only pass
+/// constants).
+async fn store_flag(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    uid: u32,
+    add: bool,
+    flag: &str,
+) -> Result<(), ImapError> {
+    let mut session = connect(config, secrets).await?;
+    session.select(folder).await?;
+    let op = if add { "+FLAGS" } else { "-FLAGS" };
+    let result = drain(
+        session
+            .uid_store(uid.to_string(), format!("{op} ({flag})"))
+            .await,
+    )
+    .await;
+    let _ = session.logout().await; // best-effort
+    result
+}
+
 /// Set or clear the `\Flagged` (star) flag on a message by UID in `folder` (ORG-4 write-back).
 pub async fn set_flag(
     config: &ImapConfig,
@@ -223,17 +247,18 @@ pub async fn set_flag(
     uid: u32,
     flagged: bool,
 ) -> Result<(), ImapError> {
-    let mut session = connect(config, secrets).await?;
-    session.select(folder).await?;
-    let op = if flagged { "+FLAGS" } else { "-FLAGS" };
-    let result = drain(
-        session
-            .uid_store(uid.to_string(), format!("{op} (\\Flagged)"))
-            .await,
-    )
-    .await;
-    let _ = session.logout().await; // best-effort
-    result
+    store_flag(config, secrets, folder, uid, flagged, "\\Flagged").await
+}
+
+/// Set or clear the `\Seen` (read) flag on a message by UID in `folder` (SYNC-5 read write-back).
+pub async fn set_seen(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    uid: u32,
+    seen: bool,
+) -> Result<(), ImapError> {
+    store_flag(config, secrets, folder, uid, seen, "\\Seen").await
 }
 
 /// Move a message by UID from `source` to `target` (ORG-1/2/3 write-back; archive/trash/move all

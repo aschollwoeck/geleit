@@ -1923,6 +1923,24 @@ fn bulk_star(
     });
 }
 
+/// Fire-and-forget read-state (`\Seen`) write-back on a worker (SYNC-5). Best-effort, like the star
+/// write-back: read state stays correct locally even if the server push fails.
+fn spawn_set_seen(
+    db_path: &str,
+    secrets: &Arc<OsSecretStore>,
+    account_id: i64,
+    folder: String,
+    uid: u32,
+    seen: bool,
+) {
+    let (db_path, secrets) = (db_path.to_owned(), secrets.clone());
+    std::thread::spawn(move || {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            refresh::run_set_seen(&db_path, &*secrets, account_id, &folder, uid, seen)
+        }));
+    });
+}
+
 /// Remove one row by id (optimistic archive/trash/move — keeps scroll).
 fn remove_row(model: &VecModel<MessageItem>, id: i32) {
     for i in 0..model.row_count() {
@@ -2258,6 +2276,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let model = messages.clone();
         let view = html_view.clone();
         let current_allowed = current_allowed.clone();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
         ui.on_message_selected(move |item| {
             let Some(ui) = weak.upgrade() else { return };
             ui.set_selected_message(item.id);
@@ -2303,17 +2323,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if item.unread {
                 let _ = store.set_seen(item.id.into(), true);
                 flip_unread(&model, item.id, false); // in place — keeps scroll
+                                                     // write \Seen back to the server (SYNC-5), using the message's real folder
+                if let Ok(Some((folder, uid))) = store.message_location(item.id.into()) {
+                    spawn_set_seen(
+                        &db_path,
+                        &secrets,
+                        ui.get_current_account() as i64,
+                        folder,
+                        uid as u32,
+                        true,
+                    );
+                }
             }
         });
     }
 
-    // "Mark as unread" → flip read state locally and update the row in place
+    // "Mark as unread" → flip read state locally + in place, then write \Seen back (SYNC-5)
     {
+        let weak = ui.as_weak();
         let store = store.clone();
         let model = messages.clone();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
         ui.on_mark_unread(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
             let _ = store.set_seen(id.into(), false);
             flip_unread(&model, id, true);
+            if let Ok(Some((folder, uid))) = store.message_location(id.into()) {
+                spawn_set_seen(
+                    &db_path,
+                    &secrets,
+                    ui.get_current_account() as i64,
+                    folder,
+                    uid as u32,
+                    false,
+                );
+            }
         });
     }
 
@@ -2796,21 +2841,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         });
     }
-    // Bulk mark-as-read (ORG-7): local read state (server write-back of \Seen is a follow-up).
+    // Bulk mark-as-read (ORG-7): local read state + \Seen write-back (SYNC-5) in one worker.
     {
         let weak = ui.as_weak();
         let store = store.clone();
         let messages = messages.clone();
         let selected = selected_ids.clone();
+        let db_path = db.clone();
+        let secrets = secrets.clone();
         ui.on_bulk_mark_read(move || {
             let Some(ui) = weak.upgrade() else { return };
+            let mut locs: Vec<(String, u32)> = Vec::new();
             for id in selected.borrow().iter() {
                 let _ = store.set_seen((*id).into(), true);
                 flip_unread(&messages, *id, false);
                 flip_selected_row(&messages, *id, false);
+                if let Ok(Some((folder, uid))) = store.message_location((*id).into()) {
+                    locs.push((folder, uid as u32));
+                }
             }
             selected.borrow_mut().clear();
             ui.set_selected_count(0);
+            if !locs.is_empty() {
+                let account_id = ui.get_current_account() as i64;
+                let (db_path, secrets) = (db_path.clone(), secrets.clone());
+                std::thread::spawn(move || {
+                    for (folder, uid) in locs {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            refresh::run_set_seen(
+                                &db_path, &*secrets, account_id, &folder, uid, true,
+                            )
+                        }));
+                    }
+                });
+            }
         });
     }
 
