@@ -1851,7 +1851,7 @@ dependencies = [
 
 [[package]]
 name = "geleit-app"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "geleit-engine",
@@ -1866,11 +1866,11 @@ dependencies = [
 
 [[package]]
 name = "geleit-core"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "geleit-engine"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "ammonia",
  "async-imap",
@@ -1893,7 +1893,7 @@ dependencies = [
 
 [[package]]
 name = "geleit-platform"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "keyring",
  "thiserror 2.0.18",
@@ -1901,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "geleit-store"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "geleit-core",
  "rusqlite",
