@@ -142,6 +142,19 @@ const MIGRATIONS: &[&str] = &[
         DELETE FROM message_fts WHERE rowid = old.id;
     END;
     ",
+    // 11 — attachments saved with a draft (SEND-4/5). Unlike `attachment` (received-message
+    // metadata, no bytes), these carry the file `data` so a resumed draft keeps its files. Encrypted
+    // at rest with the rest of the DB. Cascade-deleted with the draft.
+    "
+    CREATE TABLE draft_attachment (
+        id           INTEGER PRIMARY KEY,
+        draft_id     INTEGER NOT NULL REFERENCES draft(id) ON DELETE CASCADE,
+        filename     TEXT,
+        content_type TEXT NOT NULL,
+        data         BLOB NOT NULL
+    );
+    CREATE INDEX draft_attachment_draft ON draft_attachment(draft_id);
+    ",
 ];
 
 /// A parsed search query (SEARCH-1/4): an FTS5 `MATCH` string (`None` when there are no full-text
@@ -288,6 +301,14 @@ pub struct DraftRow {
     pub id: i64,
     pub content: DraftContent,
     pub updated_at: i64,
+}
+
+/// An attachment saved with a draft (SEND-4/5): the file bytes plus its name/type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftAttachment {
+    pub filename: Option<String>,
+    pub content_type: String,
+    pub data: Vec<u8>,
 }
 
 /// A folder/mailbox row.
@@ -635,10 +656,49 @@ impl Store {
             .optional()?)
     }
 
-    /// Delete a draft (e.g. after it's sent, or discarded). Idempotent.
+    /// Delete a draft (e.g. after it's sent, or discarded). Idempotent. Attachments cascade.
     pub fn delete_draft(&self, id: i64) -> Result<(), StoreError> {
         self.conn.execute("DELETE FROM draft WHERE id = ?1", [id])?;
         Ok(())
+    }
+
+    /// Replace all of a draft's saved attachments with `atts` (SEND-4/5). Pass an empty slice to
+    /// clear them. Done in one transaction so a resumed draft never sees a half-updated set.
+    pub fn replace_draft_attachments(
+        &self,
+        draft_id: i64,
+        atts: &[DraftAttachment],
+    ) -> Result<(), StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM draft_attachment WHERE draft_id = ?1",
+            [draft_id],
+        )?;
+        for a in atts {
+            tx.execute(
+                "INSERT INTO draft_attachment (draft_id, filename, content_type, data) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                (draft_id, &a.filename, &a.content_type, &a.data),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A draft's saved attachments, in insertion order.
+    pub fn draft_attachments(&self, draft_id: i64) -> Result<Vec<DraftAttachment>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT filename, content_type, data FROM draft_attachment \
+             WHERE draft_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([draft_id], |r| {
+            Ok(DraftAttachment {
+                filename: r.get(0)?,
+                content_type: r.get(1)?,
+                data: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     fn draft_from_row(r: &rusqlite::Row) -> rusqlite::Result<DraftRow> {
@@ -1396,6 +1456,49 @@ mod tests {
             .collect();
         assert_eq!(subs, ["new", "mid", "old"]); // date DESC
         assert_eq!(s.messages_in_folder(sent, 50).unwrap().len(), 1); // folder-scoped
+    }
+
+    #[test]
+    fn draft_attachments_roundtrip_replace_and_cascade() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let id = s.save_draft(acc, None, &DraftContent::default()).unwrap();
+        assert!(s.draft_attachments(id).unwrap().is_empty());
+
+        let a1 = DraftAttachment {
+            filename: Some("a.pdf".into()),
+            content_type: "application/pdf".into(),
+            data: vec![1, 2, 3],
+        };
+        let a2 = DraftAttachment {
+            filename: None,
+            content_type: "text/plain".into(),
+            data: vec![9, 9],
+        };
+        s.replace_draft_attachments(id, &[a1.clone(), a2.clone()])
+            .unwrap();
+        assert_eq!(s.draft_attachments(id).unwrap(), vec![a1.clone(), a2]); // order + bytes preserved
+
+        // replace overwrites the whole set (not append)
+        s.replace_draft_attachments(id, std::slice::from_ref(&a1))
+            .unwrap();
+        assert_eq!(s.draft_attachments(id).unwrap(), vec![a1]);
+        // clearing
+        s.replace_draft_attachments(id, &[]).unwrap();
+        assert!(s.draft_attachments(id).unwrap().is_empty());
+
+        // cascade: deleting the draft removes its attachments
+        s.replace_draft_attachments(
+            id,
+            &[DraftAttachment {
+                filename: Some("x".into()),
+                content_type: "application/octet-stream".into(),
+                data: vec![0],
+            }],
+        )
+        .unwrap();
+        s.delete_draft(id).unwrap();
+        assert!(s.draft_attachments(id).unwrap().is_empty());
     }
 
     #[test]
