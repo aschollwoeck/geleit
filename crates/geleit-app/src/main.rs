@@ -1011,10 +1011,15 @@ slint::slint! {
                         }
                     }
                     ScrollView {
-                        Text {
-                            text: root.r-body;
-                            color: Palette.text;
-                            wrap: word-wrap;
+                        // a layout fills the viewport width so the body wraps to it (a bare Text in a
+                        // ScrollView has no width to wrap against → it ran off as one long line)
+                        VerticalLayout {
+                            alignment: start;
+                            Text {
+                                text: root.r-body;
+                                color: Palette.text;
+                                wrap: word-wrap;
+                            }
                         }
                     }
                     // attachments (view only — saving comes later)
@@ -3752,6 +3757,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.invoke_clear_search();
             }
         });
+    }
+
+    // Screenshot/dev aid: `GELEIT_SHOT=<state>` drives the UI into a state shortly after launch so
+    // documentation screenshots of click-only views (compose, search, settings, …) can be captured
+    // without input injection. Inert unless the env var is set; only triggers actions the user could
+    // take themselves. Held in `_shot_timer` so the single-shot timer survives until `run()`.
+    let _shot_timer = slint::Timer::default();
+    if let Ok(state) = std::env::var("GELEIT_SHOT") {
+        let weak = ui.as_weak();
+        let model = messages.clone();
+        _shot_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(600),
+            move || {
+                let Some(ui) = weak.upgrade() else { return };
+                match state.as_str() {
+                    "compose" => ui.invoke_compose(),
+                    "settings" => ui.invoke_open_settings(),
+                    "drafts" => ui.invoke_open_drafts(),
+                    "manage-folders" => ui.invoke_open_manage_folders(),
+                    "search" => {
+                        ui.set_search_query("report".into());
+                        ui.invoke_search_edited();
+                    }
+                    "read" => {
+                        if let Some(item) = model.row_data(0) {
+                            ui.invoke_message_selected(item);
+                        }
+                    }
+                    _ => {}
+                }
+            },
+        );
     }
 
     ui.run()?;

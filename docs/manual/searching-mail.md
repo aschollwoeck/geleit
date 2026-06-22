@@ -7,6 +7,8 @@ Type in the **search box** above the message list. Results appear as you type â€
 database), so it never sends your search anywhere. Each result shows a snippet of the matching text
 so you can see *why* it matched. Choose **Clear** to return to your folder.
 
+![Searching for "report": the search box shows a result count and the matching message.](images/search.png)
+
 ## Operators
 
 Narrow a search with simple operators, alone or combined with words:
