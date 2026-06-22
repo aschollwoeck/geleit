@@ -24,14 +24,15 @@ struct HtmlView {
     visible: Cell<bool>,
 }
 
-/// The reading-pane body region (logical coords) the webview should cover — right of the rail
-/// (240) + list (380), below the subject/sender header (~132).
+/// The reading-pane body region (logical coords) the webview should cover — right of the rail plus
+/// list (620px), below the header. The header is a **fixed height** (the reading-pane subject is
+/// elided to one line, so it never wraps), so these offsets always clear the actions and the
+/// remote-content cue bar; the extra reservation when the cue is shown keeps the webview below it.
 fn body_rect(ui: &Main) -> wry::Rect {
     let scale = ui.window().scale_factor();
     let phys = ui.window().size();
-    // leave room for the "remote content blocked" cue bar when it's shown
     let top = if ui.get_remote_blocked() {
-        168.0
+        174.0
     } else {
         132.0
     };
@@ -906,7 +907,9 @@ slint::slint! {
                         color: Palette.text;
                         font-size: 21px;
                         font-weight: 600;
-                        wrap: word-wrap;
+                        // one line (elided) so the header is a fixed height — the native webview is
+                        // placed at a fixed offset and a wrapping subject would let it cover the cue.
+                        overflow: elide;
                     }
                     Text {
                         text: root.r-sender + "  ·  " + root.r-date;
@@ -1010,6 +1013,9 @@ slint::slint! {
                             }
                         }
                     }
+                    // The body area; the sandboxed HTML webview (a native child window) is drawn over
+                    // it. The header above is a fixed height (subject elided to one line), so the
+                    // webview's fixed offset always clears the actions + the remote-content cue.
                     ScrollView {
                         // a layout fills the viewport width so the body wraps to it (a bare Text in a
                         // ScrollView has no width to wrap against → it ran off as one long line)
@@ -3784,6 +3790,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "read" => {
                         if let Some(item) = model.row_data(0) {
                             ui.invoke_message_selected(item);
+                        }
+                    }
+                    "select" => {
+                        // tick a couple of rows to show the multi-select / bulk-action bar
+                        for i in 1..=2 {
+                            if let Some(item) = model.row_data(i) {
+                                ui.invoke_toggle_select(item.id);
+                            }
                         }
                     }
                     _ => {}

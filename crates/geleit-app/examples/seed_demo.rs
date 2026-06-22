@@ -57,6 +57,65 @@ fn main() {
         s.store_body(id, Some(body), None, Some(&snippet), *attach)
             .unwrap();
     }
+    // An HTML newsletter with a LONG (wrapping) subject and a remote image — exercises the sandboxed
+    // webview + the "remote content blocked" cue, and tests that the webview sits below them. Newest,
+    // so `GELEIT_SHOT=read` opens it.
+    let hid = s
+        .upsert_message(
+            acc,
+            inbox,
+            &NewMessage {
+                uid: Some(100),
+                subject: Some(
+                    "A rather long newsletter subject line that wraps onto a second line to test \
+                     the reading pane and webview placement"
+                        .to_owned(),
+                ),
+                from_name: Some("GeleitMail Newsletter".to_owned()),
+                from_addr: Some("news@example.com".to_owned()),
+                date: Some(1_718_000_000 + 21 * 86_400),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let html = "<h2>This month in GeleitMail</h2>\
+        <p>A few highlights from the latest release — rendered in the <b>sandboxed</b> HTML view.</p>\
+        <img src=\"https://example.com/banner.png\" alt=\"banner\">\
+        <p>Scripts can't run here and remote images stay blocked until you ask for them.</p>";
+    s.store_body(
+        hid,
+        Some("This month in GeleitMail — a few highlights from the latest release."),
+        Some(html),
+        Some("A few highlights from the latest release."),
+        false,
+    )
+    .unwrap();
+    // A couple of saved drafts so the Drafts overlay has content to show.
+    use geleit_store::DraftContent;
+    for (to, subject, body) in [
+        (
+            "alice@example.com",
+            "Re: Lunch on Thursday?",
+            "Thursday at noon works for me — see you then!",
+        ),
+        (
+            "team@work.example",
+            "Sprint notes",
+            "Quick recap of what we shipped this sprint…",
+        ),
+    ] {
+        s.save_draft(
+            acc,
+            None,
+            &DraftContent {
+                to: to.to_owned(),
+                subject: subject.to_owned(),
+                body: body.to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
     s.set_setting("theme", if dark { "dark" } else { "light" })
         .unwrap();
     println!(
