@@ -1177,19 +1177,30 @@ impl Store {
         let parsed = parse_search(query);
         match parsed.match_query {
             // Full-text terms present: rank by relevance, optionally filtered to has-attachments.
+            // The `snippet(...)` column gives a short context window around the match (auto-picks the
+            // best column; plain text, since the list renders it without markup) and replaces the
+            // generic preview so a result shows *why* it matched.
             Some(match_query) => {
                 let mut sql = String::from(
                     "SELECT m.id, m.uid, m.message_id, m.in_reply_to, m.subject, m.from_name, \
-                     m.from_addr, m.date, m.seen, m.has_attachments, m.snippet, m.flagged \
-                     FROM message_fts f JOIN message m ON m.id = f.rowid \
-                     WHERE f.message_fts MATCH ?1 AND m.account_id = ?2",
+                     m.from_addr, m.date, m.seen, m.has_attachments, m.snippet, m.flagged, \
+                     snippet(message_fts, -1, '', '', '…', 10) \
+                     FROM message_fts JOIN message m ON m.id = message_fts.rowid \
+                     WHERE message_fts MATCH ?1 AND m.account_id = ?2",
                 );
                 if parsed.require_attachment {
                     sql.push_str(" AND m.has_attachments = 1");
                 }
                 sql.push_str(" ORDER BY rank LIMIT ?3");
                 let mut stmt = self.conn.prepare(&sql)?;
-                let rows = stmt.query_map((match_query, account_id, limit), header_from_row)?;
+                let rows = stmt.query_map((match_query, account_id, limit), |r| {
+                    let mut h = header_from_row(r)?;
+                    let snip: String = r.get(12)?;
+                    if !snip.is_empty() {
+                        h.snippet = Some(snip); // show the match context, not the stored preview
+                    }
+                    Ok(h)
+                })?;
                 Ok(rows.collect::<Result<Vec<_>, _>>()?)
             }
             // No full-text terms — only a `has:attachment` filter: list newest with attachments.
@@ -1614,7 +1625,14 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(s.search_messages(acc, "umbrella", 10).unwrap().len(), 1);
+        let hit = s.search_messages(acc, "umbrella", 10).unwrap();
+        assert_eq!(hit.len(), 1);
+        // the result's snippet is the match context (SEARCH highlighting), not the stored preview "…"
+        let snip = hit[0].snippet.as_deref().unwrap_or_default();
+        assert!(
+            snip.contains("umbrella"),
+            "match-context snippet, got {snip:?}"
+        );
         // prefix (type-ahead) matches; another account doesn't
         assert_eq!(s.search_messages(acc, "umbr", 10).unwrap().len(), 1);
         let other = s.add_account("other@example.com", None).unwrap();
