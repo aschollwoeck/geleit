@@ -20,6 +20,8 @@ The first time you open GeleitMail, it asks you to add an account. Fill in:
   `smtp.<provider>` on port `465`, or `587` with STARTTLS). Used when you send.
 - **Signature** — optional; appended to messages you write.
 
+![The Add-account screen, with fields for email, IMAP and SMTP servers, and password.](images/setup.png)
+
 Choose **Connect**. GeleitMail signs in, downloads your inbox, and shows your mail. Your details
 stay on your own device — your password is saved securely in your system keychain, so it's
 remembered the next time you open GeleitMail.
@@ -36,6 +38,8 @@ When you open GeleitMail you see three areas, left to right:
   short preview, and the date. A small dot marks messages you haven't read yet, and a paperclip
   shows when a message has an attachment.
 - **The reading area** on the right, where the message you pick opens.
+
+![The main window: folder rail on the left, the inbox list with unread dots, stars, and attachment markers in the middle, and the reading area on the right.](images/inbox-light.png)
 
 When several messages are part of the same back-and-forth, a small **conversation · N** marker shows
 how many messages are in that thread.
