@@ -150,14 +150,21 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 > non-MOVE servers; bulk move-to-arbitrary-folder + bulk mark-read; permanent bulk-delete in Trash;
 > persistent offline action queue (survives restart mid-flight); cross-client flag sync after first sync.
 
-## M6 — Search
+## M6 — Search ✅ COMPLETE
 **Delivers:** SEARCH-1, SEARCH-2, SEARCH-3, OFF-2.
 **Outcome:** fast search that works offline.
 
-- **S6.1** Index synced messages into `tantivy`.
-- **S6.2** Incremental indexing as mail arrives / changes.
-- **S6.3** Search UI + query over sender / subject / body (SEARCH-1), near-instant (SEARCH-3).
-- **S6.4** Verified offline against the local index (SEARCH-2, OFF-2).
+- **S6.1** ✅ Search index via **SQLite FTS5** (ADR-0010 — *not* tantivy: FTS5 lives in the SQLCipher
+  DB, so the index is encrypted at rest; tantivy's files would be plaintext). `message_fts` over
+  subject/sender/body, kept in step on upsert/store_body/delete (trigger) + a one-time open backfill;
+  `fts_query` + `search_messages`. Covers the original S6.1 (index) **and** S6.2 (incremental).
+- **S6.2** ✅ Search UI — a header search box; FTS5 is sub-ms so it queries **synchronously, instant**
+  (SEARCH-3); results in relevance order; offline by construction (SEARCH-1/2, OFF-2). Covers the
+  original S6.3 (UI) + S6.4 (offline-verified).
+
+> FTS5's encryption-at-rest + simplicity collapsed the four provisional slices into two. **Follow-ups
+> (backlog):** search operators (`from:`, `has:attachment`, date ranges — SEARCH-4); cross-account
+> search (SEARCH-5); match highlighting/snippets.
 
 ## M7 — Multi-account + OAuth + onboarding
 **Delivers:** ACC-1, ACC-2, ACC-5, ACC-6, ACC-8, MULTI-1, MULTI-2, APP-1.
