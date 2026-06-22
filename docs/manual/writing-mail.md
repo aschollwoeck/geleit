@@ -53,3 +53,5 @@ and forward. Change it by reconnecting the account through the same form
 Not ready to send? Choose **Save draft** — the message (recipients, subject, body, and any
 attachments) is saved on this device. Open **Drafts** on the left to see saved drafts and pick one to
 **resume** editing. Sending a resumed draft removes it from the drafts list.
+
+![The Drafts list showing saved drafts.](images/drafts.png)

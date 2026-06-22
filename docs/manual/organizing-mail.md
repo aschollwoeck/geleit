@@ -27,8 +27,12 @@ Choose **Manage folders…** on the left to **create**, **rename**, or **delete*
 and **Create**; or type a new name and choose **Rename→** next to a folder; or **Delete** a folder.
 The folder list updates to match your provider.
 
+![The Manage folders panel: a name field with Create, and each folder with Rename and Delete.](images/manage-folders.png)
+
 ## Acting on several messages at once
 
 Each message row has a checkbox on the left. Tick a few and a bar appears with bulk actions:
 **Archive**, **Delete**, **Star**, and **Mark read** — applied to everything selected. **Clear**
 deselects. Switching folders also clears the selection.
+
+![Several messages ticked, with a bulk-action bar reading "2 selected · Archive · Delete · Star · Mark read · Clear".](images/multi-select.png)

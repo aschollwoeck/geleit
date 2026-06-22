@@ -28,6 +28,8 @@ When a message contained remote content, you'll see a **"Remote content blocked"
 message, that one time. (Scripts are never run, even then.) This keeps "read receipts" and tracking
 pixels from firing without your say-so.
 
+![A message in the sandboxed HTML view with a "Remote content blocked — Load remote images" bar above it.](images/reading.png)
+
 ## Reading offline
 
 Because your mail lives on your own device, you can read everything you've synced with no internet
