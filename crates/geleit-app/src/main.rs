@@ -269,6 +269,7 @@ slint::slint! {
         callback bulk-archive();
         callback bulk-trash();
         callback bulk-star();
+        callback bulk-mark-read();
         callback search-edited();
         callback clear-search();
         callback refresh();
@@ -673,6 +674,14 @@ slint::slint! {
                                 font-weight: 600;
                                 vertical-alignment: center;
                                 TouchArea { clicked => { root.bulk-star(); } }
+                            }
+                            Text {
+                                text: "Mark read";
+                                color: Palette.accent-strong;
+                                font-size: 13px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                TouchArea { clicked => { root.bulk-mark-read(); } }
                             }
                             Text {
                                 text: "Clear";
@@ -2633,6 +2642,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.get_current_account() as i64,
                 &selected,
             );
+        });
+    }
+    // Bulk mark-as-read (ORG-7): local read state (server write-back of \Seen is a follow-up).
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let messages = messages.clone();
+        let selected = selected_ids.clone();
+        ui.on_bulk_mark_read(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            for id in selected.borrow().iter() {
+                let _ = store.set_seen((*id).into(), true);
+                flip_unread(&messages, *id, false);
+                flip_selected_row(&messages, *id, false);
+            }
+            selected.borrow_mut().clear();
+            ui.set_selected_count(0);
         });
     }
 
