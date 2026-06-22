@@ -193,6 +193,7 @@ slint::slint! {
         in property <int> selected-folder;
         in property <[MessageItem]> messages;
         in property <int> selected-message; // selected message id (0 = none)
+        in-out property <int> nav-index: -1; // keyboard-focused list row (READ-9); -1 = none
         in property <string> r-subject;
         in property <string> r-sender;
         in property <string> r-date;
@@ -279,6 +280,10 @@ slint::slint! {
         callback switch-account(int);
         callback add-account();
         callback cancel-add-account();
+        // keyboard navigation (READ-9 / APP-6)
+        callback nav-next();
+        callback nav-prev();
+        callback nav-escape();
         callback load-remote();
         callback compose();
         callback send-message();
@@ -303,6 +308,47 @@ slint::slint! {
         title: "GeleitMail";
         background: Palette.bg;
         default-font-size: 15px;
+        forward-focus: keyscope;
+
+        // Global keyboard shortcuts (READ-9 / APP-6). Sits BEHIND the UI and stays focused —
+        // TouchAreas don't take keyboard focus, so shortcuts work everywhere except while typing in a
+        // field (which grabs focus, correctly pausing them). Empty + full-size → no layout impact.
+        keyscope := FocusScope {
+            width: 100%;
+            height: 100%;
+            key-pressed(event) => {
+                // don't hijack keys while composing / in an overlay (let fields type freely)
+                if root.composing || root.viewing-drafts || root.picking-folder
+                    || root.managing-folders || root.needs-setup || root.adding-account {
+                    if event.text == Key.Escape {
+                        root.nav-escape();
+                        return accept;
+                    }
+                    return reject;
+                }
+                if event.text == "j" || event.text == Key.DownArrow {
+                    root.nav-next();
+                    return accept;
+                }
+                if event.text == "k" || event.text == Key.UpArrow {
+                    root.nav-prev();
+                    return accept;
+                }
+                if event.text == "c" {
+                    root.compose();
+                    return accept;
+                }
+                if event.text == "r" && root.selected-message != 0 {
+                    root.reply();
+                    return accept;
+                }
+                if event.text == Key.Escape {
+                    root.nav-escape();
+                    return accept;
+                }
+                reject
+            }
+        }
 
         // ---- MAIN VIEW (an account exists) ----
         if !root.needs-setup && !root.adding-account: HorizontalLayout {
@@ -578,7 +624,7 @@ slint::slint! {
                             padding-top: 7px;
                             padding-bottom: 7px;
                             spacing: 8px;
-                            Field {
+                            searchfield := Field {
                                 placeholder: "Search — try from:, subject:, has:attachment";
                                 text <=> root.search-query;
                                 horizontal-stretch: 1;
@@ -2081,6 +2127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_remote_blocked(false);
             selected.borrow_mut().clear(); // a new folder starts with nothing selected
             ui.set_selected_count(0);
+            ui.set_nav_index(-1); // keyboard focus restarts in the new list
             ui.set_searching(false); // leaving search to browse a folder
             ui.set_search_query(SharedString::new());
             ui.set_search_count(0);
@@ -2684,21 +2731,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     model.set_vec(load_messages(&store, fid));
                 }
                 ui.set_selected_message(0);
+                ui.set_nav_index(-1);
                 hide_html(&view);
                 return;
             }
-            let account = store
-                .list_accounts()
-                .ok()
-                .and_then(|a| a.into_iter().next());
-            let items = match account {
-                Some(a) => search_result_items(&store, a.id, &query),
-                None => Vec::new(),
-            };
+            let items = search_result_items(&store, ui.get_current_account() as i64, &query);
             ui.set_search_count(items.len() as i32);
             model.set_vec(items);
             ui.set_searching(true);
             ui.set_selected_message(0);
+            ui.set_nav_index(-1);
             hide_html(&view);
         };
         let run2 = run_search.clone();
@@ -3419,6 +3461,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_cancel_add_account(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_adding_account(false);
+            }
+        });
+    }
+
+    // Keyboard navigation (READ-9 / APP-6): j/k (or arrows) move + preview; Esc closes overlays.
+    {
+        let weak = ui.as_weak();
+        let model = messages.clone();
+        ui.on_nav_next(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let i = viewmodel::next_index(ui.get_nav_index(), model.row_count() as i32);
+            ui.set_nav_index(i);
+            if let Some(item) = (i >= 0).then(|| model.row_data(i as usize)).flatten() {
+                ui.invoke_message_selected(item);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let model = messages.clone();
+        ui.on_nav_prev(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let i = viewmodel::prev_index(ui.get_nav_index(), model.row_count() as i32);
+            ui.set_nav_index(i);
+            if let Some(item) = (i >= 0).then(|| model.row_data(i as usize)).flatten() {
+                ui.invoke_message_selected(item);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_nav_escape(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_composing(false);
+            ui.set_viewing_drafts(false);
+            ui.set_picking_folder(false);
+            ui.set_managing_folders(false);
+            ui.set_adding_account(false);
+            if ui.get_searching() {
+                ui.invoke_clear_search();
             }
         });
     }
