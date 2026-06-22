@@ -201,6 +201,10 @@ slint::slint! {
         in-out property <string> mf-name;
         in property <[string]> manage-folders;
         in property <int> selected-count; // # messages multi-selected (ORG-7); 0 = bar hidden
+        // search (SEARCH-1/2/3)
+        in-out property <string> search-query;
+        in property <bool> searching; // showing search results instead of a folder
+        in property <int> search-count;
         in property <bool> refreshing;
         in property <string> status; // non-empty = error to show (danger banner)
         in property <string> sync-status; // non-empty = calm sync-progress line
@@ -256,6 +260,8 @@ slint::slint! {
         callback bulk-archive();
         callback bulk-trash();
         callback bulk-star();
+        callback search-edited();
+        callback clear-search();
         callback refresh();
         callback connect();
         callback reload();
@@ -518,6 +524,33 @@ slint::slint! {
                         }
                     }
                     Rectangle { height: 1px; background: Palette.divider; }
+                    // search bar (SEARCH-1/2/3) — offline FTS over the local index, instant
+                    Rectangle {
+                        height: 48px;
+                        background: Palette.surface;
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            padding-top: 7px;
+                            padding-bottom: 7px;
+                            spacing: 8px;
+                            Field {
+                                placeholder: "Search mail…";
+                                text <=> root.search-query;
+                                horizontal-stretch: 1;
+                                edited => { root.search-edited(); }
+                            }
+                            if root.searching: Text {
+                                text: root.search-count + " found · Clear";
+                                color: Palette.accent-strong;
+                                font-size: 13px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                TouchArea { clicked => { root.clear-search(); } }
+                            }
+                        }
+                        Rectangle { y: parent.height - 1px; height: 1px; background: Palette.divider; }
+                    }
                     if root.status != "": Rectangle {
                         height: 44px;
                         background: Palette.danger-quiet;
@@ -1443,6 +1476,31 @@ fn account_signature(store: &Store) -> String {
         .unwrap_or_default()
 }
 
+/// Map full-text search hits (SEARCH-1) to list rows — relevance order, no threading (results span
+/// folders) and nothing pre-selected.
+fn search_result_items(store: &Store, account_id: i64, query: &str) -> Vec<MessageItem> {
+    store
+        .search_messages(account_id, query, 500)
+        .unwrap_or_default()
+        .iter()
+        .map(|h| {
+            let vm = viewmodel::message_vm(h);
+            MessageItem {
+                id: h.id as i32,
+                sender: vm.sender.into(),
+                subject: vm.subject.into(),
+                snippet: vm.snippet.into(),
+                date: vm.date.into(),
+                unread: vm.unread,
+                attachment: vm.attachment,
+                thread_count: 1,
+                starred: vm.starred,
+                selected: false,
+            }
+        })
+        .collect()
+}
+
 fn load_messages(store: &Store, folder_id: i64) -> Vec<MessageItem> {
     let headers = store
         .messages_in_folder(folder_id, 1000)
@@ -1892,6 +1950,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_remote_blocked(false);
             selected.borrow_mut().clear(); // a new folder starts with nothing selected
             ui.set_selected_count(0);
+            ui.set_searching(false); // leaving search to browse a folder
+            ui.set_search_query(SharedString::new());
+            ui.set_search_count(0);
             // is this the Trash folder? → offer Empty Trash + make Delete permanent (ORG-2)
             let name = fm
                 .row_data(idx as usize)
@@ -2372,6 +2433,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_bulk_star(move || {
             let Some(ui) = weak.upgrade() else { return };
             bulk_star(&ui, &store, &messages, &fm, &db_path, &secrets, &selected);
+        });
+    }
+
+    // Search (SEARCH-1/2/3): query the local FTS index on each keystroke (offline, instant). Empty
+    // query returns to the current folder.
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let model = messages.clone();
+        let fids = folder_ids.clone();
+        let view = html_view.clone();
+        let run_search = move |ui: &Main| {
+            let query = ui.get_search_query().trim().to_owned();
+            if query.is_empty() {
+                ui.set_searching(false);
+                ui.set_search_count(0);
+                // back to the current folder
+                if let Some(fid) = fids
+                    .borrow()
+                    .get(ui.get_selected_folder() as usize)
+                    .copied()
+                {
+                    model.set_vec(load_messages(&store, fid));
+                }
+                ui.set_selected_message(0);
+                hide_html(&view);
+                return;
+            }
+            let account = store
+                .list_accounts()
+                .ok()
+                .and_then(|a| a.into_iter().next());
+            let items = match account {
+                Some(a) => search_result_items(&store, a.id, &query),
+                None => Vec::new(),
+            };
+            ui.set_search_count(items.len() as i32);
+            model.set_vec(items);
+            ui.set_searching(true);
+            ui.set_selected_message(0);
+            hide_html(&view);
+        };
+        let run2 = run_search.clone();
+        ui.on_search_edited(move || {
+            if let Some(ui) = weak.upgrade() {
+                run_search(&ui);
+            }
+        });
+        let weak2 = ui.as_weak();
+        ui.on_clear_search(move || {
+            if let Some(ui) = weak2.upgrade() {
+                ui.set_search_query(SharedString::new());
+                run2(&ui);
+            }
         });
     }
 
