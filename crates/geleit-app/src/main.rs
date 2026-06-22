@@ -136,6 +136,7 @@ slint::slint! {
         thread-count: int, // messages in this conversation (1 = not threaded)
         starred: bool,
         selected: bool, // multi-select for bulk actions (ORG-7)
+        account: int, // owning account (set for cross-account search hits; 0 = current view)
     }
 
     struct AccountItem {
@@ -215,6 +216,7 @@ slint::slint! {
         in-out property <string> search-query;
         in property <bool> searching; // showing search results instead of a folder
         in property <int> search-count;
+        in-out property <bool> search-all; // search across all accounts (SEARCH-5)
         in property <bool> refreshing;
         in property <string> status; // non-empty = error to show (danger banner)
         in property <string> sync-status; // non-empty = calm sync-progress line
@@ -275,6 +277,7 @@ slint::slint! {
         callback bulk-mark-read();
         callback search-edited();
         callback clear-search();
+        callback toggle-search-all();
         callback refresh();
         callback connect();
         callback reload();
@@ -652,6 +655,15 @@ slint::slint! {
                                 text <=> root.search-query;
                                 horizontal-stretch: 1;
                                 edited => { root.search-edited(); }
+                            }
+                            // cross-account toggle (SEARCH-5) — only meaningful with >1 account
+                            if root.accounts.length > 1: Text {
+                                text: root.search-all ? "All accounts ✓" : "All accounts";
+                                color: root.search-all ? Palette.accent-strong : Palette.muted;
+                                font-size: 13px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                TouchArea { clicked => { root.toggle-search-all(); } }
                             }
                             if root.searching: Text {
                                 text: root.search-count + " found · Clear";
@@ -1713,12 +1725,27 @@ fn account_signature(store: &Store) -> String {
 
 /// Map full-text search hits (SEARCH-1) to list rows — relevance order, no threading (results span
 /// folders) and nothing pre-selected.
-fn search_result_items(store: &Store, account_id: i64, query: &str) -> Vec<MessageItem> {
-    store
-        .search_messages(account_id, query, 500)
-        .unwrap_or_default()
-        .iter()
-        .map(|h| {
+/// Build search-result rows. When `all_accounts`, search every account and tag each row with its
+/// owning account (so opening it can switch context, SEARCH-5); otherwise search `account_id` only
+/// and leave `account = 0` (no switch needed).
+fn search_result_items(
+    store: &Store,
+    account_id: i64,
+    query: &str,
+    all_accounts: bool,
+) -> Vec<MessageItem> {
+    let rows: Vec<(geleit_store::MessageHeader, i64)> = if all_accounts {
+        store.search_all_accounts(query, 500).unwrap_or_default()
+    } else {
+        store
+            .search_messages(account_id, query, 500)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|h| (h, 0)) // 0 = current account, no switch on open
+            .collect()
+    };
+    rows.iter()
+        .map(|(h, acc)| {
             let vm = viewmodel::message_vm(h);
             MessageItem {
                 id: h.id as i32,
@@ -1731,6 +1758,7 @@ fn search_result_items(store: &Store, account_id: i64, query: &str) -> Vec<Messa
                 thread_count: 1,
                 starred: vm.starred,
                 selected: false,
+                account: *acc as i32,
             }
         })
         .collect()
@@ -1772,6 +1800,7 @@ fn load_messages(store: &Store, folder_id: i64) -> Vec<MessageItem> {
                 thread_count: thread_size[i] as i32,
                 starred: vm.starred,
                 selected: false,
+                account: 0, // folder view is always the current account
             }
         })
         .collect()
@@ -2280,6 +2309,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let secrets = secrets.clone();
         ui.on_message_selected(move |item| {
             let Some(ui) = weak.upgrade() else { return };
+            // A cross-account search hit: switch to its account first, so the rail + actions target
+            // the right account (SEARCH-5). reload_all loads that account's view; we open below.
+            if item.account != 0 && item.account != ui.get_current_account() {
+                ui.set_current_account(item.account);
+                ui.set_searching(false);
+                ui.set_search_query(SharedString::new());
+                ui.invoke_reload();
+            }
             ui.set_selected_message(item.id);
             ui.set_r_subject(item.subject.clone());
             ui.set_r_starred(item.starred);
@@ -2904,7 +2941,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 hide_html(&view);
                 return;
             }
-            let items = search_result_items(&store, ui.get_current_account() as i64, &query);
+            let items = search_result_items(
+                &store,
+                ui.get_current_account() as i64,
+                &query,
+                ui.get_search_all(),
+            );
             ui.set_search_count(items.len() as i32);
             model.set_vec(items);
             ui.set_searching(true);
@@ -2924,6 +2966,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.set_search_query(SharedString::new());
                 run2(&ui);
             }
+        });
+    }
+    // Toggle "all accounts" (SEARCH-5) → re-run the current query in the new scope.
+    {
+        let weak = ui.as_weak();
+        ui.on_toggle_search_all(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_search_all(!ui.get_search_all());
+            ui.invoke_search_edited();
         });
     }
 
