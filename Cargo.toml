@@ -20,7 +20,10 @@ rust-version = "1.96"
 # faster, smaller artifact. Keep unwind (workers rely on catch_unwind), so no panic="abort".
 [profile.release]
 strip = true
-lto = "thin"
+lto = "fat"          # maximal cross-crate inlining for a tighter, faster release binary (APP-2)
+codegen-units = 1    # trade build time for better optimization + smaller output
+# NOTE: deliberately NOT panic = "abort" — worker threads use catch_unwind so a panic in a sync/send
+# worker is contained and reported calmly instead of taking down the whole app (P1/guidelines §5).
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
