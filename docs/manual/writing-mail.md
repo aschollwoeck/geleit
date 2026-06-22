@@ -17,6 +17,8 @@ added the account) and saves a copy to your **Sent** folder. Sending happens in 
 the app stays responsive; if something goes wrong you get a short, plain explanation and your draft
 stays open to try again.
 
+![The compose window: To, Cc, Subject, and body, with Browse/Attach, a Format-with-Markdown toggle, and Cancel / Save draft / Send.](images/compose.png)
+
 ## Replying and forwarding
 
 Open a message and use the actions at the top of the reading area:

@@ -49,6 +49,8 @@ how many messages are in that thread.
 Click a message and it opens on the right, showing the subject, who it's from, the date, and the
 text of the message. The row you're reading is marked with a soft highlight and a coloured edge.
 
+![An open message in the reading area, with Reply, Reply all, Forward, Star, Archive, Delete, Move, Spam, and Mark-as-unread actions across the top.](images/reading.png)
+
 Opening a message marks it as read, and its unread dot disappears. If you'd like to come back to it
 later, choose **Mark as unread** at the top of the reading area to bring the dot back.
 

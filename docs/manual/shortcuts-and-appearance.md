@@ -23,4 +23,6 @@ Choose **Settings…** on the left, then the **theme** toggle to switch between 
 daylight") and **dark** ("Soft dusk"). Your choice is remembered and applied the next time you open
 GeleitMail. Settings stay on this device — there's no account or cloud involved.
 
+![The Settings panel with a Light/Dark theme toggle.](images/settings.png)
+
 ![GeleitMail in its dark "Soft dusk" theme.](images/inbox-dark.png)
