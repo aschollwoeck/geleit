@@ -1,0 +1,11 @@
+# User manual + README · Tasks
+- [x] de-stale reading-mail.md (SMTP/signature; links; no stale "coming soon")
+- [x] writing-mail.md (compose/reply/forward/Cc/attachments/Markdown/signature/drafts)
+- [x] organizing-mail.md (star/archive/trash/move/junk/empty-trash/folders/bulk)
+- [x] searching-mail.md (instant offline; from:/subject:/has:attachment; all-accounts)
+- [x] accounts.md (multiple/switch/from-address/remove)
+- [x] shortcuts-and-appearance.md (j/k/c/r/Esc; light/dark theme)
+- [x] privacy.md (no telemetry; encryption at rest; remote-content blocking)
+- [x] docs/manual/README.md index; rewrite top-level README.md
+- [x] verified accuracy vs UI; CI green
+- [ ] PR merged
