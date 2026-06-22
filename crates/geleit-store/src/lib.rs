@@ -204,6 +204,22 @@ pub fn parse_search(input: &str) -> ParsedSearch {
     }
 }
 
+/// Sort rank for a folder name (lower = earlier). Inbox first, then the common special folders in a
+/// conventional order, then everything else (same rank → ordered by name). Matches provider variants
+/// loosely (e.g. "Deleted Items" → trash, "Junk Email" → junk).
+fn folder_rank(name: &str) -> u8 {
+    let n = name.to_lowercase();
+    match n.as_str() {
+        "inbox" => 0,
+        "drafts" => 1,
+        "sent" | "sent mail" | "sent items" => 2,
+        "archive" | "all mail" => 3,
+        _ if n.contains("junk") || n.contains("spam") => 4,
+        _ if n.contains("trash") || n.contains("deleted") || n.contains("bin") => 5,
+        _ => 6,
+    }
+}
+
 /// Quote a token as an FTS5 phrase, or `None` if it carries no searchable (alphanumeric) content.
 fn fts_phrase(tok: &str) -> Option<String> {
     tok.chars()
@@ -842,11 +858,13 @@ impl Store {
         Ok(())
     }
 
-    /// Folders for an account, ordered by name.
+    /// Folders for an account in a conventional order: **Inbox first**, then the common special
+    /// folders, then everything else alphabetically (case-insensitive). Inbox-first also makes the
+    /// app open to the Inbox (it shows the first folder), not whatever sorts first by name.
     pub fn folders_for_account(&self, account_id: i64) -> Result<Vec<Folder>, StoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, account_id, name FROM folder WHERE account_id = ?1 ORDER BY name",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, account_id, name FROM folder WHERE account_id = ?1")?;
         let rows = stmt.query_map([account_id], |r| {
             Ok(Folder {
                 id: r.get(0)?,
@@ -854,7 +872,13 @@ impl Store {
                 name: r.get(2)?,
             })
         })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let mut folders = rows.collect::<Result<Vec<_>, _>>()?;
+        folders.sort_by(|a, b| {
+            folder_rank(&a.name)
+                .cmp(&folder_rank(&b.name))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        Ok(folders)
     }
 
     /// Insert or update a message envelope, keyed by `(account_id, folder_id, uid)`. On re-sync the
@@ -1950,6 +1974,46 @@ mod tests {
         assert_eq!(s.search_messages(a, "hi", 10).unwrap().len(), 1);
         assert!(s.search_messages(b, "hi", 10).unwrap().is_empty());
         assert!(s.folders_for_account(b).unwrap().is_empty());
+    }
+
+    #[test]
+    fn folders_ordered_inbox_first_then_specials_then_alpha() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        // insert in a deliberately jumbled order, including provider variants
+        for f in [
+            "Zebra",
+            "Deleted Items",
+            "INBOX",
+            "Archive",
+            "Work",
+            "Sent Mail",
+            "Junk Email",
+            "Drafts",
+            "apple",
+        ] {
+            s.upsert_folder(acc, f).unwrap();
+        }
+        let names: Vec<String> = s
+            .folders_for_account(acc)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "INBOX",         // 0
+                "Drafts",        // 1
+                "Sent Mail",     // 2
+                "Archive",       // 3
+                "Junk Email",    // 4 (contains "junk")
+                "Deleted Items", // 5 (contains "deleted")
+                "apple",         // 6, then alphabetical (case-insensitive)
+                "Work",
+                "Zebra",
+            ]
+        );
     }
 
     #[test]
