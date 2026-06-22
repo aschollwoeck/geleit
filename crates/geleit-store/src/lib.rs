@@ -144,20 +144,79 @@ const MIGRATIONS: &[&str] = &[
     ",
 ];
 
-/// Build a safe FTS5 `MATCH` query from free user input. Each whitespace-separated token that
-/// contains a letter or digit becomes a **quoted phrase** (so punctuation can't inject FTS5
-/// operators like `*`, `OR`, `NEAR`, or unbalanced quotes), and the final token gets a trailing `*`
-/// for prefix matching (type-ahead). Returns `None` when there's nothing searchable.
-pub fn fts_query(input: &str) -> Option<String> {
-    let tokens: Vec<String> = input
-        .split_whitespace()
-        .filter(|t| t.chars().any(char::is_alphanumeric))
-        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-        .collect();
-    if tokens.is_empty() {
-        return None;
+/// A parsed search query (SEARCH-1/4): an FTS5 `MATCH` string (`None` when there are no full-text
+/// terms) plus structured filters that aren't full-text.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ParsedSearch {
+    pub match_query: Option<String>,
+    pub require_attachment: bool,
+}
+
+/// Parse free user input into an FTS5 `MATCH` plus filters, supporting simple operators (SEARCH-4):
+/// `from:TEXT` and `subject:TEXT` scope a term to a column; `has:attachment` filters to messages with
+/// attachments. Bare words search all columns. Every term is **quoted** so punctuation can't inject
+/// FTS5 operators (`*`, `OR`, `NEAR`, stray quotes); the final full-text term gets a trailing `*` for
+/// prefix matching (type-ahead).
+pub fn parse_search(input: &str) -> ParsedSearch {
+    let mut require_attachment = false;
+    let mut terms: Vec<String> = Vec::new();
+    for tok in input.split_whitespace() {
+        if tok.eq_ignore_ascii_case("has:attachment") || tok.eq_ignore_ascii_case("has:attachments")
+        {
+            require_attachment = true;
+        } else if let Some(rest) = strip_prefix_ci(tok, "from:") {
+            if let Some(p) = fts_phrase(rest) {
+                terms.push(format!("sender:{p}"));
+            }
+        } else if let Some(rest) = strip_prefix_ci(tok, "subject:") {
+            if let Some(p) = fts_phrase(rest) {
+                terms.push(format!("subject:{p}"));
+            }
+        } else if let Some(p) = fts_phrase(tok) {
+            terms.push(p);
+        }
     }
-    Some(format!("{}*", tokens.join(" ")))
+    let match_query = (!terms.is_empty()).then(|| format!("{}*", terms.join(" ")));
+    ParsedSearch {
+        match_query,
+        require_attachment,
+    }
+}
+
+/// Quote a token as an FTS5 phrase, or `None` if it carries no searchable (alphanumeric) content.
+fn fts_phrase(tok: &str) -> Option<String> {
+    tok.chars()
+        .any(char::is_alphanumeric)
+        .then(|| format!("\"{}\"", tok.replace('"', "\"\"")))
+}
+
+/// Case-insensitive `strip_prefix` for ASCII operator prefixes; char-boundary safe.
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = s.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &s[prefix.len()..])
+}
+
+/// Map a 12-column header SELECT (id, uid, message_id, in_reply_to, subject, from_name, from_addr,
+/// date, seen, has_attachments, snippet, flagged) to a [`MessageHeader`]. `to_addrs`/`cc_addrs` are
+/// left `None` — listings/search don't need them ([`Store::header_by_id`] reads them).
+fn header_from_row(r: &rusqlite::Row) -> rusqlite::Result<MessageHeader> {
+    Ok(MessageHeader {
+        id: r.get(0)?,
+        uid: r.get(1)?,
+        message_id: r.get(2)?,
+        in_reply_to: r.get(3)?,
+        subject: r.get(4)?,
+        from_name: r.get(5)?,
+        from_addr: r.get(6)?,
+        to_addrs: None,
+        cc_addrs: None,
+        date: r.get(7)?,
+        seen: r.get(8)?,
+        has_attachments: r.get(9)?,
+        snippet: r.get(10)?,
+        flagged: r.get(11)?,
+    })
 }
 
 /// An account row.
@@ -1046,43 +1105,47 @@ impl Store {
         Ok(ids.len())
     }
 
-    /// Full-text search this account's messages (SEARCH-1/2/3), best matches first. Returns header
-    /// rows (no `to_addrs`/`cc_addrs` — the listing doesn't need them), newest-relevance order.
+    /// Full-text search this account's messages (SEARCH-1/2/3/4), best matches first. Supports the
+    /// `from:` / `subject:` / `has:attachment` operators (see [`parse_search`]). Returns header rows
+    /// (no `to_addrs`/`cc_addrs` — the listing doesn't need them).
     pub fn search_messages(
         &self,
         account_id: i64,
         query: &str,
         limit: i64,
     ) -> Result<Vec<MessageHeader>, StoreError> {
-        let Some(match_query) = fts_query(query) else {
-            return Ok(Vec::new());
-        };
-        let mut stmt = self.conn.prepare(
-            "SELECT m.id, m.uid, m.message_id, m.in_reply_to, m.subject, m.from_name, m.from_addr, \
-             m.date, m.seen, m.has_attachments, m.snippet, m.flagged \
-             FROM message_fts f JOIN message m ON m.id = f.rowid \
-             WHERE f.message_fts MATCH ?1 AND m.account_id = ?2 \
-             ORDER BY rank LIMIT ?3",
-        )?;
-        let rows = stmt.query_map((match_query, account_id, limit), |r| {
-            Ok(MessageHeader {
-                id: r.get(0)?,
-                uid: r.get(1)?,
-                message_id: r.get(2)?,
-                in_reply_to: r.get(3)?,
-                subject: r.get(4)?,
-                from_name: r.get(5)?,
-                from_addr: r.get(6)?,
-                to_addrs: None,
-                cc_addrs: None,
-                date: r.get(7)?,
-                seen: r.get(8)?,
-                has_attachments: r.get(9)?,
-                snippet: r.get(10)?,
-                flagged: r.get(11)?,
-            })
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let parsed = parse_search(query);
+        match parsed.match_query {
+            // Full-text terms present: rank by relevance, optionally filtered to has-attachments.
+            Some(match_query) => {
+                let mut sql = String::from(
+                    "SELECT m.id, m.uid, m.message_id, m.in_reply_to, m.subject, m.from_name, \
+                     m.from_addr, m.date, m.seen, m.has_attachments, m.snippet, m.flagged \
+                     FROM message_fts f JOIN message m ON m.id = f.rowid \
+                     WHERE f.message_fts MATCH ?1 AND m.account_id = ?2",
+                );
+                if parsed.require_attachment {
+                    sql.push_str(" AND m.has_attachments = 1");
+                }
+                sql.push_str(" ORDER BY rank LIMIT ?3");
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map((match_query, account_id, limit), header_from_row)?;
+                Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            }
+            // No full-text terms — only a `has:attachment` filter: list newest with attachments.
+            None if parsed.require_attachment => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT m.id, m.uid, m.message_id, m.in_reply_to, m.subject, m.from_name, \
+                     m.from_addr, m.date, m.seen, m.has_attachments, m.snippet, m.flagged \
+                     FROM message m \
+                     WHERE m.account_id = ?1 AND m.has_attachments = 1 \
+                     ORDER BY m.date DESC, m.id DESC LIMIT ?2",
+                )?;
+                let rows = stmt.query_map((account_id, limit), header_from_row)?;
+                Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            }
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Remove a single message locally (optimistic archive/trash/move; body + attachments cascade).
@@ -1386,15 +1449,34 @@ mod tests {
     }
 
     #[test]
-    fn fts_query_quotes_tokens_and_prefixes_last() {
-        use super::fts_query;
-        assert_eq!(fts_query(""), None);
-        assert_eq!(fts_query("   "), None);
-        assert_eq!(fts_query("!!! ??"), None); // no alphanumerics
-        assert_eq!(fts_query("hello").as_deref(), Some("\"hello\"*"));
-        assert_eq!(fts_query("foo bar").as_deref(), Some("\"foo\" \"bar\"*"));
+    fn parse_search_quotes_terms_operators_and_filters() {
+        use super::parse_search;
+        let mq = |s: &str| parse_search(s).match_query;
+        assert_eq!(mq(""), None);
+        assert_eq!(mq("   "), None);
+        assert_eq!(mq("!!! ??"), None); // no alphanumerics
+        assert_eq!(mq("hello").as_deref(), Some("\"hello\"*"));
+        assert_eq!(mq("foo bar").as_deref(), Some("\"foo\" \"bar\"*"));
         // an embedded quote is doubled, so it can't break out of the phrase
-        assert_eq!(fts_query("a\"b").as_deref(), Some("\"a\"\"b\"*"));
+        assert_eq!(mq("a\"b").as_deref(), Some("\"a\"\"b\"*"));
+        // operators: from:/subject: scope to a column (case-insensitive); has:attachment is a filter
+        assert_eq!(
+            parse_search("From:alice budget").match_query.as_deref(),
+            Some("sender:\"alice\" \"budget\"*")
+        );
+        assert_eq!(
+            parse_search("subject:Q3").match_query.as_deref(),
+            Some("subject:\"Q3\"*")
+        );
+        let p = parse_search("has:attachment invoice");
+        assert!(p.require_attachment);
+        assert_eq!(p.match_query.as_deref(), Some("\"invoice\"*"));
+        // a bare has:attachments with no terms → filter only, no MATCH
+        let only = parse_search("has:attachments");
+        assert!(only.require_attachment);
+        assert_eq!(only.match_query, None);
+        // an empty operator value contributes nothing
+        assert_eq!(parse_search("from:").match_query, None);
     }
 
     #[test]
@@ -1438,6 +1520,65 @@ mod tests {
         assert!(s.search_messages(acc, "  ", 10).unwrap().is_empty());
         s.delete_message(id).unwrap();
         assert!(s.search_messages(acc, "invoice", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_operators_scope_and_filter() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("me@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        // m1: from Alice, subject mentions "report", no attachment
+        s.upsert_message(
+            acc,
+            inbox,
+            &NewMessage {
+                uid: Some(1),
+                subject: Some("weekly report".to_owned()),
+                from_name: Some("Alice".to_owned()),
+                from_addr: Some("alice@x.test".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // m2: from Bob, body mentions "alice", WITH attachment
+        let m2 = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(2),
+                    subject: Some("lunch".to_owned()),
+                    from_name: Some("Bob".to_owned()),
+                    from_addr: Some("bob@x.test".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.store_body(m2, Some("tell alice the report is late"), None, None, true)
+            .unwrap();
+
+        // from:alice scopes to the sender column → only m1 (Bob's body mentions alice, but not sender)
+        let from_alice = s.search_messages(acc, "from:alice", 10).unwrap();
+        assert_eq!(from_alice.len(), 1);
+        assert_eq!(from_alice[0].uid, Some(1));
+        // subject:report → only m1
+        assert_eq!(
+            s.search_messages(acc, "subject:report", 10).unwrap().len(),
+            1
+        );
+        // bare "alice" hits both (m1 sender, m2 body)
+        assert_eq!(s.search_messages(acc, "alice", 10).unwrap().len(), 2);
+        // has:attachment filters: "report has:attachment" → only m2 (body has report + attachment)
+        let with_att = s.search_messages(acc, "report has:attachment", 10).unwrap();
+        assert_eq!(with_att.len(), 1);
+        assert_eq!(with_att[0].uid, Some(2));
+        // filter-only (no full-text terms) lists messages with attachments
+        let only_att = s.search_messages(acc, "has:attachment", 10).unwrap();
+        assert_eq!(only_att.len(), 1);
+        assert_eq!(only_att[0].uid, Some(2));
+        // an empty query returns NOTHING even though an attachment-bearing message exists (the
+        // attachment filter must be *required*, not assumed for every no-term query)
+        assert!(s.search_messages(acc, "   ", 10).unwrap().is_empty());
     }
 
     #[test]

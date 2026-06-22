@@ -575,7 +575,7 @@ slint::slint! {
                             padding-bottom: 7px;
                             spacing: 8px;
                             Field {
-                                placeholder: "Search mail…";
+                                placeholder: "Search — try from:, subject:, has:attachment";
                                 text <=> root.search-query;
                                 horizontal-stretch: 1;
                                 edited => { root.search-edited(); }
