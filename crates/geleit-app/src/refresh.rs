@@ -311,6 +311,21 @@ pub fn run_set_flag(
         .map_err(|_| "Couldn't update the star on the server.".to_owned())
 }
 
+/// Write a read-state (`\Seen`) change back to the server (SYNC-5). Blocking + network: **worker thread.**
+pub fn run_set_seen(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    folder: &str,
+    uid: u32,
+    seen: bool,
+) -> Result<(), String> {
+    let config = account_imap(db_path, secrets, account_id)?;
+    runtime()?
+        .block_on(imap::set_seen(&config, secrets, folder, uid, seen))
+        .map_err(|_| "Couldn't update read state on the server.".to_owned())
+}
+
 /// Move a message by UID from `source` to `target` on the server (ORG-1/2/3 write-back). Blocking +
 /// network: **worker thread.**
 pub fn run_move(

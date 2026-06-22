@@ -1112,7 +1112,22 @@ impl Store {
         Ok(())
     }
 
-    /// Set a message's local read state. (Writing this back to the server is M6 / SYNC-5.)
+    /// The folder name + IMAP `uid` of a message, for server write-backs (SYNC-5). `None` if the
+    /// message is gone or has no `uid` (local-only). Works regardless of the current view (e.g. when
+    /// the message was opened from a cross-folder search result).
+    pub fn message_location(&self, message_id: i64) -> Result<Option<(String, i64)>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT f.name, m.uid FROM message m JOIN folder f ON f.id = m.folder_id \
+                 WHERE m.id = ?1 AND m.uid IS NOT NULL",
+                [message_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// Set a message's local read state. Server write-back of `\Seen` is the engine's job (SYNC-5).
     pub fn set_seen(&self, message_id: i64, seen: bool) -> Result<(), StoreError> {
         self.conn.execute(
             "UPDATE message SET seen = ?2 WHERE id = ?1",
@@ -1843,6 +1858,33 @@ mod tests {
             .map(|f| f.name)
             .collect();
         assert_eq!(names, ["INBOX", "Sent"]); // "Old" pruned
+    }
+
+    #[test]
+    fn message_location_returns_folder_and_uid() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let id = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(42),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            s.message_location(id).unwrap(),
+            Some(("INBOX".to_owned(), 42))
+        );
+        // local-only message (no uid) → None
+        let local = s
+            .upsert_message(acc, inbox, &NewMessage::default())
+            .unwrap();
+        assert_eq!(s.message_location(local).unwrap(), None);
+        assert_eq!(s.message_location(9999).unwrap(), None);
     }
 
     #[test]
