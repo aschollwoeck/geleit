@@ -1,23 +1,30 @@
 # Reading your mail
 
-> Early days: GeleitMail can add an account, show and open your mail, and refresh. Writing
-> messages arrives shortly.
+This page covers signing in and reading. See also: [writing](writing-mail.md),
+[organizing](organizing-mail.md), [searching](searching-mail.md),
+[multiple accounts](accounts.md), [keyboard & appearance](shortcuts-and-appearance.md), and
+[privacy](privacy.md).
 
 ## Adding your account
 
 The first time you open GeleitMail, it asks you to add an account. Fill in:
 
 - **Email** — your address (e.g. `you@example.com`).
-- **Display name** — optional, how your name should read.
+- **Display name** — optional, how your name should read on messages you send.
 - **IMAP server** and **Port** — your provider's incoming-mail server (often `imap.<provider>`
   on port `993`). Your provider's help pages list these.
 - **Username** — usually your full email address.
 - **Password** — your mail password (some providers ask you to create an *app password* for other
   mail apps).
+- **Outgoing (SMTP) server**, **Port**, and **STARTTLS** — your provider's sending server (often
+  `smtp.<provider>` on port `465`, or `587` with STARTTLS). Used when you send.
+- **Signature** — optional; appended to messages you write.
 
 Choose **Connect**. GeleitMail signs in, downloads your inbox, and shows your mail. Your details
 stay on your own device — your password is saved securely in your system keychain, so it's
 remembered the next time you open GeleitMail.
+
+> Sign-in is manual IMAP/SMTP for now. One-click Gmail/Outlook (OAuth) is planned.
 
 > If your keychain is locked (some setups lock it until you sign in), the first Refresh may ask you
 > to re-enter your password via the same form.
@@ -53,14 +60,12 @@ When a message *did* contain remote content, you'll see a small **"Remote conten
 with a **Load remote images** button. Nothing remote loads until you choose to: click it and that
 one message is re-shown with its images fetched. (Scripts are never run, even then.)
 
-## Writing a message
+## Writing, replying, and organizing
 
-Choose **New message** on the left to open the compose window. Fill in **To** (separate several
-addresses with commas), an optional **Cc**, a **Subject**, and your message, then choose **Send**.
-GeleitMail sends it through your account's outgoing (SMTP) server — which you set up alongside your
-incoming server when you added the account. Sending happens in the background, so the app stays
-responsive; if something goes wrong you'll see a short, plain explanation and your draft stays open
-to try again.
+Choose **New message** on the left to compose, or use **Reply**, **Reply all**, and **Forward** at
+the top of an open message. See [writing your mail](writing-mail.md) for the full details (Cc,
+attachments, formatting, signatures, and drafts), and [organizing your mail](organizing-mail.md) for
+starring, archiving, moving, folders, and acting on several messages at once.
 
 ## Getting new mail
 
@@ -86,9 +91,7 @@ add the account again to re-download it.)
 Because your mail lives on your own device, you can read everything you've synced with no internet
 connection. Refresh is the only thing that needs the network; the rest keeps working offline.
 
-## Removing an account
+## More than one account
 
-To make GeleitMail forget an account on this device, choose **Remove account** at the bottom of the
-folder list and confirm. This deletes the local copy of that account's mail and its saved password
-from your system keychain. **Your mail stays safe on the server** — removing the account here only
-clears the copy on this device, and you can add the account again any time to re-download it.
+GeleitMail can hold several accounts at once — see [accounts](accounts.md) for adding more, switching
+between them, and removing one.
