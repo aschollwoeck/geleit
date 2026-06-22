@@ -1262,6 +1262,53 @@ impl Store {
         }
     }
 
+    /// Like [`search_messages`] but across **all** accounts (SEARCH-5). Returns `(header, account_id)`
+    /// so the caller knows which account each hit belongs to (to switch context when opening it).
+    pub fn search_all_accounts(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<(MessageHeader, i64)>, StoreError> {
+        let parsed = parse_search(query);
+        match parsed.match_query {
+            Some(match_query) => {
+                let mut sql = String::from(
+                    "SELECT m.id, m.uid, m.message_id, m.in_reply_to, m.subject, m.from_name, \
+                     m.from_addr, m.date, m.seen, m.has_attachments, m.snippet, m.flagged, \
+                     snippet(message_fts, -1, '', '', '…', 10), m.account_id \
+                     FROM message_fts JOIN message m ON m.id = message_fts.rowid \
+                     WHERE message_fts MATCH ?1",
+                );
+                if parsed.require_attachment {
+                    sql.push_str(" AND m.has_attachments = 1");
+                }
+                sql.push_str(" ORDER BY rank LIMIT ?2");
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map((match_query, limit), |r| {
+                    let mut h = header_from_row(r)?;
+                    let snip: String = r.get(12)?;
+                    if !snip.is_empty() {
+                        h.snippet = Some(snip);
+                    }
+                    Ok((h, r.get::<_, i64>(13)?))
+                })?;
+                Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            }
+            None if parsed.require_attachment => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT m.id, m.uid, m.message_id, m.in_reply_to, m.subject, m.from_name, \
+                     m.from_addr, m.date, m.seen, m.has_attachments, m.snippet, m.flagged, \
+                     m.account_id FROM message m \
+                     WHERE m.has_attachments = 1 ORDER BY m.date DESC, m.id DESC LIMIT ?1",
+                )?;
+                let rows =
+                    stmt.query_map([limit], |r| Ok((header_from_row(r)?, r.get::<_, i64>(12)?)))?;
+                Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Remove a single message locally (optimistic archive/trash/move; body + attachments cascade).
     /// The server change is the engine's job; on failure a re-sync restores the row.
     pub fn delete_message(&self, message_id: i64) -> Result<(), StoreError> {
@@ -1684,6 +1731,69 @@ mod tests {
         assert!(s.search_messages(acc, "  ", 10).unwrap().is_empty());
         s.delete_message(id).unwrap();
         assert!(s.search_messages(acc, "invoice", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_all_accounts_spans_accounts_with_ids() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.add_account("a@example.com", None).unwrap();
+        let b = s.add_account("b@example.com", None).unwrap();
+        let ia = s.upsert_folder(a, "INBOX").unwrap();
+        let ib = s.upsert_folder(b, "INBOX").unwrap();
+        let ma = s
+            .upsert_message(
+                a,
+                ia,
+                &NewMessage {
+                    uid: Some(1),
+                    subject: Some("shared keyword alpha".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // a's message gets a body word + an attachment; b's does not
+        s.store_body(ma, Some("the rendezvous point is set"), None, None, true)
+            .unwrap();
+        s.upsert_message(
+            b,
+            ib,
+            &NewMessage {
+                uid: Some(1),
+                subject: Some("shared keyword beta".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // per-account search sees only its own; all-accounts sees both, tagged with the account id
+        assert_eq!(s.search_messages(a, "shared", 10).unwrap().len(), 1);
+        let all = s.search_all_accounts("shared", 10).unwrap();
+        assert_eq!(all.len(), 2);
+        let mut accts: Vec<i64> = all.iter().map(|(_, acc)| *acc).collect();
+        accts.sort_unstable();
+        assert_eq!(accts, vec![a, b]);
+        // a body match is found across accounts AND its snippet shows the match context (kills the
+        // `if !snip.is_empty()` mutant)
+        let body_hit = s.search_all_accounts("rendezvous", 10).unwrap();
+        assert_eq!(body_hit.len(), 1);
+        assert_eq!(body_hit[0].1, a);
+        assert!(body_hit[0]
+            .0
+            .snippet
+            .as_deref()
+            .unwrap_or_default()
+            .contains("rendezvous"));
+        // has:attachment across accounts → only a (FTS+filter, and filter-only) — kills guard→false
+        assert_eq!(
+            s.search_all_accounts("shared has:attachment", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        let only_att = s.search_all_accounts("has:attachment", 10).unwrap();
+        assert_eq!(only_att.len(), 1);
+        assert_eq!(only_att[0].1, a);
+        // empty query → nothing even though an attachment-bearing message exists — kills guard→true
+        assert!(s.search_all_accounts("  ", 10).unwrap().is_empty());
     }
 
     #[test]
