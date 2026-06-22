@@ -9,3 +9,8 @@
 - [x] docs/manual/README.md index; rewrite top-level README.md
 - [x] verified accuracy vs UI; CI green
 - [ ] PR merged
+
+## Follow-up: screenshots
+- [x] examples/seed_demo.rs — seed a demo encrypted DB (reads existing keychain key, never overwrites)
+- [x] captured setup / inbox-light / inbox-dark via headless launch + wmctrl + gnome-screenshot
+- [x] embedded in reading-mail.md + shortcuts-and-appearance.md; gates green (example clippy-clean)
