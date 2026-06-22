@@ -128,7 +128,37 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX draft_account_updated ON draft(account_id, updated_at DESC);
     ",
+    // 10 — full-text search index (SEARCH-1/2/3). An FTS5 table keyed by message id (rowid) over
+    // subject / sender / body. It lives INSIDE the SQLCipher database, so the index is encrypted at
+    // rest like everything else (ADR-0010 — chosen over an external engine like tantivy, whose files
+    // would be plaintext on disk). Rows are filled by `index_message`; the trigger removes them when
+    // a message is deleted — including FK cascades from folder/account deletes, which fire it too.
+    "
+    CREATE VIRTUAL TABLE message_fts USING fts5(
+        subject, sender, body,
+        tokenize = 'unicode61 remove_diacritics 2'
+    );
+    CREATE TRIGGER message_fts_ad AFTER DELETE ON message BEGIN
+        DELETE FROM message_fts WHERE rowid = old.id;
+    END;
+    ",
 ];
+
+/// Build a safe FTS5 `MATCH` query from free user input. Each whitespace-separated token that
+/// contains a letter or digit becomes a **quoted phrase** (so punctuation can't inject FTS5
+/// operators like `*`, `OR`, `NEAR`, or unbalanced quotes), and the final token gets a trailing `*`
+/// for prefix matching (type-ahead). Returns `None` when there's nothing searchable.
+pub fn fts_query(input: &str) -> Option<String> {
+    let tokens: Vec<String> = input
+        .split_whitespace()
+        .filter(|t| t.chars().any(char::is_alphanumeric))
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    Some(format!("{}*", tokens.join(" ")))
+}
 
 /// An account row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,7 +333,21 @@ impl Store {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         let mut store = Self { conn };
         store.migrate()?;
+        store.backfill_search_index()?;
         Ok(store)
+    }
+
+    /// One-time build of the FTS index for messages that predate migration #10 (SEARCH backfill).
+    /// Runs only when the index is empty; once messages are indexed it's skipped on later opens.
+    /// (No separate message-count guard: reindexing zero messages is a harmless no-op.)
+    fn backfill_search_index(&self) -> Result<(), StoreError> {
+        let indexed: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM message_fts", [], |r| r.get(0))?;
+        if indexed == 0 {
+            self.reindex_all()?;
+        }
+        Ok(())
     }
 
     /// Apply any migrations newer than the database's current `user_version`, each in its own
@@ -687,16 +731,18 @@ impl Store {
                 &m.snippet,
             ),
         )?;
-        match m.uid {
+        let id = match m.uid {
             // On conflict the row is UPDATEd (not inserted), so look the id up by its unique key.
-            Some(uid) => Ok(self.conn.query_row(
+            Some(uid) => self.conn.query_row(
                 "SELECT id FROM message WHERE account_id = ?1 AND folder_id = ?2 AND uid = ?3",
                 (account_id, folder_id, uid),
                 |r| r.get(0),
-            )?),
+            )?,
             // A NULL uid never conflicts, so the row was just inserted.
-            None => Ok(self.conn.last_insert_rowid()),
-        }
+            None => self.conn.last_insert_rowid(),
+        };
+        self.index_message(id)?; // keep the search index in step (body is added later via store_body)
+        Ok(id)
     }
 
     /// Message headers for a folder, newest first (by date), up to `limit`.
@@ -827,6 +873,7 @@ impl Store {
             (message_id, snippet, has_attachments),
         )?;
         tx.commit()?;
+        self.index_message(message_id)?; // re-index now that the body text is available
         Ok(())
     }
 
@@ -923,6 +970,101 @@ impl Store {
             })
             .optional()?
             .flatten())
+    }
+
+    /// (Re)build the FTS row for one message from its subject / sender / plain body (SEARCH-1).
+    /// Called after an envelope upsert and again after the body arrives. Safe to call repeatedly;
+    /// a missing message is a no-op. (Deletion is handled by the `message_fts_ad` trigger.)
+    pub fn index_message(&self, message_id: i64) -> Result<(), StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT m.subject, m.from_name, m.from_addr, b.plain \
+                 FROM message m LEFT JOIN body b ON b.message_id = m.id WHERE m.id = ?1",
+                [message_id],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((subject, from_name, from_addr, plain)) = row else {
+            return Ok(());
+        };
+        let sender = match (from_name, from_addr) {
+            (Some(n), Some(a)) => format!("{n} {a}"),
+            (Some(s), None) | (None, Some(s)) => s,
+            (None, None) => String::new(),
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM message_fts WHERE rowid = ?1", [message_id])?;
+        tx.execute(
+            "INSERT INTO message_fts (rowid, subject, sender, body) VALUES (?1, ?2, ?3, ?4)",
+            (
+                message_id,
+                subject.unwrap_or_default(),
+                sender,
+                plain.unwrap_or_default(),
+            ),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Rebuild the whole FTS index from the message table; returns how many were indexed.
+    pub fn reindex_all(&self) -> Result<usize, StoreError> {
+        let ids: Vec<i64> = {
+            let mut stmt = self.conn.prepare("SELECT id FROM message")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for id in &ids {
+            self.index_message(*id)?;
+        }
+        Ok(ids.len())
+    }
+
+    /// Full-text search this account's messages (SEARCH-1/2/3), best matches first. Returns header
+    /// rows (no `to_addrs`/`cc_addrs` — the listing doesn't need them), newest-relevance order.
+    pub fn search_messages(
+        &self,
+        account_id: i64,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<MessageHeader>, StoreError> {
+        let Some(match_query) = fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, m.uid, m.message_id, m.in_reply_to, m.subject, m.from_name, m.from_addr, \
+             m.date, m.seen, m.has_attachments, m.snippet, m.flagged \
+             FROM message_fts f JOIN message m ON m.id = f.rowid \
+             WHERE f.message_fts MATCH ?1 AND m.account_id = ?2 \
+             ORDER BY rank LIMIT ?3",
+        )?;
+        let rows = stmt.query_map((match_query, account_id, limit), |r| {
+            Ok(MessageHeader {
+                id: r.get(0)?,
+                uid: r.get(1)?,
+                message_id: r.get(2)?,
+                in_reply_to: r.get(3)?,
+                subject: r.get(4)?,
+                from_name: r.get(5)?,
+                from_addr: r.get(6)?,
+                to_addrs: None,
+                cc_addrs: None,
+                date: r.get(7)?,
+                seen: r.get(8)?,
+                has_attachments: r.get(9)?,
+                snippet: r.get(10)?,
+                flagged: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Remove a single message locally (optimistic archive/trash/move; body + attachments cascade).
@@ -1223,6 +1365,122 @@ mod tests {
         );
         s.update_signature(acc, "").unwrap(); // empty clears it
         assert_eq!(s.signature(acc).unwrap(), None);
+    }
+
+    #[test]
+    fn fts_query_quotes_tokens_and_prefixes_last() {
+        use super::fts_query;
+        assert_eq!(fts_query(""), None);
+        assert_eq!(fts_query("   "), None);
+        assert_eq!(fts_query("!!! ??"), None); // no alphanumerics
+        assert_eq!(fts_query("hello").as_deref(), Some("\"hello\"*"));
+        assert_eq!(fts_query("foo bar").as_deref(), Some("\"foo\" \"bar\"*"));
+        // an embedded quote is doubled, so it can't break out of the phrase
+        assert_eq!(fts_query("a\"b").as_deref(), Some("\"a\"\"b\"*"));
+    }
+
+    #[test]
+    fn search_indexes_subject_sender_body_and_unindexes_on_delete() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("me@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let id = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(1),
+                    subject: Some("Quarterly invoice".to_owned()),
+                    from_name: Some("Alice Baker".to_owned()),
+                    from_addr: Some("alice@vendor.test".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // subject + sender are searchable right after the envelope upsert
+        assert_eq!(s.search_messages(acc, "invoice", 10).unwrap().len(), 1);
+        assert_eq!(s.search_messages(acc, "alice", 10).unwrap()[0].id, id);
+        assert_eq!(s.search_messages(acc, "baker", 10).unwrap().len(), 1);
+        // body is searchable once stored
+        assert!(s.search_messages(acc, "umbrella", 10).unwrap().is_empty());
+        s.store_body(
+            id,
+            Some("please find the umbrella attached"),
+            None,
+            Some("…"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(s.search_messages(acc, "umbrella", 10).unwrap().len(), 1);
+        // prefix (type-ahead) matches; another account doesn't
+        assert_eq!(s.search_messages(acc, "umbr", 10).unwrap().len(), 1);
+        let other = s.add_account("other@example.com", None).unwrap();
+        assert!(s.search_messages(other, "invoice", 10).unwrap().is_empty());
+        // empty query → no rows; deleting drops it from the index (via trigger)
+        assert!(s.search_messages(acc, "  ", 10).unwrap().is_empty());
+        s.delete_message(id).unwrap();
+        assert!(s.search_messages(acc, "invoice", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn backfill_builds_index_on_open_when_empty_but_messages_exist() {
+        let path = std::env::temp_dir().join(format!("geleit-backfill-{}.db", std::process::id()));
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+        {
+            let s = Store::open(path).unwrap();
+            let acc = s.add_account("me@example.com", None).unwrap();
+            let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+            s.upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(1),
+                    subject: Some("backfillme".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            // simulate data that predates migration #10: an empty index over existing messages
+            s.conn.execute_batch("DELETE FROM message_fts").unwrap();
+            assert!(s.search_messages(acc, "backfillme", 10).unwrap().is_empty());
+        }
+        // reopening runs init → backfill_search_index, which rebuilds the index
+        {
+            let s = Store::open(path).unwrap();
+            let acc = s.list_accounts().unwrap()[0].id;
+            assert_eq!(s.search_messages(acc, "backfillme", 10).unwrap().len(), 1);
+            // a second open must NOT wipe/rebuild needlessly — index already populated, still works
+            drop(s);
+            let s = Store::open(path).unwrap();
+            assert_eq!(s.search_messages(acc, "backfillme", 10).unwrap().len(), 1);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reindex_all_rebuilds_after_direct_insert() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("me@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        s.upsert_message(
+            acc,
+            inbox,
+            &NewMessage {
+                uid: Some(7),
+                subject: Some("Reindexable".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // wipe the index, then rebuild it
+        s.conn.execute_batch("DELETE FROM message_fts").unwrap();
+        assert!(s
+            .search_messages(acc, "reindexable", 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(s.reindex_all().unwrap(), 1);
+        assert_eq!(s.search_messages(acc, "reindexable", 10).unwrap().len(), 1);
     }
 
     #[test]
