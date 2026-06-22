@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=GeleitMail
+GenericName=Email Client
+Comment=Native, local-first, privacy-first email — no middleman, no telemetry, no tracking
+Exec=geleit-app
+Icon=geleit
+Terminal=false
+Categories=Network;Email;Office;
+Keywords=email;mail;imap;smtp;
