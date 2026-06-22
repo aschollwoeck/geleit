@@ -136,6 +136,11 @@ slint::slint! {
         selected: bool, // multi-select for bulk actions (ORG-7)
     }
 
+    struct AccountItem {
+        id: int,
+        email: string,
+    }
+
     struct DraftItem {
         id: int,
         subject: string,
@@ -182,6 +187,8 @@ slint::slint! {
 
     export component Main inherits Window {
         in property <string> account;
+        in property <[AccountItem]> accounts; // all accounts, for the switcher (MULTI-1)
+        in property <int> current-account; // id of the account in view
         in property <[string]> folders;
         in property <int> selected-folder;
         in property <[MessageItem]> messages;
@@ -226,6 +233,7 @@ slint::slint! {
         in property <bool> viewing-drafts;
         // add-account form
         in property <bool> needs-setup;
+        in property <bool> adding-account; // showing the form to add ANOTHER account (MULTI-1)
         in-out property <string> f-email;
         in-out property <string> f-name;
         in-out property <string> f-host;
@@ -266,6 +274,9 @@ slint::slint! {
         callback connect();
         callback reload();
         callback remove-account();
+        callback switch-account(int);
+        callback add-account();
+        callback cancel-add-account();
         callback load-remote();
         callback compose();
         callback send-message();
@@ -290,7 +301,7 @@ slint::slint! {
         default-font-size: 15px;
 
         // ---- MAIN VIEW (an account exists) ----
-        if !root.needs-setup: HorizontalLayout {
+        if !root.needs-setup && !root.adding-account: HorizontalLayout {
             // ---- LEFT RAIL ----
             Rectangle {
                 width: 240px;
@@ -305,11 +316,40 @@ slint::slint! {
                             height: 30px;
                             border-radius: 15px;
                             background: Palette.accent;
-                            Text { text: "A"; color: white; font-weight: 600; }
+                            Text { text: "✉"; color: white; font-weight: 600; }
                         }
                         Text {
                             text: root.account;
                             color: Palette.text;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    // account switcher (MULTI-1): other accounts to switch to + add another
+                    for a in root.accounts: Rectangle {
+                        height: a.id != root.current-account ? 28px : 0px;
+                        visible: a.id != root.current-account;
+                        border-radius: 6px;
+                        background: sw.has-hover ? Palette.accent-quiet : transparent;
+                        sw := TouchArea { clicked => { root.switch-account(a.id); } }
+                        Text {
+                            text: a.email;
+                            x: 40px;
+                            color: Palette.muted;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    Rectangle {
+                        height: 28px;
+                        TouchArea { clicked => { root.add-account(); } }
+                        Text {
+                            text: "+ Add account";
+                            x: 40px;
+                            color: Palette.accent-strong;
+                            font-size: 12px;
                             font-weight: 600;
                             vertical-alignment: center;
                         }
@@ -891,7 +931,7 @@ slint::slint! {
         }
 
         // ---- ADD-ACCOUNT FORM (no account yet, or reconnect) ----
-        if root.needs-setup: Rectangle {
+        if root.needs-setup || root.adding-account: Rectangle {
             background: Palette.bg;
             VerticalLayout {
                 alignment: center;
@@ -905,11 +945,22 @@ slint::slint! {
                         VerticalLayout {
                             padding: 28px;
                             spacing: 10px;
-                            Text {
-                                text: "Add your account";
-                                color: Palette.text;
-                                font-size: 20px;
-                                font-weight: 600;
+                            HorizontalLayout {
+                                Text {
+                                    text: root.adding-account ? "Add another account" : "Add your account";
+                                    color: Palette.text;
+                                    font-size: 20px;
+                                    font-weight: 600;
+                                    horizontal-stretch: 1;
+                                }
+                                if root.adding-account: Text {
+                                    text: "Cancel";
+                                    color: Palette.accent-strong;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    TouchArea { clicked => { root.cancel-add-account(); } }
+                                }
                             }
                             Text {
                                 text: "Connect over IMAP. Your details stay on this device.";
@@ -1593,6 +1644,7 @@ fn bulk_move(
     view: &HtmlView,
     db_path: &str,
     secrets: &Arc<OsSecretStore>,
+    account_id: i64,
     selected: &Rc<RefCell<HashSet<i32>>>,
     target: &str,
 ) {
@@ -1627,7 +1679,9 @@ fn bulk_move(
         let mut any_err = false;
         for uid in uids {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                refresh::run_move(&db_path, &*secrets, &source, uid as u32, &target)
+                refresh::run_move(
+                    &db_path, &*secrets, account_id, &source, uid as u32, &target,
+                )
             }))
             .unwrap_or(Err(String::new()));
             any_err |= r.is_err();
@@ -1654,6 +1708,7 @@ fn bulk_star(
     folders: &VecModel<SharedString>,
     db_path: &str,
     secrets: &Arc<OsSecretStore>,
+    account_id: i64,
     selected: &Rc<RefCell<HashSet<i32>>>,
 ) {
     let source = folders
@@ -1678,7 +1733,7 @@ fn bulk_star(
     std::thread::spawn(move || {
         for uid in uids {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                refresh::run_set_flag(&db_path, &*secrets, &source, uid as u32, true)
+                refresh::run_set_flag(&db_path, &*secrets, account_id, &source, uid as u32, true)
             }));
         }
     });
@@ -1736,6 +1791,7 @@ fn perform_move(
     view: &HtmlView,
     db_path: &str,
     secrets: &Arc<OsSecretStore>,
+    account_id: i64,
     id: i32,
     target: &str,
 ) {
@@ -1763,7 +1819,9 @@ fn perform_move(
     let target = target.to_owned();
     std::thread::spawn(move || {
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            refresh::run_move(&db_path, &*secrets, &source, uid as u32, &target)
+            refresh::run_move(
+                &db_path, &*secrets, account_id, &source, uid as u32, &target,
+            )
         }))
         .unwrap_or_else(|_| Err("Couldn't move the message.".to_owned()));
         if let Err(_msg) = res {
@@ -1787,18 +1845,33 @@ fn reload_all(
     folders_model: &VecModel<SharedString>,
     folder_ids: &RefCell<Vec<i64>>,
     messages: &VecModel<MessageItem>,
+    accounts_model: &VecModel<AccountItem>,
 ) {
     ui.set_status(SharedString::new()); // clear any stale main-view banner
     ui.set_sync_status(SharedString::new());
     ui.set_remote_blocked(false);
-    match store
-        .list_accounts()
-        .ok()
-        .and_then(|a| a.into_iter().next())
-    {
+    let accounts = store.list_accounts().unwrap_or_default();
+    accounts_model.set_vec(
+        accounts
+            .iter()
+            .map(|a| AccountItem {
+                id: a.id as i32,
+                email: a.email.as_str().into(),
+            })
+            .collect::<Vec<_>>(),
+    );
+    // The account in view (the `current-account` prop is the source of truth): keep it if it still
+    // exists, else fall back to the first.
+    let desired = ui.get_current_account() as i64;
+    let target = accounts
+        .iter()
+        .find(|a| a.id == desired)
+        .or_else(|| accounts.first());
+    match target {
         Some(acc) => {
             ui.set_needs_setup(false);
-            ui.set_account(acc.email.into());
+            ui.set_account(acc.email.as_str().into());
+            ui.set_current_account(acc.id as i32);
             let folders = store.folders_for_account(acc.id).unwrap_or_default();
             folders_model.set_vec(
                 folders
@@ -1815,6 +1888,7 @@ fn reload_all(
         None => {
             ui.set_needs_setup(true);
             ui.set_account(SharedString::new());
+            ui.set_current_account(-1);
             folders_model.set_vec(Vec::new());
             folder_ids.borrow_mut().clear();
             messages.set_vec(Vec::new());
@@ -1882,6 +1956,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_manage_folders(ModelRc::from(manage_folders_model.clone()));
     // multi-selected message ids for bulk actions (ORG-7)
     let selected_ids = Rc::new(RefCell::new(HashSet::<i32>::new()));
+    // the account currently in view (MULTI-1) is the UI `current-account` prop (source of truth)
+    let accounts_model = Rc::new(VecModel::<AccountItem>::default());
+    ui.set_accounts(ModelRc::from(accounts_model.clone()));
     ui.set_folders(ModelRc::from(folders_model.clone()));
     ui.set_messages(ModelRc::from(messages.clone()));
 
@@ -1921,10 +1998,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let fm = folders_model.clone();
         let fids = folder_ids.clone();
         let msgs = messages.clone();
+        let accts = accounts_model.clone();
         let view = html_view.clone();
         ui.on_reload(move || {
             if let Some(ui) = weak.upgrade() {
-                reload_all(&ui, &store, &fm, &fids, &msgs);
+                reload_all(&ui, &store, &fm, &fids, &msgs, &accts);
                 hide_html(&view); // nothing selected → show the Slint pane / form
             }
         });
@@ -2062,9 +2140,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let weak = weak.clone();
             let db_path = db_path.clone();
             let secrets = secrets.clone();
+            let acct = ui.get_current_account() as i64;
             std::thread::spawn(move || {
                 let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    refresh::run_set_flag(&db_path, &*secrets, &folder, uid as u32, new_flag)
+                    refresh::run_set_flag(&db_path, &*secrets, acct, &folder, uid as u32, new_flag)
                 }))
                 .unwrap_or_else(|_| Err("Couldn't update the star.".to_owned()));
                 if let Err(msg) = res {
@@ -2094,7 +2173,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let names = folder_names(&fm);
             match viewmodel::find_folder(&names, &["archive"]) {
                 Some(target) => perform_move(
-                    &ui, &store, &messages, &fm, &view, &db_path, &secrets, id, target,
+                    &ui,
+                    &store,
+                    &messages,
+                    &fm,
+                    &view,
+                    &db_path,
+                    &secrets,
+                    ui.get_current_account() as i64,
+                    id,
+                    target,
                 ),
                 None => ui.set_status("This account has no Archive folder.".into()),
             }
@@ -2131,10 +2219,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let weak = weak.clone();
                     let db_path = db_path.clone();
                     let secrets = secrets.clone();
+                    let acct = ui.get_current_account() as i64;
                     std::thread::spawn(move || {
                         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             refresh::run_delete_permanently(
-                                &db_path, &*secrets, &folder, uid as u32,
+                                &db_path, &*secrets, acct, &folder, uid as u32,
                             )
                         }))
                         .unwrap_or_else(|_| Err("Couldn't delete the message.".to_owned()));
@@ -2153,7 +2242,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let names = folder_names(&fm);
             match viewmodel::find_folder(&names, &["trash", "deleted", "bin"]) {
                 Some(target) => perform_move(
-                    &ui, &store, &messages, &fm, &view, &db_path, &secrets, id, target,
+                    &ui,
+                    &store,
+                    &messages,
+                    &fm,
+                    &view,
+                    &db_path,
+                    &secrets,
+                    ui.get_current_account() as i64,
+                    id,
+                    target,
                 ),
                 None => ui.set_status("This account has no Trash folder.".into()),
             }
@@ -2183,9 +2281,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let weak = weak.clone();
             let db_path = db_path.clone();
             let secrets = secrets.clone();
+            let acct = ui.get_current_account() as i64;
             std::thread::spawn(move || {
                 let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    refresh::run_empty_folder(&db_path, &*secrets, &folder)
+                    refresh::run_empty_folder(&db_path, &*secrets, acct, &folder)
                 }))
                 .unwrap_or_else(|_| Err("Couldn't empty the Trash on the server.".to_owned()));
                 if let Err(msg) = res {
@@ -2216,14 +2315,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Not spam → back to Inbox
                 match viewmodel::find_folder(&names, &["inbox"]) {
                     Some(target) => perform_move(
-                        &ui, &store, &messages, &fm, &view, &db_path, &secrets, id, target,
+                        &ui,
+                        &store,
+                        &messages,
+                        &fm,
+                        &view,
+                        &db_path,
+                        &secrets,
+                        ui.get_current_account() as i64,
+                        id,
+                        target,
                     ),
                     None => ui.set_status("No Inbox folder found.".into()),
                 }
             } else {
                 match viewmodel::find_folder(&names, &["junk", "spam"]) {
                     Some(target) => perform_move(
-                        &ui, &store, &messages, &fm, &view, &db_path, &secrets, id, target,
+                        &ui,
+                        &store,
+                        &messages,
+                        &fm,
+                        &view,
+                        &db_path,
+                        &secrets,
+                        ui.get_current_account() as i64,
+                        id,
+                        target,
                     ),
                     None => ui.set_status("This account has no Junk folder.".into()),
                 }
@@ -2267,7 +2384,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_picking_folder(false);
             if let Some(id) = pending.borrow_mut().take() {
                 perform_move(
-                    &ui, &store, &messages, &fm, &view, &db_path, &secrets, id, &target,
+                    &ui,
+                    &store,
+                    &messages,
+                    &fm,
+                    &view,
+                    &db_path,
+                    &secrets,
+                    ui.get_current_account() as i64,
+                    id,
+                    &target,
                 );
             }
         });
@@ -2314,8 +2440,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
             let (db_path, secrets) = (db_path.clone(), secrets.clone());
+            let acct = ui.get_current_account() as i64;
             spawn_folder_op(weak.clone(), move || {
-                refresh::run_create_folder(&db_path, &*secrets, &name)
+                refresh::run_create_folder(&db_path, &*secrets, acct, &name)
             });
         });
     }
@@ -2331,8 +2458,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
             let (db_path, secrets, from) = (db_path.clone(), secrets.clone(), from.to_string());
+            let acct = ui.get_current_account() as i64;
             spawn_folder_op(weak.clone(), move || {
-                refresh::run_rename_folder(&db_path, &*secrets, &from, &to)
+                refresh::run_rename_folder(&db_path, &*secrets, acct, &from, &to)
             });
         });
     }
@@ -2341,10 +2469,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let db_path = db.clone();
         let secrets = secrets.clone();
         ui.on_delete_folder(move |name| {
-            let Some(_ui) = weak.upgrade() else { return };
+            let Some(ui) = weak.upgrade() else { return };
             let (db_path, secrets, name) = (db_path.clone(), secrets.clone(), name.to_string());
+            let acct = ui.get_current_account() as i64;
             spawn_folder_op(weak.clone(), move || {
-                refresh::run_delete_folder(&db_path, &*secrets, &name)
+                refresh::run_delete_folder(&db_path, &*secrets, acct, &name)
             });
         });
     }
@@ -2395,7 +2524,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(ui) = weak.upgrade() else { return };
             match viewmodel::find_folder(&folder_names(&fm), &["archive"]).map(str::to_owned) {
                 Some(target) => bulk_move(
-                    &ui, &store, &messages, &fm, &view, &db_path, &secrets, &selected, &target,
+                    &ui,
+                    &store,
+                    &messages,
+                    &fm,
+                    &view,
+                    &db_path,
+                    &secrets,
+                    ui.get_current_account() as i64,
+                    &selected,
+                    &target,
                 ),
                 None => ui.set_status("This account has no Archive folder.".into()),
             }
@@ -2416,7 +2554,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(str::to_owned)
             {
                 Some(target) => bulk_move(
-                    &ui, &store, &messages, &fm, &view, &db_path, &secrets, &selected, &target,
+                    &ui,
+                    &store,
+                    &messages,
+                    &fm,
+                    &view,
+                    &db_path,
+                    &secrets,
+                    ui.get_current_account() as i64,
+                    &selected,
+                    &target,
                 ),
                 None => ui.set_status("This account has no Trash folder.".into()),
             }
@@ -2432,7 +2579,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let selected = selected_ids.clone();
         ui.on_bulk_star(move || {
             let Some(ui) = weak.upgrade() else { return };
-            bulk_star(&ui, &store, &messages, &fm, &db_path, &secrets, &selected);
+            bulk_star(
+                &ui,
+                &store,
+                &messages,
+                &fm,
+                &db_path,
+                &secrets,
+                ui.get_current_account() as i64,
+                &selected,
+            );
         });
     }
 
@@ -2648,11 +2804,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let weak = weak.clone();
             let db_path = db_path.clone();
             let secrets = secrets.clone();
+            let acct = ui.get_current_account() as i64;
             std::thread::spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     refresh::run_send(
                         &db_path,
                         &*secrets,
+                        acct,
                         &to,
                         &cc,
                         &subject,
@@ -2929,11 +3087,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let weak = weak.clone();
             let db_path = db_path.clone();
             let secrets = secrets.clone();
+            let acct = ui.get_current_account() as i64;
             std::thread::spawn(move || {
                 // Nothing !Send crosses: only `weak` + plain data + the Arc secrets (Send+Sync).
                 // Phase 1: incremental sync (recent window) — fast.
                 let sync = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    refresh::run_refresh(&db_path, &*secrets, &folder)
+                    refresh::run_refresh(&db_path, &*secrets, acct, &folder)
                 }))
                 .unwrap_or_else(|_| Err("Couldn't refresh — something went wrong.".to_owned()));
                 if let Err(msg) = sync {
@@ -2961,7 +3120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                 };
                 let backfill = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    refresh::run_backfill(&db_path, &*secrets, &folder, 200, &mut on_batch)
+                    refresh::run_backfill(&db_path, &*secrets, acct, &folder, 200, &mut on_batch)
                 }));
                 // On failure, keep a *calm* note (not the danger banner) — recent mail is already
                 // shown and backfill resumes next refresh.
@@ -3050,9 +3209,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let Some(ui) = weak.upgrade() else { return };
                     ui.set_setup_busy(false);
                     match result {
-                        Ok(()) => {
+                        Ok(account_id) => {
                             ui.set_f_pass(SharedString::new());
                             ui.set_setup_error(SharedString::new());
+                            ui.set_adding_account(false);
+                            ui.set_current_account(account_id as i32); // view the new/updated account
                             ui.invoke_reload(); // show the mail
                         }
                         Err(msg) => ui.set_setup_error(msg.into()),
@@ -3068,20 +3229,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let db_path = db.clone();
         let secrets = secrets.clone();
         ui.on_remove_account(move || {
+            let Some(ui0) = weak.upgrade() else { return };
+            let acct = ui0.get_current_account() as i64;
             let weak = weak.clone();
             let db_path = db_path.clone();
             let secrets = secrets.clone();
             std::thread::spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    refresh::run_remove_account(&db_path, &*secrets)
+                    refresh::run_remove_account(&db_path, &*secrets, acct)
                 }))
                 .unwrap_or_else(|_| Err("Couldn't remove the account.".to_owned()));
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
                     match result {
                         Ok(password_cleared) => {
-                            ui.invoke_reload(); // no account → Add-account form
-                                                // surface on the form (the main-view `status` banner is now hidden)
+                            // fall back to another account (reload picks the first if current is gone)
+                            ui.set_current_account(-1);
+                            ui.invoke_reload();
+                            // surface on the form (the main-view `status` banner is now hidden)
                             ui.set_setup_error(if password_cleared {
                                 SharedString::new()
                             } else {
@@ -3094,6 +3259,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 });
             });
+        });
+    }
+
+    // Switch the account in view (MULTI-1): show its mail, then sync it.
+    {
+        let weak = ui.as_weak();
+        ui.on_switch_account(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_current_account(id);
+            ui.invoke_reload();
+            ui.invoke_refresh(); // pull fresh mail for the newly-selected account
+        });
+    }
+    // "+ Add account": show a blank setup form without dropping the current account.
+    {
+        let weak = ui.as_weak();
+        ui.on_add_account(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            for set in [
+                Main::set_f_email,
+                Main::set_f_host,
+                Main::set_f_port,
+                Main::set_f_user,
+                Main::set_f_pass,
+                Main::set_f_name,
+                Main::set_f_smtp_host,
+                Main::set_f_smtp_port,
+                Main::set_f_signature,
+                Main::set_setup_error,
+            ] {
+                set(&ui, SharedString::new());
+            }
+            ui.set_adding_account(true);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_cancel_add_account(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_adding_account(false);
+            }
         });
     }
 

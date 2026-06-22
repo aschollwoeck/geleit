@@ -129,8 +129,12 @@ pub fn open_store(db_path: &str, secrets: &dyn SecretStore) -> Result<Store, Str
 }
 
 /// Add (or reconnect) an account: persist its settings, store the password in the shared secrets,
-/// and do the first sync of the inbox. Blocking + network: **run on a worker thread.** A *newly*
-/// created account is rolled back if the first connection fails, so a bad attempt leaves no trace.
+/// and do the first sync of the inbox. Returns the account's id (so the caller can switch to it).
+/// Blocking + network: **run on a worker thread.** A *newly* created account is rolled back if the
+/// first connection fails, so a bad attempt leaves no trace.
+///
+/// Keyed by **email**: re-running with an existing email reconfigures that account; a new email adds
+/// a new account (ACC-5, multi-account).
 #[allow(clippy::too_many_arguments)]
 pub fn run_setup(
     db_path: &str,
@@ -141,15 +145,11 @@ pub fn run_setup(
     smtp: SmtpConfig,
     signature: &str,
     password: &str,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     let store = open_store(db_path, secrets)?;
-    // Single-account for now (M1): if an account already exists this is a reconnect/reconfigure —
-    // update it rather than risk creating a hidden second account when the email field is edited.
     let existing = store
-        .list_accounts()
-        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
-        .into_iter()
-        .next();
+        .account_by_email(email.trim())
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?;
     let (account_id, is_new) = match existing {
         Some(a) => {
             store
@@ -197,7 +197,7 @@ pub fn run_setup(
         // engine error discarded (that discard is the P2 safeguard); calm, actionable message (§10)
         return Err("Couldn't connect — check your details and try again.".to_owned());
     }
-    Ok(())
+    Ok(account_id)
 }
 
 /// Split a comma/semicolon-separated address field into trimmed, non-empty addresses. Pure.
@@ -216,6 +216,7 @@ fn parse_addrs(field: &str) -> Vec<String> {
 pub fn run_send(
     db_path: &str,
     secrets: &dyn SecretStore,
+    account_id: i64,
     to: &str,
     cc: &str,
     subject: &str,
@@ -228,10 +229,8 @@ pub fn run_send(
 ) -> Result<(), String> {
     let store = open_store(db_path, secrets)?;
     let account = store
-        .list_accounts()
+        .account_by_id(account_id)
         .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
-        .into_iter()
-        .next()
         .ok_or_else(|| "No account is set up yet.".to_owned())?;
     let imap = store
         .imap_settings(account.id)
@@ -301,23 +300,12 @@ pub fn run_send(
 pub fn run_set_flag(
     db_path: &str,
     secrets: &dyn SecretStore,
+    account_id: i64,
     folder: &str,
     uid: u32,
     flagged: bool,
 ) -> Result<(), String> {
-    let store = open_store(db_path, secrets)?;
-    let account = store
-        .list_accounts()
-        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No account is set up yet.".to_owned())?;
-    let imap = store
-        .imap_settings(account.id)
-        .ok()
-        .flatten()
-        .ok_or_else(|| "This account isn't set up.".to_owned())?;
-    let config = to_config(&imap);
+    let config = account_imap(db_path, secrets, account_id)?;
     runtime()?
         .block_on(imap::set_flag(&config, secrets, folder, uid, flagged))
         .map_err(|_| "Couldn't update the star on the server.".to_owned())
@@ -328,23 +316,12 @@ pub fn run_set_flag(
 pub fn run_move(
     db_path: &str,
     secrets: &dyn SecretStore,
+    account_id: i64,
     source: &str,
     uid: u32,
     target: &str,
 ) -> Result<(), String> {
-    let store = open_store(db_path, secrets)?;
-    let account = store
-        .list_accounts()
-        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No account is set up yet.".to_owned())?;
-    let imap = store
-        .imap_settings(account.id)
-        .ok()
-        .flatten()
-        .ok_or_else(|| "This account isn't set up.".to_owned())?;
-    let config = to_config(&imap);
+    let config = account_imap(db_path, secrets, account_id)?;
     runtime()?
         .block_on(imap::move_message(&config, secrets, source, uid, target))
         .map_err(|_| "Couldn't move the message on the server.".to_owned())
@@ -354,10 +331,11 @@ pub fn run_move(
 pub fn run_delete_permanently(
     db_path: &str,
     secrets: &dyn SecretStore,
+    account_id: i64,
     folder: &str,
     uid: u32,
 ) -> Result<(), String> {
-    let config = first_account_imap(db_path, secrets)?;
+    let config = account_imap(db_path, secrets, account_id)?;
     runtime()?
         .block_on(imap::delete_permanently(&config, secrets, folder, uid))
         .map_err(|_| "Couldn't delete the message on the server.".to_owned())
@@ -367,31 +345,27 @@ pub fn run_delete_permanently(
 pub fn run_empty_folder(
     db_path: &str,
     secrets: &dyn SecretStore,
+    account_id: i64,
     folder: &str,
 ) -> Result<(), String> {
-    let config = first_account_imap(db_path, secrets)?;
+    let config = account_imap(db_path, secrets, account_id)?;
     runtime()?
         .block_on(imap::empty_folder(&config, secrets, folder))
         .map_err(|_| "Couldn't empty the folder on the server.".to_owned())
 }
 
-/// Create / rename / delete a server folder (ORG-6), then re-sync the folder list so the local rail
-/// reflects it. Blocking + network: **worker thread.** `op` runs the IMAP folder command.
+/// Create / rename / delete a server folder (ORG-6), then re-sync that account's folder list so the
+/// local rail reflects it. Blocking + network: **worker thread.** `op` runs the IMAP folder command.
 fn folder_op(
     db_path: &str,
     secrets: &dyn SecretStore,
+    account_id: i64,
     err: &str,
     op: impl std::future::Future<Output = Result<(), imap::ImapError>>,
 ) -> Result<(), String> {
     let store = open_store(db_path, secrets)?;
-    let account = store
-        .list_accounts()
-        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No account is set up yet.".to_owned())?;
     let imap = store
-        .imap_settings(account.id)
+        .imap_settings(account_id)
         .ok()
         .flatten()
         .ok_or_else(|| "This account isn't set up.".to_owned())?;
@@ -399,7 +373,7 @@ fn folder_op(
     runtime()?
         .block_on(async {
             op.await?;
-            imap::sync_folders(&config, secrets, &store, account.id).await // reconcile local list
+            imap::sync_folders(&config, secrets, &store, account_id).await // reconcile local list
         })
         .map_err(|_| err.to_owned())
 }
@@ -408,12 +382,14 @@ fn folder_op(
 pub fn run_create_folder(
     db_path: &str,
     secrets: &dyn SecretStore,
+    account_id: i64,
     name: &str,
 ) -> Result<(), String> {
-    let config = first_account_imap(db_path, secrets)?;
+    let config = account_imap(db_path, secrets, account_id)?;
     folder_op(
         db_path,
         secrets,
+        account_id,
         "Couldn't create the folder.",
         imap::create_folder(&config, secrets, name),
     )
@@ -423,13 +399,15 @@ pub fn run_create_folder(
 pub fn run_rename_folder(
     db_path: &str,
     secrets: &dyn SecretStore,
+    account_id: i64,
     from: &str,
     to: &str,
 ) -> Result<(), String> {
-    let config = first_account_imap(db_path, secrets)?;
+    let config = account_imap(db_path, secrets, account_id)?;
     folder_op(
         db_path,
         secrets,
+        account_id,
         "Couldn't rename the folder.",
         imap::rename_folder(&config, secrets, from, to),
     )
@@ -439,54 +417,53 @@ pub fn run_rename_folder(
 pub fn run_delete_folder(
     db_path: &str,
     secrets: &dyn SecretStore,
+    account_id: i64,
     name: &str,
 ) -> Result<(), String> {
-    let config = first_account_imap(db_path, secrets)?;
+    let config = account_imap(db_path, secrets, account_id)?;
     folder_op(
         db_path,
         secrets,
+        account_id,
         "Couldn't delete the folder.",
         imap::delete_folder(&config, secrets, name),
     )
 }
 
-/// The first account's IMAP config (host/port/username/allow-invalid), for write-back ops.
-fn first_account_imap(db_path: &str, secrets: &dyn SecretStore) -> Result<ImapConfig, String> {
+/// A specific account's IMAP config (host/port/username/allow-invalid), by id — for write-back ops.
+fn account_imap(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+) -> Result<ImapConfig, String> {
     let store = open_store(db_path, secrets)?;
-    let account = store
-        .list_accounts()
-        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No account is set up yet.".to_owned())?;
     let imap = store
-        .imap_settings(account.id)
+        .imap_settings(account_id)
         .ok()
         .flatten()
         .ok_or_else(|| "This account isn't set up.".to_owned())?;
     Ok(to_config(&imap))
 }
 
-/// Sync the first account's `folder` (+ folder list), reading settings from the store and the
-/// password from the shared secrets. Blocking + network: **run on a worker thread.**
-pub fn run_refresh(db_path: &str, secrets: &dyn SecretStore, folder: &str) -> Result<(), String> {
+/// Sync `account_id`'s `folder` (+ folder list), reading settings from the store and the password
+/// from the shared secrets. Blocking + network: **run on a worker thread.**
+pub fn run_refresh(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    folder: &str,
+) -> Result<(), String> {
     let store = open_store(db_path, secrets)?;
-    let account = store
-        .list_accounts()
-        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No account configured yet.".to_owned())?;
     let settings = store
-        .imap_settings(account.id)
+        .imap_settings(account_id)
         .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
         .ok_or_else(|| "This account isn't set up for syncing.".to_owned())?;
 
     let config = to_config(&settings);
     runtime()?
         .block_on(async {
-            imap::sync_folders(&config, secrets, &store, account.id).await?;
-            imap::sync_folder_incremental(&config, secrets, &store, account.id, folder, 200)
+            imap::sync_folders(&config, secrets, &store, account_id).await?;
+            imap::sync_folder_incremental(&config, secrets, &store, account_id, folder, 200)
                 .await?;
             Ok::<(), imap::ImapError>(())
         })
@@ -499,54 +476,48 @@ pub fn run_refresh(db_path: &str, secrets: &dyn SecretStore, folder: &str) -> Re
 pub fn run_backfill(
     db_path: &str,
     secrets: &dyn SecretStore,
+    account_id: i64,
     folder: &str,
     batch_size: u32,
     on_batch: &mut dyn FnMut(usize),
 ) -> Result<usize, String> {
     let store = open_store(db_path, secrets)?;
-    let account = store
-        .list_accounts()
-        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No account configured yet.".to_owned())?;
     let settings = store
-        .imap_settings(account.id)
+        .imap_settings(account_id)
         .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
         .ok_or_else(|| "This account isn't set up for syncing.".to_owned())?;
 
     let config = to_config(&settings);
     runtime()?
         .block_on(imap::backfill_folder(
-            &config, secrets, &store, account.id, folder, batch_size, on_batch,
+            &config, secrets, &store, account_id, folder, batch_size, on_batch,
         ))
         .map_err(|_| "Couldn't finish catching up — will resume next refresh.".to_owned())
 }
 
-/// Remove the (single) account from this device: delete its keychain password, then its local mail
-/// (folders/messages/bodies cascade). Idempotent if there's no account. Touches the keychain
-/// (D-Bus), so **run on a worker thread.**
+/// Remove `account_id` from this device: delete its keychain password, then its local mail
+/// (folders/messages/bodies cascade). Idempotent if the account is already gone. Touches the
+/// keychain (D-Bus), so **run on a worker thread.**
 ///
 /// Returns `Ok(true)` on a fully clean wipe, `Ok(false)` if the local mail was removed but the
 /// keychain password could **not** be cleared (so the caller can warn — SEC-3), `Err` if the mail
 /// wipe itself failed.
-pub fn run_remove_account(db_path: &str, secrets: &dyn SecretStore) -> Result<bool, String> {
+pub fn run_remove_account(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+) -> Result<bool, String> {
     let store = open_store(db_path, secrets)?;
-    let Some(account) = store
-        .list_accounts()
-        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
-        .into_iter()
-        .next()
-    else {
+    if store.account_by_id(account_id).ok().flatten().is_none() {
         return Ok(true); // nothing to remove
-    };
+    }
     // Forget the password (we still wipe the local mail even if this fails, but report it).
-    let password_cleared = match store.imap_settings(account.id) {
+    let password_cleared = match store.imap_settings(account_id) {
         Ok(Some(settings)) => imap::delete_password(secrets, &settings.username).is_ok(),
         _ => true, // no stored password to clear
     };
     store
-        .delete_account(account.id)
+        .delete_account(account_id)
         .map_err(|_| "Couldn't remove the account.".to_owned())?;
     Ok(password_cleared)
 }
@@ -649,7 +620,7 @@ mod tests {
             username: "user@x.com".to_owned(),
             allow_invalid_certs: false,
         };
-        {
+        let acc = {
             // encrypted store (open_store generates + stores the key in `secrets`)
             let store = open_store(path, &secrets).unwrap();
             let acc = store
@@ -669,12 +640,13 @@ mod tests {
             store
                 .store_body(mid, Some("body"), None, None, false)
                 .unwrap();
-        }
+            acc
+        };
         store_password(&secrets, "user@x.com", b"pw").unwrap();
         assert!(imap::has_password(&secrets, "user@x.com").unwrap());
 
         assert!(
-            run_remove_account(path, &secrets).expect("remove"),
+            run_remove_account(path, &secrets, acc).expect("remove"),
             "fully clean wipe"
         );
 
@@ -685,7 +657,7 @@ mod tests {
             "password gone"
         );
         // removing again is a no-op (idempotent), still reported clean
-        assert!(run_remove_account(path, &secrets).expect("remove again"));
+        assert!(run_remove_account(path, &secrets, acc).expect("remove again"));
         let _ = std::fs::remove_file(path);
     }
 
@@ -762,7 +734,7 @@ mod tests {
         drop(store);
 
         // refresh reads settings from the store + password from the shared secrets
-        run_refresh(path, &secrets, "INBOX").expect("refresh");
+        run_refresh(path, &secrets, acc, "INBOX").expect("refresh");
         let _ = std::fs::remove_file(path);
     }
 }
