@@ -98,6 +98,25 @@ pub fn find_folder<'a>(folders: &'a [String], keywords: &[&str]) -> Option<&'a s
         .map(String::as_str)
 }
 
+/// Next row index for keyboard list navigation (READ-9): move down one, clamped to the last row.
+/// Returns -1 for an empty list. A `current` of -1 (nothing focused) starts at the first row.
+pub fn next_index(current: i32, len: i32) -> i32 {
+    if len <= 0 {
+        return -1;
+    }
+    (current + 1).clamp(0, len - 1)
+}
+
+/// Previous row index for keyboard navigation: move up one, floored at the first row. Returns -1 for
+/// an empty list; a `current` of -1 (nothing focused) lands on the first row. (Only a lower bound is
+/// needed — moving up never exceeds the last row for a valid `current`.)
+pub fn prev_index(current: i32, len: i32) -> i32 {
+    if len <= 0 {
+        return -1;
+    }
+    (current - 1).max(0)
+}
+
 /// Human-readable byte size (B / KB / MB, 1 decimal above 1 KB).
 fn human_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -117,6 +136,20 @@ mod tests {
         attachment_label, body_display, complete_last_token, format_date, human_size, last_token,
         message_vm,
     };
+
+    #[test]
+    fn nav_index_clamps_and_handles_empty() {
+        use super::{next_index, prev_index};
+        assert_eq!(next_index(-1, 0), -1); // empty list
+        assert_eq!(prev_index(5, 0), -1);
+        assert_eq!(next_index(-1, 3), 0); // nothing focused → first
+        assert_eq!(prev_index(-1, 3), 0);
+        assert_eq!(next_index(0, 3), 1); // move down
+        assert_eq!(prev_index(3, 10), 2); // move up (un-clamped: distinguishes -/+//)
+        assert_eq!(prev_index(2, 3), 1);
+        assert_eq!(next_index(2, 3), 2); // clamp at the last row
+        assert_eq!(prev_index(0, 3), 0); // clamp at the first row
+    }
 
     #[test]
     fn find_folder_exact_then_contains() {
