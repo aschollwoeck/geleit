@@ -57,9 +57,8 @@ fn main() {
         s.store_body(id, Some(body), None, Some(&snippet), *attach)
             .unwrap();
     }
-    // An HTML newsletter with a LONG (wrapping) subject and a remote image — exercises the sandboxed
-    // webview + the "remote content blocked" cue, and tests that the webview sits below them. Newest,
-    // so `GELEIT_SHOT=read` opens it.
+    // An HTML newsletter with a LONG (wrapping) subject and a remote image — exercises the CPU HTML
+    // renderer + the "remote content blocked" cue. Newest, so `GELEIT_SHOT=read` opens it.
     let hid = s
         .upsert_message(
             acc,
