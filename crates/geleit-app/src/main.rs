@@ -24,22 +24,26 @@ struct HtmlView {
     visible: Cell<bool>,
 }
 
-/// The reading-pane body region (logical coords) the webview should cover — right of the rail plus
-/// list (620px), below the header. The header is a **fixed height** (the reading-pane subject is
-/// elided to one line, so it never wraps), so these offsets always clear the actions and the
-/// remote-content cue bar; the extra reservation when the cue is shown keeps the webview below it.
+/// The reading-pane body region (logical coords) the webview should cover. Its left edge tracks the
+/// draggable splitter: rail (240) + the live `list-width` + the 6px handle. The header is a **fixed
+/// height** (the reading-pane subject is elided to one line, so it never wraps), so the vertical
+/// offsets always clear the actions and the remote-content cue bar (the larger reserves room for the
+/// cue). Recomputed every frame by the GTK pump, so the webview follows the divider live.
+const RAIL_W: f32 = 240.0;
+const SPLITTER_W: f32 = 6.0;
 fn body_rect(ui: &Main) -> wry::Rect {
     let scale = ui.window().scale_factor();
     let phys = ui.window().size();
+    let left = RAIL_W + ui.get_list_width() + SPLITTER_W;
     let top = if ui.get_remote_blocked() {
         174.0
     } else {
         132.0
     };
-    let w = (phys.width as f32 / scale) - 620.0;
+    let w = (phys.width as f32 / scale) - left;
     let h = (phys.height as f32 / scale) - top;
     wry::Rect {
-        position: wry::dpi::LogicalPosition::new(620.0_f32, top).into(),
+        position: wry::dpi::LogicalPosition::new(left, top).into(),
         size: wry::dpi::LogicalSize::new(w.max(0.0), h.max(0.0)).into(),
     }
 }
@@ -198,6 +202,7 @@ slint::slint! {
         in property <[MessageItem]> messages;
         in property <int> selected-message; // selected message id (0 = none)
         in-out property <int> nav-index: -1; // keyboard-focused list row (READ-9); -1 = none
+        in-out property <length> list-width: 380px; // draggable message-list width (persisted)
         in property <string> r-subject;
         in property <string> r-sender;
         in property <string> r-date;
@@ -290,6 +295,7 @@ slint::slint! {
         callback nav-next();
         callback nav-prev();
         callback nav-escape();
+        callback splitter-released(); // persist the list width after a drag
         // settings (APP-3/4)
         in property <bool> showing-settings;
         callback open-settings();
@@ -576,7 +582,7 @@ slint::slint! {
 
             // ---- MESSAGE LIST ----
             Rectangle {
-                width: 380px;
+                width: root.list-width;
                 background: Palette.surface;
                 VerticalLayout {
                     Rectangle {
@@ -887,6 +893,33 @@ slint::slint! {
                                 background: Palette.divider;
                             }
                         }
+                    }
+                }
+            }
+
+            // ---- SPLITTER (drag to resize the list vs reading pane) ----
+            Rectangle {
+                width: 6px;
+                background: drag.has-hover || drag.pressed ? Palette.accent-quiet : Palette.bg;
+                // a hairline so the handle reads as a divider
+                Rectangle { width: 1px; x: parent.width / 2; background: Palette.divider; }
+                property <length> press-x;
+                property <length> start-w;
+                drag := TouchArea {
+                    mouse-cursor: ew-resize;
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down) {
+                            // capture the cursor's window-x (stable as the handle moves) + start width
+                            press-x = self.absolute-position.x + self.mouse-x;
+                            start-w = root.list-width;
+                        }
+                        if (e.kind == PointerEventKind.up) {
+                            root.splitter-released();
+                        }
+                    }
+                    moved => {
+                        root.list-width = max(280px, min(680px,
+                            start-w + self.absolute-position.x + self.mouse-x - press-x));
                     }
                 }
             }
@@ -2223,6 +2256,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Apply the persisted theme (APP-3) before the first paint.
     ui.global::<Palette>()
         .set_dark(store.get_setting("theme").ok().flatten().as_deref() == Some("dark"));
+    // Restore the persisted message-list width (clamped to the same bounds as the splitter).
+    if let Some(w) = store
+        .get_setting("list_width")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<f32>().ok())
+    {
+        ui.set_list_width(w.clamp(280.0, 680.0));
+    }
 
     // Pump GTK (so the embedded webview renders) under Slint's loop, and keep the webview's bounds
     // on the reading-pane body while it's shown. Kept alive for the app's lifetime.
@@ -3746,6 +3788,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let dark = !ui.global::<Palette>().get_dark();
             ui.global::<Palette>().set_dark(dark);
             let _ = store.set_setting("theme", if dark { "dark" } else { "light" });
+        });
+    }
+
+    // Persist the message-list width after a splitter drag (on release, not every frame).
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        ui.on_splitter_released(move || {
+            if let Some(ui) = weak.upgrade() {
+                let _ = store.set_setting("list_width", &ui.get_list_width().to_string());
+            }
         });
     }
 

@@ -118,6 +118,9 @@ fn main() {
     }
     s.set_setting("theme", if dark { "dark" } else { "light" })
         .unwrap();
+    if let Ok(w) = std::env::var("LISTW") {
+        s.set_setting("list_width", &w).unwrap(); // test the persisted splitter width
+    }
     println!(
         "seeded {} messages into {path} (theme={})",
         demo.len(),
