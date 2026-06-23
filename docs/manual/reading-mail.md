@@ -41,6 +41,9 @@ When you open GeleitMail you see three areas, left to right:
 
 ![The main window: folder rail on the left, the inbox list with unread dots, stars, and attachment markers in the middle, and the reading area on the right.](images/inbox-light.png)
 
+Drag the divider between the message list and the reading area to make either wider; your choice is
+remembered next time you open GeleitMail.
+
 When several messages are part of the same back-and-forth, a small **conversation · N** marker shows
 how many messages are in that thread.
 
