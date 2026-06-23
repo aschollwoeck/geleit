@@ -61,13 +61,13 @@ If the message has files attached, an **Attachments** list appears under the mes
 file's name and size. (Saving attachments to your computer is coming soon.)
 
 Messages written in rich (HTML) formatting are shown **formatted** — with their colors, fonts,
-layout, and links intact — in a protected view. **Scripts can't run and trackers/remote images don't
-load**, so opening a message can't quietly fetch anything from the internet or execute code.
-Plain-text messages show as before.
+layout, and links intact. GeleitMail renders them itself, entirely on your device: there's no
+embedded browser, **scripts can't run, and trackers/remote images aren't loaded**, so opening a
+message can't quietly fetch anything from the internet or execute code. Links stay clickable —
+choosing one opens it in your normal web browser. Plain-text messages show as before.
 
-When a message *did* contain remote content, you'll see a small **"Remote content blocked"** note
-with a **Load remote images** button. Nothing remote loads until you choose to: click it and that
-one message is re-shown with its images fetched. (Scripts are never run, even then.)
+When a message *did* contain remote content, you'll see a small **"Remote content blocked"** note.
+Nothing remote is fetched. (Per-message "load images anyway" is coming back on the new renderer.)
 
 ## Writing, replying, and organizing
 

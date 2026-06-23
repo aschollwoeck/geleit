@@ -2,142 +2,56 @@
 //! message list in the "Soft daylight" design (`design.md`). Reads the store only — no network on
 //! the UI path (constitution P1); sync is the engine's job, wired in later (S1.9).
 
+mod htmlrender;
 mod refresh;
 mod viewmodel;
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use blitz_html::HtmlDocument;
 use geleit_engine::imap;
 use geleit_platform::os_secret::OsSecretStore;
 use geleit_store::Store;
-use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
-/// Shared handle to the embedded HTML webview + whether it's currently shown.
-#[derive(Default)]
-struct HtmlView {
-    webview: RefCell<Option<wry::WebView>>,
-    visible: Cell<bool>,
+/// The reading pane's currently-rendered HTML document, kept so link clicks can be hit-tested
+/// against its layout. `None` when the open message is plain text. Lives on the UI thread only.
+type HtmlDoc = Rc<RefCell<Option<HtmlDocument>>>;
+
+/// Open an external link (from a clicked rendered-HTML `<a>`) in the system browser.
+fn open_external(url: &str) {
+    if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:") {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
 }
 
-/// The reading-pane body region (logical coords) the webview should cover. Its left edge tracks the
-/// draggable splitter: rail (240) + the live `list-width` + the 6px handle. The header is a **fixed
-/// height** (the reading-pane subject is elided to one line, so it never wraps), so the vertical
-/// offsets always clear the actions and the remote-content cue bar (the larger reserves room for the
-/// cue). Recomputed every frame by the GTK pump, so the webview follows the divider live.
-///
-/// The left edge is clamped to keep a minimum reading width: a too-wide list on a narrow window
-/// would otherwise give the webview a zero/negative size, which can crash webkit. This matches the
-/// same clamp on the list element in the UI, so the webview stays aligned with the list edge.
-const RAIL_W: f32 = 240.0;
-const SPLITTER_W: f32 = 6.0;
-const MIN_READING_W: f32 = 80.0;
-
-/// The body region as (left, top, width, height) logical px, with the left edge clamped to keep a
-/// minimum reading width. Callers guard on the size before showing the webview.
-fn body_geom(ui: &Main) -> (f32, f32, f32, f32) {
-    let scale = ui.window().scale_factor();
+/// The reading-pane width in logical px (window minus the folder rail, the message list, and the
+/// splitter handle), floored so rendering always has a sane width.
+fn reading_pane_width(ui: &Main) -> u32 {
+    let scale = ui.window().scale_factor().max(1.0);
     let win_w = ui.window().size().width as f32 / scale;
-    let win_h = ui.window().size().height as f32 / scale;
-    let max_left = (win_w - MIN_READING_W).max(RAIL_W + SPLITTER_W);
-    let left = (RAIL_W + ui.get_list_width() + SPLITTER_W).min(max_left);
-    let top = if ui.get_remote_blocked() {
-        174.0
-    } else {
-        132.0
-    };
-    (left, top, (win_w - left).max(0.0), (win_h - top).max(0.0))
+    (win_w - 240.0 - ui.get_list_width() - 6.0).max(120.0) as u32
 }
 
-/// True when the window/body is too small to host the embedded webview safely. The webview is a
-/// native webkit (GL) child window; on X11 a small/cramped surface intermittently triggers a stray
-/// `GLXBadWindow` that surfaces as a winit panic (`flush_requests().expect("…change window theme")`).
-/// Below these thresholds we fall back to the sanitized text view instead of building/showing it.
-/// (Reproduced: a 500px window crashes; ≥700px and maximized are stable. Thresholds lean toward
-/// "show text" — HTML in a cramped pane isn't useful anyway.)
-fn body_too_small(ui: &Main) -> bool {
-    let scale = ui.window().scale_factor();
-    let win_w = ui.window().size().width as f32 / scale;
-    let win_h = ui.window().size().height as f32 / scale;
-    let (_, _, w, h) = body_geom(ui);
-    win_w < 800.0 || win_h < 540.0 || w < 360.0 || h < 240.0
+/// Render sanitized HTML into the reading pane as a CPU bitmap (no GL → no webview crashes) and keep
+/// its DOM so link clicks can be hit-tested. Width tracks the splitter; theme follows the palette.
+fn show_html(ui: &Main, doc: &HtmlDoc, sanitized_html: &str) {
+    let dark = ui.global::<Palette>().get_dark();
+    let rendered = htmlrender::render(sanitized_html, reading_pane_width(ui), dark);
+    ui.set_r_html_image(rendered.image);
+    ui.set_r_is_html(true);
+    *doc.borrow_mut() = Some(rendered.doc);
 }
 
-fn body_rect(ui: &Main) -> wry::Rect {
-    let (left, top, w, h) = body_geom(ui);
-    wry::Rect {
-        position: wry::dpi::LogicalPosition::new(left, top).into(),
-        size: wry::dpi::LogicalSize::new(w, h).into(),
-    }
-}
-
-/// Build the child webview **once, up front** (hidden, pre-painted with the reading-pane background),
-/// so the first mail open is instant — no webkit init on the UI thread mid-click, and no black
-/// flash. No-op if already built or embedding is unavailable (e.g. Wayland — `build_as_child` is
-/// X11-only), in which case the plain-text pane is the fallback.
-fn ensure_webview(ui: &Main, view: &HtmlView) {
-    if view.webview.borrow().is_some() {
-        return;
-    }
-    let rect = body_rect(ui);
-    let built = ui.window().with_winit_window(|win| {
-        wry::WebViewBuilder::new()
-            // defense-in-depth (guidelines §13): sanitization already removes scripts, but disable
-            // JS in the webview too so a sanitizer miss still can't execute.
-            .with_javascript_disabled()
-            // Open real links in the system browser; never let the pane navigate away from our CSP'd
-            // document (that would drop the sandbox + load remote content). Our own content loads
-            // (about:blank / data:) return true and render normally.
-            .with_navigation_handler(|url: String| {
-                if url.starts_with("http://")
-                    || url.starts_with("https://")
-                    || url.starts_with("mailto:")
-                {
-                    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
-                    false // handled externally — don't navigate in-pane
-                } else {
-                    true
-                }
-            })
-            .with_bounds(rect)
-            .build_as_child(win)
-    });
-    if let Some(Ok(w)) = built {
-        // pre-paint the calm page background so revealing it never flashes black
-        let _ = w.load_html(&geleit_engine::safehtml::document("", false));
-        let _ = w.set_visible(false);
-        *view.webview.borrow_mut() = Some(w);
-    }
-}
-
-/// Render `sanitized_html` in the embedded sandboxed webview over the reading-pane body. If the body
-/// region is too small (a too-narrow window), the webview stays hidden rather than risk a webkit
-/// crash from a degenerate surface.
-fn show_html(ui: &Main, view: &HtmlView, sanitized_html: &str) {
-    if body_too_small(ui) {
-        hide_html(view);
-        return;
-    }
-    ensure_webview(ui, view);
-    let rect = body_rect(ui);
-    if let Some(w) = view.webview.borrow().as_ref() {
-        let _ = w.load_html(sanitized_html);
-        let _ = w.set_bounds(rect);
-        let _ = w.set_visible(true);
-        view.visible.set(true);
-    }
-}
-
-/// Hide the embedded webview so the Slint reading pane (text / form) shows.
-fn hide_html(view: &HtmlView) {
-    if let Some(w) = view.webview.borrow().as_ref() {
-        let _ = w.set_visible(false);
-    }
-    view.visible.set(false);
+/// Switch the reading pane back to the plain-text view and drop the kept HTML DOM.
+fn hide_html(ui: &Main, doc: &HtmlDoc) {
+    ui.set_r_is_html(false);
+    ui.set_r_html_image(slint::Image::default());
+    *doc.borrow_mut() = None;
 }
 
 // TODO (design polish, later slices): real line-icon for the attachment marker (design.md §7,
@@ -240,6 +154,8 @@ slint::slint! {
         in property <string> r-sender;
         in property <string> r-date;
         in property <string> r-body;
+        in property <bool> r-is-html; // open message is rich HTML → show the rendered bitmap
+        in property <image> r-html-image; // CPU-rendered HTML (no GL); links hit-tested on click
         in property <bool> r-starred; // the open message is starred (ORG-4)
         in property <[string]> r-attachments;
         in property <bool> picking-folder; // "Move to…" folder picker open (ORG-3)
@@ -334,7 +250,7 @@ slint::slint! {
         callback open-settings();
         callback close-settings();
         callback toggle-theme();
-        callback load-remote();
+        callback html-click(length, length); // click in the rendered HTML → hit-test for a link
         callback compose();
         callback send-message();
         callback cancel-compose();
@@ -1054,7 +970,9 @@ slint::slint! {
                             TouchArea { clicked => { root.mark-unread(root.selected-message); } }
                         }
                     }
-                    // remote content blocked (PRIV-3) + per-message opt-in (PRIV-2)
+                    // remote content blocked (PRIV-3). Remote loading is never on by default; the
+                    // CPU HTML renderer is given no network provider, so trackers/remote images can't
+                    // load at all. (Per-message opt-in load is a follow-up on the new renderer.)
                     if root.remote-blocked: Rectangle {
                         height: 32px;
                         border-radius: 8px;
@@ -1062,34 +980,39 @@ slint::slint! {
                         HorizontalLayout {
                             padding-left: 10px;
                             padding-right: 10px;
-                            spacing: 8px;
                             Text {
-                                text: "Remote content blocked";
+                                text: "Remote content blocked — images and trackers were not loaded";
                                 color: Palette.text;
                                 font-size: 12px;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                             }
+                        }
+                    }
+                    // Body: rich (HTML) messages render to a CPU bitmap (no GL → no webview crashes);
+                    // links stay clickable via hit-testing the kept DOM on click. Plain text otherwise.
+                    if root.r-is-html: ScrollView {
+                        Rectangle {
+                            min-width: root.r-html-image.width * 1px;
+                            min-height: root.r-html-image.height * 1px;
+                            htmlimg := Image {
+                                x: 0;
+                                y: 0;
+                                source: root.r-html-image;
+                                width: root.r-html-image.width * 1px;
+                                height: root.r-html-image.height * 1px;
+                            }
                             TouchArea {
-                                width: 140px;
-                                clicked => { root.load-remote(); }
-                                Text {
-                                    text: "Load remote images";
-                                    color: Palette.text;
-                                    font-size: 12px;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: right;
-                                }
+                                x: 0;
+                                y: 0;
+                                width: htmlimg.width;
+                                height: htmlimg.height;
+                                mouse-cursor: pointer;
+                                clicked => { root.html-click(self.mouse-x, self.mouse-y); }
                             }
                         }
                     }
-                    // The body area; the sandboxed HTML webview (a native child window) is drawn over
-                    // it. The header above is a fixed height (subject elided to one line), so the
-                    // webview's fixed offset always clears the actions + the remote-content cue.
-                    ScrollView {
-                        // a layout fills the viewport width so the body wraps to it (a bare Text in a
-                        // ScrollView has no width to wrap against → it ran off as one long line)
+                    if !root.r-is-html: ScrollView {
                         VerticalLayout {
                             alignment: start;
                             Text {
@@ -1936,7 +1859,7 @@ fn bulk_move(
     store: &Store,
     messages: &VecModel<MessageItem>,
     folders: &VecModel<SharedString>,
-    view: &HtmlView,
+    view: &HtmlDoc,
     db_path: &str,
     secrets: &Arc<OsSecretStore>,
     account_id: i64,
@@ -1964,7 +1887,7 @@ fn bulk_move(
     selected.borrow_mut().clear();
     ui.set_selected_count(0);
     ui.set_selected_message(0);
-    hide_html(view);
+    hide_html(ui, view);
     if uids.is_empty() {
         return;
     }
@@ -2116,7 +2039,7 @@ fn perform_move(
     store: &Store,
     messages: &VecModel<MessageItem>,
     folders: &VecModel<SharedString>,
-    view: &HtmlView,
+    view: &HtmlDoc,
     db_path: &str,
     secrets: &Arc<OsSecretStore>,
     account_id: i64,
@@ -2138,7 +2061,7 @@ fn perform_move(
     let _ = store.delete_message(id.into()); // optimistic
     remove_row(messages, id);
     ui.set_selected_message(0);
-    hide_html(view);
+    hide_html(ui, view);
     let Some(uid) = uid else { return }; // local-only message → nothing to move on the server
     let weak = ui.as_weak();
     let db_path = db_path.to_owned();
@@ -2244,10 +2167,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_var("SLINT_BACKEND", "winit-software");
     }
 
-    // The embedded HTML webview (S3.1) uses webkit2gtk, which needs GTK initialised + its loop
-    // pumped. Best-effort: if GTK isn't available the app still runs (HTML falls back to text).
-    let gtk_ready = gtk::init().is_ok();
-
     let db = std::env::var("GELEIT_DB").unwrap_or_else(|_| "geleit.db".to_owned());
     // Secret store backed by the OS keychain (S2.1). Send+Sync → shared across the UI + workers.
     let secrets = Arc::new(OsSecretStore::new());
@@ -2258,9 +2177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let folders_model = Rc::new(VecModel::<SharedString>::default());
     let folder_ids = Rc::new(RefCell::new(Vec::<i64>::new()));
     let messages = Rc::new(VecModel::<MessageItem>::default());
-    let html_view = Rc::new(HtmlView::default());
-    // the open HTML message's remote-allowed document, rendered if the user opts in (PRIV-2)
-    let current_allowed = Rc::new(RefCell::new(Option::<String>::None));
+    let html_doc: HtmlDoc = Rc::new(RefCell::new(None));
     // threading headers (in_reply_to, references) for the message being composed, if it's a reply
     type ComposeThread = Rc<RefCell<(Option<String>, Vec<String>)>>;
     let compose_thread: ComposeThread = Rc::new(RefCell::new((None, Vec::new())));
@@ -2304,40 +2221,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.set_list_width(w.clamp(280.0, 680.0));
     }
 
-    // Pump GTK (so the embedded webview renders) under Slint's loop, and keep the webview's bounds
-    // on the reading-pane body while it's shown. Kept alive for the app's lifetime.
-    let gtk_pump = slint::Timer::default();
+    // Wire the rendered-HTML link clicks: hit-test the kept DOM at the click point for an <a href>.
     {
-        let weak = ui.as_weak();
-        let view = html_view.clone();
-        gtk_pump.start(
-            slint::TimerMode::Repeated,
-            Duration::from_millis(16),
-            move || {
-                if gtk_ready {
-                    while gtk::events_pending() {
-                        gtk::main_iteration_do(false);
-                    }
+        let doc = html_doc.clone();
+        ui.on_html_click(move |x, y| {
+            if let Some(d) = doc.borrow().as_ref() {
+                if let Some(href) = htmlrender::link_at(d, x, y) {
+                    open_external(&href);
                 }
-                if view.visible.get() {
-                    if let (Some(ui), Some(w)) = (weak.upgrade(), view.webview.borrow().as_ref()) {
-                        // hide rather than hand webkit a degenerate surface (resize too narrow)
-                        if body_too_small(&ui) {
-                            let _ = w.set_visible(false);
-                        } else {
-                            let _ = w.set_bounds(body_rect(&ui));
-                            let _ = w.set_visible(true);
-                        }
-                    }
-                }
-            },
-        );
+            }
+        });
     }
-
-    // NOTE: the webview is built lazily on first HTML message (in `show_html`/`ensure_webview`), NOT
-    // eagerly at startup. Building it at launch raced Slint's GL renderer and crashed the window with
-    // an async `GLXBadWindow` before anything was clicked (regression from S3.6). Lazy build keeps the
-    // app opening reliably; the proper fix for the GL coexistence is a follow-up (software renderer).
 
     // full reload (also the initial load) — reused by setup success
     {
@@ -2347,11 +2241,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let fids = folder_ids.clone();
         let msgs = messages.clone();
         let accts = accounts_model.clone();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         ui.on_reload(move || {
             if let Some(ui) = weak.upgrade() {
                 reload_all(&ui, &store, &fm, &fids, &msgs, &accts);
-                hide_html(&view); // nothing selected → show the Slint pane / form
+                hide_html(&ui, &view); // nothing selected → show the Slint pane / form
             }
         });
     }
@@ -2363,7 +2257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let fids = folder_ids.clone();
         let model = messages.clone();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         let fm = folders_model.clone();
         let selected = selected_ids.clone();
         ui.on_folder_selected(move |idx| {
@@ -2391,7 +2285,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             ui.set_viewing_junk(viewmodel::find_folder(one, &["junk", "spam"]).is_some());
             model.set_vec(load_messages(&store, fid));
-            hide_html(&view); // selection cleared
+            hide_html(&ui, &view); // selection cleared
         });
     }
 
@@ -2400,8 +2294,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let store = store.clone();
         let model = messages.clone();
-        let view = html_view.clone();
-        let current_allowed = current_allowed.clone();
+        let view = html_doc.clone();
         let db_path = db.clone();
         let secrets = secrets.clone();
         ui.on_message_selected(move |item| {
@@ -2428,8 +2321,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(_) => ("(Could not load this message.)".to_owned(), None),
             };
             ui.set_r_body(body_text.into());
-            // HTML messages render in the sandboxed webview; text messages use the Slint pane.
-            // Default = remote blocked; if the message had remote content, offer to load it (PRIV-2/3).
+            // HTML messages render to a CPU bitmap (no GL); text messages use the Slint pane. Remote
+            // content is always blocked (the renderer is given no network), so trackers/remote images
+            // can't load; if the message had remote content we show the cue (PRIV-3).
             use geleit_engine::safehtml;
             match html {
                 Some(h) => {
@@ -2438,13 +2332,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let body_blocked = safehtml::sanitize_html(&h);
                     let body_allowed = safehtml::sanitize_html_allowing_remote(&h);
                     ui.set_remote_blocked(body_blocked != body_allowed);
-                    *current_allowed.borrow_mut() = Some(safehtml::document(&body_allowed, true));
                     show_html(&ui, &view, &safehtml::document(&body_blocked, false));
                 }
                 None => {
                     ui.set_remote_blocked(false);
-                    *current_allowed.borrow_mut() = None;
-                    hide_html(&view);
+                    hide_html(&ui, &view);
                 }
             }
             let labels: Vec<SharedString> = store
@@ -2549,7 +2441,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let messages = messages.clone();
         let fm = folders_model.clone();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         let db_path = db.clone();
         let secrets = secrets.clone();
         ui.on_archive_message(move |id| {
@@ -2579,7 +2471,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let messages = messages.clone();
         let fm = folders_model.clone();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         let db_path = db.clone();
         let secrets = secrets.clone();
         ui.on_trash_message(move |id| {
@@ -2598,7 +2490,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = store.delete_message(id.into());
                 remove_row(&messages, id);
                 ui.set_selected_message(0);
-                hide_html(&view);
+                hide_html(&ui, &view);
                 if let Some(uid) = uid {
                     let weak = weak.clone();
                     let db_path = db_path.clone();
@@ -2649,7 +2541,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let messages = messages.clone();
         let fm = folders_model.clone();
         let fids = folder_ids.clone();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         let db_path = db.clone();
         let secrets = secrets.clone();
         ui.on_empty_trash(move || {
@@ -2661,7 +2553,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             messages.set_vec(Vec::new());
             ui.set_selected_message(0);
-            hide_html(&view);
+            hide_html(&ui, &view);
             let weak = weak.clone();
             let db_path = db_path.clone();
             let secrets = secrets.clone();
@@ -2689,7 +2581,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let messages = messages.clone();
         let fm = folders_model.clone();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         let db_path = db.clone();
         let secrets = secrets.clone();
         ui.on_toggle_junk(move |id| {
@@ -2759,7 +2651,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let messages = messages.clone();
         let fm = folders_model.clone();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         let db_path = db.clone();
         let secrets = secrets.clone();
         let pending = pending_move_id.clone();
@@ -2900,7 +2792,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let messages = messages.clone();
         let fm = folders_model.clone();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         let db_path = db.clone();
         let secrets = secrets.clone();
         let selected = selected_ids.clone();
@@ -2928,7 +2820,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let messages = messages.clone();
         let fm = folders_model.clone();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         let db_path = db.clone();
         let secrets = secrets.clone();
         let selected = selected_ids.clone();
@@ -3019,7 +2911,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let model = messages.clone();
         let fids = folder_ids.clone();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         let run_search = move |ui: &Main| {
             let query = ui.get_search_query().trim().to_owned();
             if query.is_empty() {
@@ -3035,7 +2927,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 ui.set_selected_message(0);
                 ui.set_nav_index(-1);
-                hide_html(&view);
+                hide_html(ui, &view);
                 return;
             }
             let items = search_result_items(
@@ -3049,7 +2941,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_searching(true);
             ui.set_selected_message(0);
             ui.set_nav_index(-1);
-            hide_html(&view);
+            hide_html(ui, &view);
         };
         let run2 = run_search.clone();
         ui.on_search_edited(move || {
@@ -3075,24 +2967,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // "Load remote images" → re-render the open message with remote content allowed (PRIV-2 opt-in).
+    // Compose → open the new-message overlay.
     {
         let weak = ui.as_weak();
-        let view = html_view.clone();
-        let current_allowed = current_allowed.clone();
-        ui.on_load_remote(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            ui.set_remote_blocked(false); // hide the cue first so body_rect repositions the webview
-            if let Some(doc) = current_allowed.borrow().as_ref() {
-                show_html(&ui, &view, doc);
-            }
-        });
-    }
-
-    // Compose → open the new-message overlay (hide the webview so it can't cover it).
-    {
-        let weak = ui.as_weak();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         let thread = compose_thread.clone();
         let store = store.clone();
         let draft_id = current_draft_id.clone();
@@ -3102,7 +2980,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let csmodel = cc_suggest_model.clone();
         ui.on_compose(move || {
             let Some(ui) = weak.upgrade() else { return };
-            hide_html(&view);
+            hide_html(&ui, &view);
             *thread.borrow_mut() = (None, Vec::new()); // a fresh message, not a reply
             *draft_id.borrow_mut() = None; // not editing an existing draft
             atts.borrow_mut().clear();
@@ -3126,7 +3004,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let store = store.clone();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         let thread = compose_thread.clone();
         let draft_id = current_draft_id.clone();
         let atts = compose_attachments.clone();
@@ -3169,7 +3047,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 1 => geleit_engine::message::reply_all(&orig, &my_addrs, None, String::new()),
                 _ => geleit_engine::message::forward(&orig, None, String::new()),
             };
-            hide_html(&view);
+            hide_html(&ui, &view);
             *draft_id.borrow_mut() = None; // a reply/forward is a new draft
             atts.borrow_mut().clear();
             refresh_attachments(&amodel, &atts.borrow());
@@ -3295,7 +3173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let thread = compose_thread.clone();
         let draft_id = current_draft_id.clone();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         let atts = compose_attachments.clone();
         ui.on_save_draft(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -3338,7 +3216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = store.replace_draft_attachments(id, &saved);
                     *draft_id.borrow_mut() = Some(id);
                     ui.set_composing(false);
-                    hide_html(&view);
+                    hide_html(&ui, &view);
                     ui.set_sync_status("Draft saved.".into());
                 }
                 Err(_) => ui.set_compose_status("Couldn't save the draft.".into()),
@@ -3350,7 +3228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let thread = compose_thread.clone();
         let draft_id = current_draft_id.clone();
-        let view = html_view.clone();
+        let view = html_doc.clone();
         let atts = compose_attachments.clone();
         let amodel = attach_model.clone();
         let smodel = suggest_model.clone();
@@ -3360,7 +3238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(d) = store.draft_by_id(id.into()).ok().flatten() else {
                 return;
             };
-            hide_html(&view);
+            hide_html(&ui, &view);
             *draft_id.borrow_mut() = Some(d.id);
             *thread.borrow_mut() = (d.content.in_reply_to.clone(), d.content.references.clone());
             // restore the draft's saved attachments (SEND-4/5)

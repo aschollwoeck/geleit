@@ -13,12 +13,22 @@ geleit-platform = { path = "../geleit-platform" }
 # unstable-winit-030 exposes the winit window so a sandboxed wry webview can embed as a child
 # (S3.1, ADR-0001). renderer-software lets us render Slint WITHOUT a GL context, so it can't collide
 # with the embedded webview's GL (the collision caused GLXBadWindow crashes); selected at runtime.
-slint = { version = "1.16.1", features = ["unstable-winit-030", "renderer-software"] }
+slint = { version = "1.16.1", features = ["renderer-software"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 tokio = { version = "1", features = ["rt", "net", "time"] }
 getrandom = "0.4.3"
-wry = "0.55.1"
-gtk = "0.18" # webkit2gtk's GTK; we init it and pump its loop under Slint's event loop
+# Pure-Rust, CPU HTML/CSS rendering (no GL) — replaces the webkit webview that caused the GL-on-X11
+# crashes. We render sanitized mail HTML to a bitmap + keep the DOM for hit-testing link clicks.
+blitz-html = "=0.3.0-alpha.5"
+blitz-dom = "=0.3.0-alpha.5"
+blitz-paint = "=0.3.0-alpha.5"
+blitz-traits = "=0.3.0-alpha.5"
+anyrender = "0.11"
+anyrender_vello_cpu = "0.14"
+peniko = "0.6"
+
+[dev-dependencies]
+png = "0.17" # for the blitz_spike example only
 
 [features]
 # Forwarded to the engine for self-signed dev servers; never enable in a release build.

@@ -47,13 +47,14 @@ pub fn format_date(secs: Option<i64>) -> String {
 }
 
 /// The plaintext to show in the reading pane, with honest placeholders when there's no plaintext.
-/// HTML rendering is M3, so HTML-only messages get a note rather than raw/escaped markup.
+/// HTML messages render to a bitmap in the pane, so this is only the text fallback; HTML-only
+/// messages get a short note rather than raw/escaped markup.
 pub fn body_display(body: Option<&StoredBody>) -> String {
     match body {
         None => "(Body not downloaded yet.)".to_owned(),
         Some(b) => match (&b.plain, &b.html) {
             (Some(plain), _) => plain.clone(),
-            (None, Some(_)) => "(HTML message — widen the window to view it formatted.)".to_owned(),
+            (None, Some(_)) => "(HTML message.)".to_owned(),
             (None, None) => "(No text content.)".to_owned(),
         },
     }
