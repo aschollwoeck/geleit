@@ -29,22 +29,41 @@ struct HtmlView {
 /// height** (the reading-pane subject is elided to one line, so it never wraps), so the vertical
 /// offsets always clear the actions and the remote-content cue bar (the larger reserves room for the
 /// cue). Recomputed every frame by the GTK pump, so the webview follows the divider live.
+///
+/// The left edge is clamped to keep a minimum reading width: a too-wide list on a narrow window
+/// would otherwise give the webview a zero/negative size, which can crash webkit. This matches the
+/// same clamp on the list element in the UI, so the webview stays aligned with the list edge.
 const RAIL_W: f32 = 240.0;
 const SPLITTER_W: f32 = 6.0;
-fn body_rect(ui: &Main) -> wry::Rect {
+const MIN_READING_W: f32 = 80.0;
+
+/// The body region as (left, top, width, height) logical px, with the left edge clamped to keep a
+/// minimum reading width. Callers guard on the size before showing the webview.
+fn body_geom(ui: &Main) -> (f32, f32, f32, f32) {
     let scale = ui.window().scale_factor();
-    let phys = ui.window().size();
-    let left = RAIL_W + ui.get_list_width() + SPLITTER_W;
+    let win_w = ui.window().size().width as f32 / scale;
+    let win_h = ui.window().size().height as f32 / scale;
+    let max_left = (win_w - MIN_READING_W).max(RAIL_W + SPLITTER_W);
+    let left = (RAIL_W + ui.get_list_width() + SPLITTER_W).min(max_left);
     let top = if ui.get_remote_blocked() {
         174.0
     } else {
         132.0
     };
-    let w = (phys.width as f32 / scale) - left;
-    let h = (phys.height as f32 / scale) - top;
+    (left, top, (win_w - left).max(0.0), (win_h - top).max(0.0))
+}
+
+/// True when the body region is too small to host the webview without risking a webkit crash.
+fn body_too_small(ui: &Main) -> bool {
+    let (_, _, w, h) = body_geom(ui);
+    w < 40.0 || h < 40.0
+}
+
+fn body_rect(ui: &Main) -> wry::Rect {
+    let (left, top, w, h) = body_geom(ui);
     wry::Rect {
         position: wry::dpi::LogicalPosition::new(left, top).into(),
-        size: wry::dpi::LogicalSize::new(w.max(0.0), h.max(0.0)).into(),
+        size: wry::dpi::LogicalSize::new(w, h).into(),
     }
 }
 
@@ -87,8 +106,14 @@ fn ensure_webview(ui: &Main, view: &HtmlView) {
     }
 }
 
-/// Render `sanitized_html` in the embedded sandboxed webview over the reading-pane body.
+/// Render `sanitized_html` in the embedded sandboxed webview over the reading-pane body. If the body
+/// region is too small (a too-narrow window), the webview stays hidden rather than risk a webkit
+/// crash from a degenerate surface.
 fn show_html(ui: &Main, view: &HtmlView, sanitized_html: &str) {
+    if body_too_small(ui) {
+        hide_html(view);
+        return;
+    }
     ensure_webview(ui, view);
     let rect = body_rect(ui);
     if let Some(w) = view.webview.borrow().as_ref() {
@@ -582,7 +607,10 @@ slint::slint! {
 
             // ---- MESSAGE LIST ----
             Rectangle {
-                width: root.list-width;
+                // clamp to leave the reading pane a minimum width on narrow windows (matches
+                // body_rect, so the HTML webview stays aligned with the list edge and never gets a
+                // zero-size surface — which could crash webkit)
+                width: min(root.list-width, max(280px, root.width - 240px - 6px - 80px));
                 background: Palette.surface;
                 VerticalLayout {
                     Rectangle {
@@ -2283,7 +2311,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if view.visible.get() {
                     if let (Some(ui), Some(w)) = (weak.upgrade(), view.webview.borrow().as_ref()) {
-                        let _ = w.set_bounds(body_rect(&ui));
+                        // hide rather than hand webkit a degenerate surface (resize too narrow)
+                        if body_too_small(&ui) {
+                            let _ = w.set_visible(false);
+                        } else {
+                            let _ = w.set_bounds(body_rect(&ui));
+                            let _ = w.set_visible(true);
+                        }
                     }
                 }
             },
