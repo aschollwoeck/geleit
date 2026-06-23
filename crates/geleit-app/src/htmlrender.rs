@@ -3,14 +3,41 @@
 //! (no GPU, no native child window), and keeps the DOM so link clicks can be hit-tested.
 use anyrender::{render_to_buffer, PaintScene as _};
 use anyrender_vello_cpu::VelloCpuImageRenderer;
+use base64::Engine;
 use blitz_dom::{local_name, DocumentConfig};
 use blitz_html::HtmlDocument;
+use blitz_traits::net::{Bytes, NetHandler, NetProvider, Request};
 use blitz_traits::shell::{ColorScheme, Viewport};
 use peniko::kurbo::Rect;
 use peniko::{Color, Fill};
+use std::sync::Arc;
 
 /// Max rendered height (px). Bounds memory for pathological emails; the content scrolls in the pane.
 const MAX_H: u32 = 16000;
+
+/// Blitz resolves every image resource (including `data:`) through a `NetProvider`. Ours is fully
+/// offline: it decodes `data:` URIs locally and serves nothing else — so inline images and any the
+/// user explicitly loaded (turned into `data:` URIs by [`crate::remoteimg`]) render, while raw
+/// `http(s)` references are never fetched here. (Without any provider, Blitz draws no images at all.)
+struct DataUriProvider;
+
+impl NetProvider for DataUriProvider {
+    fn fetch(&self, _doc_id: usize, request: Request, handler: Box<dyn NetHandler>) {
+        let url = request.url.as_str();
+        let Some(comma) = url.strip_prefix("data:").and(url.find(',')) else {
+            return; // not a data: URI → not served (http/cid/etc. don't load here)
+        };
+        let (meta, data) = (&url[..comma], &url[comma + 1..]);
+        let bytes = if meta.contains(";base64") {
+            base64::engine::general_purpose::STANDARD.decode(data).ok()
+        } else {
+            Some(data.as_bytes().to_vec())
+        };
+        if let Some(b) = bytes {
+            handler.bytes(url.to_string(), Bytes::from(b));
+        }
+    }
+}
 
 /// A rendered HTML message: the bitmap to show + the laid-out DOM (for hit-testing link clicks).
 pub struct Rendered {
@@ -19,8 +46,9 @@ pub struct Rendered {
 }
 
 /// Render sanitized `html` at `width` px into a bitmap sized to the content height. `dark` picks the
-/// page background + color scheme to match the app theme. No network provider is set, so remote
-/// content never loads (privacy).
+/// page background + color scheme to match the app theme. The provider serves only `data:` images,
+/// so nothing is fetched from the network here (remote images load only after the user opts in, via
+/// [`crate::remoteimg`] inlining them as `data:` first).
 pub fn render(html: &str, width: u32, dark: bool) -> Rendered {
     let width = width.max(1);
     let scheme = if dark {
@@ -32,10 +60,14 @@ pub fn render(html: &str, width: u32, dark: bool) -> Rendered {
         html,
         DocumentConfig {
             viewport: Some(Viewport::new(width, MAX_H, 1.0, scheme)),
+            net_provider: Some(Arc::new(DataUriProvider)),
             ..Default::default()
         },
     );
-    doc.as_mut().resolve(0.0);
+    // Resolve a few times so images served during the first pass get laid out before we measure.
+    for _ in 0..3 {
+        doc.as_mut().resolve(0.0);
+    }
     let content_h = doc.as_ref().root_element().final_layout.size.height;
     let h = (content_h.ceil() as u32).clamp(1, MAX_H);
 

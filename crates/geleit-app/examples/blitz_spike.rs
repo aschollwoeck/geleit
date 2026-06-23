@@ -3,11 +3,33 @@
 //! what the reading pane actually produces. Run: cargo run -p geleit-app --example blitz_spike
 use anyrender::{render_to_buffer, PaintScene as _};
 use anyrender_vello_cpu::VelloCpuImageRenderer;
+use base64::Engine;
 use blitz_dom::DocumentConfig;
 use blitz_html::HtmlDocument;
+use blitz_traits::net::{Bytes, NetHandler, NetProvider, Request};
 use blitz_traits::shell::{ColorScheme, Viewport};
 use peniko::kurbo::Rect;
 use peniko::{Color, Fill};
+use std::sync::Arc;
+
+/// Offline provider: serves `data:` URIs only (decoded locally), ignores everything else.
+struct DataUriProvider;
+impl NetProvider for DataUriProvider {
+    fn fetch(&self, _doc_id: usize, request: Request, handler: Box<dyn NetHandler>) {
+        let url = request.url.as_str();
+        if let Some(comma) = url.strip_prefix("data:").and_then(|_| url.find(',')) {
+            let (meta, data) = (&url[..comma], &url[comma + 1..]);
+            let bytes = if meta.contains(";base64") {
+                base64::engine::general_purpose::STANDARD.decode(data).ok()
+            } else {
+                Some(data.as_bytes().to_vec())
+            };
+            if let Some(b) = bytes {
+                handler.bytes(url.to_string(), Bytes::from(b));
+            }
+        }
+    }
+}
 
 fn main() {
     // A realistic, legacy newsletter: table layout + presentational attrs (bgcolor/width/align/
@@ -33,9 +55,13 @@ fn main() {
       </td></tr></table>
     </body></html>"##;
 
-    // exactly what the app feeds Blitz
-    let sanitized = geleit_engine::safehtml::sanitize_html(raw);
-    let doc_html = geleit_engine::safehtml::document(&sanitized, false);
+    // exactly what the app feeds Blitz (or a raw file via GELEIT_SPIKE_HTML, to isolate rendering)
+    let doc_html = if let Ok(path) = std::env::var("GELEIT_SPIKE_HTML") {
+        std::fs::read_to_string(path).unwrap()
+    } else {
+        let sanitized = geleit_engine::safehtml::sanitize_html(raw);
+        geleit_engine::safehtml::document(&sanitized, false)
+    };
     std::fs::write("/tmp/blitz-in.html", &doc_html).unwrap();
     eprintln!(
         "sanitized doc written to /tmp/blitz-in.html ({} bytes)",
@@ -47,10 +73,14 @@ fn main() {
         &doc_html,
         DocumentConfig {
             viewport: Some(Viewport::new(w, 16000, 1.0, ColorScheme::Light)),
+            net_provider: Some(Arc::new(DataUriProvider)),
             ..Default::default()
         },
     );
-    document.as_mut().resolve(0.0);
+    // resolve a few times so data: images fetched during the first pass are laid out
+    for _ in 0..3 {
+        document.as_mut().resolve(0.0);
+    }
     let content_h = document.as_ref().root_element().final_layout.size.height;
     let h = (content_h.ceil() as u32).clamp(1, 16000);
     eprintln!("content height = {content_h} → image {w}x{h}");
