@@ -53,7 +53,7 @@ pub fn body_display(body: Option<&StoredBody>) -> String {
         None => "(Body not downloaded yet.)".to_owned(),
         Some(b) => match (&b.plain, &b.html) {
             (Some(plain), _) => plain.clone(),
-            (None, Some(_)) => "(HTML message — safe rendering arrives in M3.)".to_owned(),
+            (None, Some(_)) => "(HTML message — widen the window to view it formatted.)".to_owned(),
             (None, None) => "(No text content.)".to_owned(),
         },
     }

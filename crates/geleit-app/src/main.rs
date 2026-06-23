@@ -53,10 +53,18 @@ fn body_geom(ui: &Main) -> (f32, f32, f32, f32) {
     (left, top, (win_w - left).max(0.0), (win_h - top).max(0.0))
 }
 
-/// True when the body region is too small to host the webview without risking a webkit crash.
+/// True when the window/body is too small to host the embedded webview safely. The webview is a
+/// native webkit (GL) child window; on X11 a small/cramped surface intermittently triggers a stray
+/// `GLXBadWindow` that surfaces as a winit panic (`flush_requests().expect("…change window theme")`).
+/// Below these thresholds we fall back to the sanitized text view instead of building/showing it.
+/// (Reproduced: a 500px window crashes; ≥700px and maximized are stable. Thresholds lean toward
+/// "show text" — HTML in a cramped pane isn't useful anyway.)
 fn body_too_small(ui: &Main) -> bool {
+    let scale = ui.window().scale_factor();
+    let win_w = ui.window().size().width as f32 / scale;
+    let win_h = ui.window().size().height as f32 / scale;
     let (_, _, w, h) = body_geom(ui);
-    w < 40.0 || h < 40.0
+    win_w < 800.0 || win_h < 540.0 || w < 360.0 || h < 240.0
 }
 
 fn body_rect(ui: &Main) -> wry::Rect {
