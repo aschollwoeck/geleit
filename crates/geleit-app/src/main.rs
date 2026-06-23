@@ -4,6 +4,7 @@
 
 mod htmlrender;
 mod refresh;
+mod remoteimg;
 mod viewmodel;
 
 use std::cell::RefCell;
@@ -251,6 +252,8 @@ slint::slint! {
         callback close-settings();
         callback toggle-theme();
         callback html-click(length, length); // click in the rendered HTML → hit-test for a link
+        callback load-remote(); // PRIV-2: fetch + show this message's remote images
+        callback apply-loaded-html(string); // worker → UI: re-render with images inlined as data:
         callback compose();
         callback send-message();
         callback cancel-compose();
@@ -970,9 +973,8 @@ slint::slint! {
                             TouchArea { clicked => { root.mark-unread(root.selected-message); } }
                         }
                     }
-                    // remote content blocked (PRIV-3). Remote loading is never on by default; the
-                    // CPU HTML renderer is given no network provider, so trackers/remote images can't
-                    // load at all. (Per-message opt-in load is a follow-up on the new renderer.)
+                    // remote content blocked (PRIV-3) + opt-in per-message load (PRIV-2). Nothing
+                    // remote loads by default; clicking fetches this message's images and re-renders.
                     if root.remote-blocked: Rectangle {
                         height: 32px;
                         border-radius: 8px;
@@ -980,12 +982,26 @@ slint::slint! {
                         HorizontalLayout {
                             padding-left: 10px;
                             padding-right: 10px;
+                            spacing: 8px;
                             Text {
-                                text: "Remote content blocked — images and trackers were not loaded";
+                                text: "Remote content blocked";
                                 color: Palette.text;
                                 font-size: 12px;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
+                            }
+                            TouchArea {
+                                width: 140px;
+                                mouse-cursor: pointer;
+                                clicked => { root.load-remote(); }
+                                Text {
+                                    text: "Load images";
+                                    color: Palette.accent-strong;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
+                                }
                             }
                         }
                     }
@@ -2178,6 +2194,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let folder_ids = Rc::new(RefCell::new(Vec::<i64>::new()));
     let messages = Rc::new(VecModel::<MessageItem>::default());
     let html_doc: HtmlDoc = Rc::new(RefCell::new(None));
+    // the open HTML message's remote-allowing sanitized BODY, kept so "Load images" (PRIV-2) can
+    // fetch + inline its remote images on demand; None when the message had no remote content.
+    let current_allowed = Rc::new(RefCell::new(Option::<String>::None));
     // threading headers (in_reply_to, references) for the message being composed, if it's a reply
     type ComposeThread = Rc<RefCell<(Option<String>, Vec<String>)>>;
     let compose_thread: ComposeThread = Rc::new(RefCell::new((None, Vec::new())));
@@ -2230,6 +2249,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     open_external(&href);
                 }
             }
+        });
+    }
+
+    // "Load images" (PRIV-2): on a worker, fetch the open message's remote images and inline them as
+    // data: URIs; then re-render on the UI thread via apply-loaded-html. This is the only outbound
+    // HTTP the app makes for mail content, and only on this explicit click.
+    {
+        let weak = ui.as_weak();
+        let allowed = current_allowed.clone();
+        ui.on_load_remote(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(body) = allowed.borrow().clone() else {
+                return;
+            };
+            ui.set_sync_status("Loading images…".into());
+            let weak = ui.as_weak();
+            std::thread::spawn(move || {
+                let inlined = std::panic::catch_unwind(|| remoteimg::inline_remote_images(&body))
+                    .unwrap_or(body);
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.invoke_apply_loaded_html(inlined.into());
+                    }
+                });
+            });
+        });
+    }
+
+    // Worker → UI: re-render the open message with its images now inlined (data: URIs), and drop the
+    // "remote content blocked" cue. Runs on the UI thread, so it can render via the kept HtmlDoc.
+    {
+        let weak = ui.as_weak();
+        let view = html_doc.clone();
+        ui.on_apply_loaded_html(move |body| {
+            let Some(ui) = weak.upgrade() else { return };
+            show_html(&ui, &view, &geleit_engine::safehtml::document(&body, true));
+            ui.set_remote_blocked(false);
+            ui.set_sync_status(SharedString::new());
         });
     }
 
@@ -2295,6 +2352,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = store.clone();
         let model = messages.clone();
         let view = html_doc.clone();
+        let allowed = current_allowed.clone();
         let db_path = db.clone();
         let secrets = secrets.clone();
         ui.on_message_selected(move |item| {
@@ -2331,11 +2389,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // they differ iff the message had remote content → show the cue (PRIV-3).
                     let body_blocked = safehtml::sanitize_html(&h);
                     let body_allowed = safehtml::sanitize_html_allowing_remote(&h);
-                    ui.set_remote_blocked(body_blocked != body_allowed);
+                    let has_remote = body_blocked != body_allowed;
+                    ui.set_remote_blocked(has_remote);
+                    // keep the remote-allowing body so "Load images" can fetch+inline on demand
+                    *allowed.borrow_mut() = has_remote.then_some(body_allowed);
                     show_html(&ui, &view, &safehtml::document(&body_blocked, false));
                 }
                 None => {
                     ui.set_remote_blocked(false);
+                    *allowed.borrow_mut() = None;
                     hide_html(&ui, &view);
                 }
             }
@@ -3762,7 +3824,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_search_query("report".into());
                         ui.invoke_search_edited();
                     }
-                    "read" => {
+                    "read" | "loadimg" => {
                         if let Some(item) = model.row_data(0) {
                             ui.invoke_message_selected(item);
                         }
@@ -3776,6 +3838,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     _ => {}
+                }
+            },
+        );
+    }
+
+    // `GELEIT_SHOT=loadimg`: after the message opens, trigger "Load images" so the remote-image
+    // fetch + re-render can be verified by screenshot. Dev aid only.
+    let _shot_timer2 = slint::Timer::default();
+    if std::env::var("GELEIT_SHOT").ok().as_deref() == Some("loadimg") {
+        let weak = ui.as_weak();
+        _shot_timer2.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(1800),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_load_remote();
                 }
             },
         );

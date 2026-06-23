@@ -89,7 +89,7 @@ fn main() {
               <td width="12"></td>
               <td bgcolor="#f4f7f8" align="center" style="border-radius:6px;">Clicks<br><b style="font-size:20px;">317</b></td>
             </tr></table>
-            <p><img src="https://example.com/banner.png" alt="banner"></p>
+            <p><img src="https://example.com/banner.png" alt="banner" width="520"></p>
             <p style="margin-top:16px;">
               <a href="https://example.com/read" style="background:#1c7e7b;color:#fff;padding:12px 22px;border-radius:6px;text-decoration:none;font-weight:bold;">Read more &rarr;</a>
             </p>
