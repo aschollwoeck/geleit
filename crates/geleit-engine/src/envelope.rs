@@ -1,10 +1,26 @@
 //! Pure helpers for turning IMAP envelope bytes into stored strings. Kept separate from the
-//! network code in `imap.rs` so they stay unit- and mutation-tested. RFC2047 MIME-word decoding
-//! of headers is deferred to the MIME slice (S1.6); this is the naive lossy-UTF-8 pass.
+//! network code in `imap.rs` so they stay unit- and mutation-tested.
 
-/// Decode an IMAP envelope header byte string to a `String` (lossy UTF-8), or `None` if absent.
+/// Decode an IMAP envelope header byte string to a display `String`, or `None` if absent. Decodes
+/// RFC 2047 "encoded-words" (`=?UTF-8?Q?...?=` / `=?...?B?...?=`) so non-ASCII subjects and names
+/// read correctly (e.g. `=?UTF-8?Q?Gr=C3=BC=C3=9Fe?=` → `Grüße`). Plain values take a fast path.
 pub(crate) fn decode_header(bytes: Option<&[u8]>) -> Option<String> {
-    bytes.map(|b| String::from_utf8_lossy(b).into_owned())
+    let bytes = bytes?;
+    let raw = String::from_utf8_lossy(bytes);
+    // No encoded-word marker → already a plain (lossy-UTF-8) value; skip the parse.
+    if !raw.contains("=?") {
+        return Some(raw.into_owned());
+    }
+    // Let mail-parser do the RFC 2047 decoding by parsing a synthetic header (encoded-words are
+    // ASCII, so this is safe). Falls back to the lossy value if parsing somehow yields nothing.
+    let mut doc = Vec::with_capacity(bytes.len() + 11);
+    doc.extend_from_slice(b"Subject: ");
+    doc.extend_from_slice(bytes);
+    doc.extend_from_slice(b"\r\n\r\n");
+    mail_parser::MessageParser::default()
+        .parse(&doc)
+        .and_then(|m| m.subject().map(str::to_owned))
+        .or_else(|| Some(raw.into_owned()))
 }
 
 /// Build `(from_name, from_addr)` from an address's parts. `from_addr` is `mailbox@host` when both
@@ -54,6 +70,32 @@ mod tests {
         assert_eq!(decode_header(None), None);
         // invalid UTF-8 is replaced, not dropped
         assert!(decode_header(Some(&[0xff, b'a'])).unwrap().contains('a'));
+    }
+
+    #[test]
+    fn decode_header_rfc2047_encoded_words() {
+        // Quoted-printable encoded-word (the form seen on real mail)
+        assert_eq!(
+            decode_header(Some(b"=?UTF-8?Q?Gr=C3=BC=C3=9Fe?=")),
+            Some("Grüße".to_owned())
+        );
+        // the German bank subject from the bug report (Fwd: … – en-dash)
+        assert_eq!(
+            decode_header(Some(
+                b"=?UTF-8?Q?Fwd=3A_Schnell_zum_Wunschkredit_=E2=80=93_jetzt?="
+            )),
+            Some("Fwd: Schnell zum Wunschkredit – jetzt".to_owned())
+        );
+        // Base64 encoded-word
+        assert_eq!(
+            decode_header(Some(b"=?UTF-8?B?w5xiZXI=?=")),
+            Some("Über".to_owned())
+        );
+        // a plain value containing no encoded-word is returned unchanged
+        assert_eq!(
+            decode_header(Some(b"Plain subject")),
+            Some("Plain subject".to_owned())
+        );
     }
 
     #[test]

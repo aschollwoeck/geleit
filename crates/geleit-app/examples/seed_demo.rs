@@ -77,10 +77,27 @@ fn main() {
             },
         )
         .unwrap();
-    let html = "<h2>This month in GeleitMail</h2>\
-        <p>A few highlights from the latest release — rendered in the <b>sandboxed</b> HTML view.</p>\
-        <img src=\"https://example.com/banner.png\" alt=\"banner\">\
-        <p>Scripts can't run here and remote images stay blocked until you ask for them.</p>";
+    let html = r##"<!doctype html><html><body style="margin:0;background:#eef2f4;">
+      <table width="100%" cellpadding="0" cellspacing="0" bgcolor="#eef2f4"><tr><td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" bgcolor="#ffffff" style="margin:24px auto;border-radius:8px;overflow:hidden;font-family:Arial,sans-serif;">
+          <tr><td bgcolor="#1c7e7b" style="padding:24px;color:#ffffff;font-size:24px;font-weight:bold;">Acme Weekly</td></tr>
+          <tr><td style="padding:24px;color:#222;font-size:15px;line-height:1.6;">
+            <h2 style="color:#1c7e7b;margin:0 0 8px;">Your week in review</h2>
+            <p>Hi there — here are this week's <b>highlights</b>. Thanks for being a subscriber!</p>
+            <table width="100%" cellpadding="8"><tr>
+              <td bgcolor="#f4f7f8" align="center" style="border-radius:6px;">Opens<br><b style="font-size:20px;">1,204</b></td>
+              <td width="12"></td>
+              <td bgcolor="#f4f7f8" align="center" style="border-radius:6px;">Clicks<br><b style="font-size:20px;">317</b></td>
+            </tr></table>
+            <p><img src="https://example.com/banner.png" alt="banner"></p>
+            <p style="margin-top:16px;">
+              <a href="https://example.com/read" style="background:#1c7e7b;color:#fff;padding:12px 22px;border-radius:6px;text-decoration:none;font-weight:bold;">Read more &rarr;</a>
+            </p>
+          </td></tr>
+          <tr><td bgcolor="#222" style="padding:16px 24px;color:#9aa;font-size:12px;">&copy; Acme &middot; <a href="https://example.com/unsub" style="color:#9cc;">Unsubscribe</a></td></tr>
+        </table>
+      </td></tr></table>
+    </body></html>"##;
     s.store_body(
         hid,
         Some("This month in GeleitMail — a few highlights from the latest release."),
