@@ -955,7 +955,9 @@ slint::slint! {
             // ---- READING PANE ----
             Rectangle {
                 background: Palette.surface-reading;
-                Rectangle { x: 0; width: 3px; background: Palette.accent; } // guide edge
+                // (no left guide-edge here: the splitter handle is the separator, and an accent edge
+                // at this x would be covered by the HTML webview in the body but show in the header,
+                // making the divider look interrupted)
                 if root.selected-message == 0: VerticalLayout {
                     padding: 28px;
                     Text { text: "Select a message to read it."; color: Palette.muted; }
