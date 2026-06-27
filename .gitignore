@@ -23,3 +23,6 @@ dist/
 
 # stray screenshots dropped in the repo root (manual images live in docs/manual/images/)
 /Screenshot*.png
+
+# never commit saved mail files (may contain personal mail)
+*.eml
