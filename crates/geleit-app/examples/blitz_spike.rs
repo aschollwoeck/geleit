@@ -56,7 +56,19 @@ fn main() {
     </body></html>"##;
 
     // exactly what the app feeds Blitz (or a raw file via GELEIT_SPIKE_HTML, to isolate rendering)
-    let doc_html = if let Ok(path) = std::env::var("GELEIT_SPIKE_HTML") {
+    let doc_html = if let Ok(path) = std::env::var("GELEIT_SPIKE_EML") {
+        // parse a real .eml exactly as the app does, dump the decoded HTML for inspection
+        let bytes = std::fs::read(path).unwrap();
+        let eml = geleit_engine::message::parse_eml(&bytes);
+        let html = eml.html.unwrap_or_default();
+        std::fs::write("/tmp/decoded-html.html", &html).unwrap();
+        eprintln!(
+            "decoded HTML → /tmp/decoded-html.html ({} bytes)",
+            html.len()
+        );
+        let sanitized = geleit_engine::safehtml::sanitize_html(&html);
+        geleit_engine::safehtml::document(&sanitized, false)
+    } else if let Ok(path) = std::env::var("GELEIT_SPIKE_HTML") {
         std::fs::read_to_string(path).unwrap()
     } else {
         let sanitized = geleit_engine::safehtml::sanitize_html(raw);
