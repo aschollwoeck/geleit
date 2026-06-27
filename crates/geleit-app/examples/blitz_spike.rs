@@ -68,6 +68,10 @@ fn main() {
         );
         let sanitized = geleit_engine::safehtml::sanitize_html(&html);
         geleit_engine::safehtml::document(&sanitized, false)
+    } else if let Ok(path) = std::env::var("GELEIT_SPIKE_BODY") {
+        // wrap a raw body via the exact document() the app uses (CSS + font fallback)
+        let body = std::fs::read_to_string(path).unwrap();
+        geleit_engine::safehtml::document(&body, true)
     } else if let Ok(path) = std::env::var("GELEIT_SPIKE_HTML") {
         std::fs::read_to_string(path).unwrap()
     } else {
@@ -80,7 +84,10 @@ fn main() {
         doc_html.len()
     );
 
-    let w = 760u32;
+    let w: u32 = std::env::var("GELEIT_SPIKE_W")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(760);
     let mut document = HtmlDocument::from_html(
         &doc_html,
         DocumentConfig {
