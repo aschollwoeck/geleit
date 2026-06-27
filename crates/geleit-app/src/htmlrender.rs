@@ -39,9 +39,15 @@ impl NetProvider for DataUriProvider {
     }
 }
 
-/// A rendered HTML message: the bitmap to show + the laid-out DOM (for hit-testing link clicks).
+/// Max height (px) of one display tile. Slint's software renderer can't display a single very tall
+/// image (a full email can be many thousands of px); we slice the bitmap into tiles this tall and
+/// stack them in the reading pane's scroll view. Each tile must stay comfortably displayable.
+pub const TILE_H: u32 = 1024;
+
+/// A rendered HTML message: the bitmap sliced into vertical tiles (stacked in the scroll view, to
+/// work around Slint's tall-image limit) + the laid-out DOM (for hit-testing link clicks).
 pub struct Rendered {
-    pub image: slint::Image,
+    pub tiles: Vec<slint::Image>,
     pub doc: HtmlDocument,
 }
 
@@ -91,11 +97,23 @@ pub fn render(html: &str, width: u32, dark: bool) -> Rendered {
         width,
         h,
     );
-    let pixbuf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&buffer, width, h);
-    Rendered {
-        image: slint::Image::from_rgba8(pixbuf),
-        doc,
+    // Slice the RGBA bitmap into stacked tiles (Slint can't display one very tall image).
+    let row_bytes = (width * 4) as usize;
+    let mut tiles = Vec::new();
+    let mut y = 0;
+    while y < h {
+        let th = (h - y).min(TILE_H);
+        let start = (y as usize) * row_bytes;
+        let end = ((y + th) as usize) * row_bytes;
+        let pb = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+            &buffer[start..end],
+            width,
+            th,
+        );
+        tiles.push(slint::Image::from_rgba8(pb));
+        y += th;
     }
+    Rendered { tiles, doc }
 }
 
 /// The `href` of the link at (`x`, `y`) in the rendered document, if any — walks up from the hit

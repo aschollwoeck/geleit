@@ -43,7 +43,7 @@ fn reading_pane_width(ui: &Main) -> u32 {
 fn show_html(ui: &Main, doc: &HtmlDoc, sanitized_html: &str) {
     let dark = ui.global::<Palette>().get_dark();
     let rendered = htmlrender::render(sanitized_html, reading_pane_width(ui), dark);
-    ui.set_r_html_image(rendered.image);
+    ui.set_r_html_tiles(ModelRc::new(VecModel::from(rendered.tiles)));
     ui.set_r_is_html(true);
     *doc.borrow_mut() = Some(rendered.doc);
 }
@@ -51,7 +51,7 @@ fn show_html(ui: &Main, doc: &HtmlDoc, sanitized_html: &str) {
 /// Switch the reading pane back to the plain-text view and drop the kept HTML DOM.
 fn hide_html(ui: &Main, doc: &HtmlDoc) {
     ui.set_r_is_html(false);
-    ui.set_r_html_image(slint::Image::default());
+    ui.set_r_html_tiles(ModelRc::new(VecModel::<slint::Image>::default()));
     *doc.borrow_mut() = None;
 }
 
@@ -156,7 +156,8 @@ slint::slint! {
         in property <string> r-date;
         in property <string> r-body;
         in property <bool> r-is-html; // open message is rich HTML → show the rendered bitmap
-        in property <image> r-html-image; // CPU-rendered HTML (no GL); links hit-tested on click
+        in property <[image]> r-html-tiles; // CPU-rendered HTML, sliced into stacked tiles (Slint
+                                            // can't show one very tall image); links hit-tested on click
         in property <bool> r-starred; // the open message is starred (ORG-4)
         in property <[string]> r-attachments;
         in property <bool> picking-folder; // "Move to…" folder picker open (ORG-3)
@@ -1029,26 +1030,23 @@ slint::slint! {
                             }
                         }
                     }
-                    // Body: rich (HTML) messages render to a CPU bitmap (no GL → no webview crashes);
-                    // links stay clickable via hit-testing the kept DOM on click. Plain text otherwise.
+                    // Body: rich (HTML) messages render to a CPU bitmap (no GL → no webview crashes),
+                    // sliced into stacked tiles (Slint can't show one very tall image). Links stay
+                    // clickable via hit-testing the kept DOM at the click point (tile index × tile
+                    // height + local y = document y). Plain text otherwise.
                     if root.r-is-html: ScrollView {
-                        Rectangle {
-                            min-width: root.r-html-image.width * 1px;
-                            min-height: root.r-html-image.height * 1px;
-                            htmlimg := Image {
-                                x: 0;
-                                y: 0;
-                                source: root.r-html-image;
-                                width: root.r-html-image.width * 1px;
-                                height: root.r-html-image.height * 1px;
-                            }
-                            TouchArea {
-                                x: 0;
-                                y: 0;
-                                width: htmlimg.width;
-                                height: htmlimg.height;
-                                mouse-cursor: pointer;
-                                clicked => { root.html-click(self.mouse-x, self.mouse-y); }
+                        VerticalLayout {
+                            alignment: start;
+                            for tile[i] in root.r-html-tiles: Image {
+                                source: tile;
+                                width: tile.width * 1px;
+                                height: tile.height * 1px;
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.html-click(self.mouse-x, i * 1024px + self.mouse-y);
+                                    }
+                                }
                             }
                         }
                     }
