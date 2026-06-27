@@ -116,19 +116,107 @@ pub fn document(sanitized_body: &str, allow_remote_images: bool) -> String {
     } else {
         "data: cid:"
     };
+    let body = add_font_fallbacks(sanitized_body);
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; \
 img-src {img_src}; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'\">\
          <style>html{{font-family:system-ui,sans-serif;color:#1f2a2e;background:#fbfaf7;\
 margin:0;padding:12px;line-height:1.5}}a{{color:#1c7e7b}}img{{max-width:100%;height:auto}}</style>\
-         </head><body>{sanitized_body}</body></html>"
+         </head><body>{body}</body></html>"
     )
+}
+
+/// The CSS generic font families. A `font-family` value naming one of these has a guaranteed
+/// fallback that's actually installed.
+const GENERIC_FAMILIES: [&str; 11] = [
+    "sans-serif",
+    "serif",
+    "monospace",
+    "cursive",
+    "fantasy",
+    "system-ui",
+    "ui-sans-serif",
+    "ui-serif",
+    "ui-monospace",
+    "math",
+    "emoji",
+];
+
+/// Whether a `font-family` value already lists a generic family (so a missing named font falls
+/// through to it). Token-based so e.g. `"PT Serif"` (a named font) isn't mistaken for the generic.
+fn font_value_has_generic(value: &str) -> bool {
+    value.split(',').any(|t| {
+        let t = t.trim().trim_matches(['"', '\'']).to_ascii_lowercase();
+        GENERIC_FAMILIES.contains(&t.as_str())
+    })
+}
+
+/// Append a `, sans-serif` fallback to every `font-family` value (inline `style=` or in `<style>`)
+/// that names no generic family. Blitz/parley drops **digit** glyphs for a named-but-uninstalled
+/// font (e.g. `font-family:Helvetica` on a box → "15.000" renders as "."); falling through to an
+/// installed generic restores them. A value that already has a generic is left untouched.
+pub fn add_font_fallbacks(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len() + 64);
+    let mut i = 0;
+    while let Some(rel) = lower[i..].find("font-family") {
+        let prop_start = i + rel;
+        let mut j = prop_start + "font-family".len();
+        while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+            j += 1;
+        }
+        if j >= bytes.len() || bytes[j] != b':' {
+            // "font-family" not used as a CSS property here — copy past it and continue
+            out.push_str(&html[i..prop_start + "font-family".len()]);
+            i = prop_start + "font-family".len();
+            continue;
+        }
+        let val_start = j + 1;
+        // value ends at the CSS terminators or the `"` that closes an inline `style="…"` attribute
+        // (sanitizer output uses double-quoted attributes, so single quotes only wrap font names).
+        let val_end = html[val_start..]
+            .find([';', '}', '"', '<'])
+            .map_or(html.len(), |p| val_start + p);
+        let value = &html[val_start..val_end];
+        out.push_str(&html[i..val_end]); // copy through the value verbatim
+        if !value.trim().is_empty() && !font_value_has_generic(value) {
+            out.push_str(", sans-serif");
+        }
+        i = val_end;
+    }
+    out.push_str(&html[i..]);
+    out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{document, sanitize_html, sanitize_html_allowing_remote};
+    use super::{add_font_fallbacks, document, sanitize_html, sanitize_html_allowing_remote};
+
+    #[test]
+    fn font_fallback_added_only_when_missing() {
+        // bare named font → fallback appended (so digits render)
+        assert_eq!(
+            add_font_fallbacks(r#"<p style="font-family:Helvetica">x</p>"#),
+            r#"<p style="font-family:Helvetica, sans-serif">x</p>"#
+        );
+        // already has a generic → unchanged
+        let ok = r#"<p style="font-family:Arial, sans-serif">x</p>"#;
+        assert_eq!(add_font_fallbacks(ok), ok);
+        // a <style> block value is handled too
+        assert_eq!(
+            add_font_fallbacks("<style>.a{font-family:Roboto;color:red}</style>"),
+            "<style>.a{font-family:Roboto, sans-serif;color:red}</style>"
+        );
+        // "PT Serif" is a named font, not the `serif` generic → fallback still added
+        assert!(
+            add_font_fallbacks(r#"<i style="font-family:'PT Serif'">x</i>"#).contains("sans-serif")
+        );
+        // no font-family at all → untouched
+        let plain = "<p>just text 12345</p>";
+        assert_eq!(add_font_fallbacks(plain), plain);
+    }
 
     #[test]
     fn strips_scripts_and_handlers() {
