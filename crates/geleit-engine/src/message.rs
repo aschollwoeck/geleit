@@ -295,9 +295,137 @@ fn addresses(addrs: &[String]) -> Vec<Address<'_>> {
     addrs.iter().map(|a| Address::from(a.as_str())).collect()
 }
 
+/// Build an RFC 822 `.eml` (bytes) from a stored message — its headers + text/HTML bodies — so it can
+/// be saved to disk and re-opened (here or in any mail client). Bodies are faithful; headers are
+/// reconstructed from what we store (Date from the stored timestamp, Message-ID if present).
+pub fn export_eml(
+    header: &geleit_store::MessageHeader,
+    body: Option<&geleit_store::StoredBody>,
+) -> Result<Vec<u8>, String> {
+    let mut b = MessageBuilder::new();
+    b = match header
+        .from_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        Some(name) => b.from((name, header.from_addr.as_deref().unwrap_or(""))),
+        None => b.from(header.from_addr.as_deref().unwrap_or("")),
+    };
+    let to = split_addrs(header.to_addrs.as_deref().unwrap_or(""));
+    if !to.is_empty() {
+        b = b.to(addresses(&to));
+    }
+    let cc = split_addrs(header.cc_addrs.as_deref().unwrap_or(""));
+    if !cc.is_empty() {
+        b = b.cc(addresses(&cc));
+    }
+    b = b.subject(header.subject.as_deref().unwrap_or("(no subject)"));
+    if let Some(mid) = header.message_id.as_deref().filter(|s| !s.is_empty()) {
+        b = b.message_id(mid);
+    }
+    if let Some(ts) = header.date {
+        b = b.date(ts);
+    }
+    let plain = body.and_then(|x| x.plain.as_deref());
+    let html = body.and_then(|x| x.html.as_deref());
+    b = match (plain, html) {
+        (Some(p), Some(h)) => b.text_body(p).html_body(h),
+        (Some(p), None) => b.text_body(p),
+        (None, Some(h)) => b.html_body(h),
+        (None, None) => b.text_body(""),
+    };
+    b.write_to_vec()
+        .map_err(|_| "Couldn't build the .eml file.".to_owned())
+}
+
+/// Fields recovered from a `.eml` file when opening one.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ImportedEml {
+    pub subject: Option<String>,
+    pub from_name: Option<String>,
+    pub from_addr: Option<String>,
+    pub to_addrs: Option<String>,
+    pub date: Option<i64>,
+    pub message_id: Option<String>,
+    pub plain: Option<String>,
+    pub html: Option<String>,
+    pub has_attachments: bool,
+}
+
+/// Parse a `.eml` file's bytes into the fields the reading pane needs — headers (RFC 2047-decoded by
+/// `mail-parser`) + the text/HTML bodies (via the same `mime` parser used for synced mail). Returns
+/// defaults for a file that doesn't parse as a message.
+pub fn parse_eml(raw: &[u8]) -> ImportedEml {
+    let Some(msg) = mail_parser::MessageParser::default().parse(raw) else {
+        return ImportedEml::default();
+    };
+    let from = msg.from().and_then(|a| a.first());
+    let to_addrs = msg.to().map(|a| {
+        a.iter()
+            .filter_map(|x| x.address())
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
+    let body = crate::mime::parse_body(raw);
+    ImportedEml {
+        subject: msg.subject().map(str::to_owned),
+        from_name: from.and_then(|a| a.name()).map(str::to_owned),
+        from_addr: from.and_then(|a| a.address()).map(str::to_owned),
+        to_addrs: to_addrs.filter(|s| !s.is_empty()),
+        date: msg.date().map(|d| d.to_timestamp()),
+        message_id: msg.message_id().map(str::to_owned),
+        plain: body.plain,
+        html: body.html,
+        has_attachments: body.has_attachments,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_then_parse_eml_roundtrips() {
+        use geleit_store::{MessageHeader, StoredBody};
+        let header = MessageHeader {
+            id: 1,
+            uid: None,
+            message_id: Some("<m1@example.com>".into()),
+            in_reply_to: None,
+            subject: Some("Grüße — a saved message".into()), // non-ASCII → exercises RFC2047
+            from_name: Some("Anna Müller".into()),
+            from_addr: Some("anna@example.com".into()),
+            to_addrs: Some("bob@example.com".into()),
+            cc_addrs: None,
+            date: Some(1_700_000_000),
+            seen: true,
+            flagged: false,
+            has_attachments: false,
+            snippet: None,
+        };
+        let body = StoredBody {
+            plain: Some("Plain body text.".into()),
+            html: Some("<p>Hi <b>there</b></p>".into()),
+        };
+        let bytes = export_eml(&header, Some(&body)).expect("export");
+        let p = parse_eml(&bytes);
+        assert_eq!(p.subject.as_deref(), Some("Grüße — a saved message"));
+        assert_eq!(p.from_name.as_deref(), Some("Anna Müller"));
+        assert_eq!(p.from_addr.as_deref(), Some("anna@example.com"));
+        assert_eq!(p.to_addrs.as_deref(), Some("bob@example.com"));
+        assert_eq!(p.plain.as_deref(), Some("Plain body text."));
+        assert!(p
+            .html
+            .as_deref()
+            .unwrap_or_default()
+            .contains("<b>there</b>"));
+    }
+
+    #[test]
+    fn parse_eml_handles_garbage() {
+        assert_eq!(parse_eml(b"not a message"), ImportedEml::default());
+    }
 
     fn sample() -> Draft {
         Draft {

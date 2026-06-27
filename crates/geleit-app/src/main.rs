@@ -254,6 +254,8 @@ slint::slint! {
         callback html-click(length, length); // click in the rendered HTML → hit-test for a link
         callback load-remote(); // PRIV-2: fetch + show this message's remote images
         callback apply-loaded-html(string); // worker → UI: re-render with images inlined as data:
+        callback save-message(); // save the open message to a .eml file (READ-10)
+        callback open-mail-file(); // open a .eml file into the "Saved" folder (READ-10)
         callback compose();
         callback send-message();
         callback cancel-compose();
@@ -426,6 +428,21 @@ slint::slint! {
                     }
 
                     Rectangle { vertical-stretch: 1; } // push the footer to the bottom
+
+                    // ---- OPEN MAIL FILE (READ-10) ----
+                    TouchArea {
+                        height: 28px;
+                        clicked => { root.open-mail-file(); }
+                        HorizontalLayout {
+                            padding-left: 4px;
+                            Text {
+                                text: "Open mail file…";
+                                color: Palette.muted;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
 
                     // ---- MANAGE FOLDERS (ORG-6) ----
                     TouchArea {
@@ -971,6 +988,13 @@ slint::slint! {
                             color: Palette.muted;
                             font-size: 13px;
                             TouchArea { clicked => { root.mark-unread(root.selected-message); } }
+                        }
+                        Text {
+                            text: "Save";
+                            color: Palette.accent-strong;
+                            font-size: 13px;
+                            font-weight: 600;
+                            TouchArea { clicked => { root.save-message(); } }
                         }
                     }
                     // remote content blocked (PRIV-3) + opt-in per-message load (PRIV-2). Nothing
@@ -1718,6 +1742,10 @@ fn refresh_attachments(
 /// the chooser as a **separate process** (no in-process GTK loop to clash with Slint/webkit). `None`
 /// if the user cancelled or no chooser is installed (the manual path field is the fallback).
 fn pick_file_via_dialog() -> Option<String> {
+    // test/dev seam: bypass the interactive dialog with a fixed path (used by GELEIT_SHOT flows)
+    if let Ok(p) = std::env::var("GELEIT_PICK_FILE") {
+        return (!p.is_empty()).then_some(p);
+    }
     for (cmd, args) in [
         ("zenity", &["--file-selection"][..]),
         ("kdialog", &["--getopenfilename"][..]),
@@ -1732,6 +1760,59 @@ fn pick_file_via_dialog() -> Option<String> {
         }
     }
     None
+}
+
+/// Open the desktop's native *save* dialog (zenity, then kdialog), pre-filled with `default_name`,
+/// and return the chosen path. Separate process (no in-process GTK loop). `None` if cancelled or no
+/// chooser is installed.
+fn pick_save_path(default_name: &str) -> Option<String> {
+    let attempts: [(&str, Vec<String>); 2] = [
+        (
+            "zenity",
+            vec![
+                "--file-selection".into(),
+                "--save".into(),
+                "--confirm-overwrite".into(),
+                format!("--filename={default_name}"),
+            ],
+        ),
+        (
+            "kdialog",
+            vec!["--getsavefilename".into(), default_name.into()],
+        ),
+    ];
+    for (cmd, args) in attempts {
+        match std::process::Command::new(cmd).args(&args).output() {
+            Ok(out) if out.status.success() => {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                return (!path.is_empty()).then_some(path);
+            }
+            Ok(_) => return None, // ran but cancelled
+            Err(_) => continue,   // not installed → try next
+        }
+    }
+    None
+}
+
+/// A filesystem-safe filename stem from a subject (for the default Save name).
+fn safe_filename_stem(subject: &str) -> String {
+    let stem: String = subject
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(60)
+        .collect();
+    let stem = stem.trim().trim_matches('_').trim();
+    if stem.is_empty() {
+        "message".to_owned()
+    } else {
+        stem.to_owned()
+    }
 }
 
 /// The first account's signature (empty if none) — appended to composed messages.
@@ -1825,6 +1906,20 @@ fn load_messages(store: &Store, folder_id: i64) -> Vec<MessageItem> {
             }
         })
         .collect()
+}
+
+/// Index of the folder named `name` (case-insensitive) in the rail model, if present.
+fn folder_index(folders: &VecModel<SharedString>, name: &str) -> Option<usize> {
+    (0..folders.row_count()).find(|&i| {
+        folders
+            .row_data(i)
+            .is_some_and(|s| s.as_str().eq_ignore_ascii_case(name))
+    })
+}
+
+/// The currently-loaded list row for message `id`, if present.
+fn find_message_item(messages: &VecModel<MessageItem>, id: i32) -> Option<MessageItem> {
+    (0..messages.row_count()).find_map(|i| messages.row_data(i).filter(|m| m.id == id))
 }
 
 /// Flip one row's `unread` flag in place — preserves the list scroll position and avoids
@@ -2287,6 +2382,114 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             show_html(&ui, &view, &geleit_engine::safehtml::document(&body, true));
             ui.set_remote_blocked(false);
             ui.set_sync_status(SharedString::new());
+        });
+    }
+
+    // Save the open message to a .eml file (READ-10): rebuild RFC822 from the stored header + body,
+    // then write it to a path chosen in the native save dialog.
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        ui.on_save_message(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let id = ui.get_selected_message();
+            if id == 0 {
+                return;
+            }
+            let Ok(Some(header)) = store.header_by_id(id as i64) else {
+                ui.set_status("Couldn't load the message to save.".into());
+                return;
+            };
+            let body = store.body_for(id as i64).ok().flatten();
+            match geleit_engine::message::export_eml(&header, body.as_ref()) {
+                Ok(bytes) => {
+                    let name = format!(
+                        "{}.eml",
+                        safe_filename_stem(header.subject.as_deref().unwrap_or("message"))
+                    );
+                    if let Some(path) = pick_save_path(&name) {
+                        match std::fs::write(&path, &bytes) {
+                            Ok(()) => ui.set_sync_status(format!("Saved to {path}").into()),
+                            Err(_) => ui.set_status("Couldn't write that file.".into()),
+                        }
+                    }
+                }
+                Err(e) => ui.set_status(e.into()),
+            }
+        });
+    }
+
+    // Open a .eml file (READ-10): parse it, store it in the local "Saved" folder on the current
+    // account, then switch to that folder and open the message so it renders like any other.
+    {
+        let weak = ui.as_weak();
+        let store = store.clone();
+        let folders_model = folders_model.clone();
+        let folder_ids = folder_ids.clone();
+        let messages = messages.clone();
+        let accounts_model = accounts_model.clone();
+        ui.on_open_mail_file(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let acc = ui.get_current_account() as i64;
+            if acc == 0 {
+                ui.set_status("Add an account first, then open a mail file.".into());
+                return;
+            }
+            let Some(path) = pick_file_via_dialog() else {
+                return;
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                ui.set_status("Couldn't read that file.".into());
+                return;
+            };
+            let eml = geleit_engine::message::parse_eml(&bytes);
+            let Ok(folder) = store.upsert_folder(acc, geleit_store::SAVED_FOLDER) else {
+                ui.set_status("Couldn't open the file.".into());
+                return;
+            };
+            let snippet: Option<String> =
+                eml.plain.as_deref().map(|t| t.chars().take(140).collect());
+            let new = geleit_store::NewMessage {
+                uid: None, // local-only message
+                message_id: eml.message_id,
+                in_reply_to: None,
+                subject: eml.subject,
+                from_name: eml.from_name,
+                from_addr: eml.from_addr,
+                to_addrs: eml.to_addrs,
+                cc_addrs: None,
+                date: eml.date,
+                seen: false,
+                flagged: false,
+                has_attachments: eml.has_attachments,
+                snippet: snippet.clone(),
+            };
+            let Ok(id) = store.upsert_message(acc, folder, &new) else {
+                ui.set_status("Couldn't import the message.".into());
+                return;
+            };
+            let _ = store.store_body(
+                id,
+                eml.plain.as_deref(),
+                eml.html.as_deref(),
+                snippet.as_deref(),
+                eml.has_attachments,
+            );
+            // rebuild folders so "Saved" appears, switch to it, and open the imported message
+            reload_all(
+                &ui,
+                &store,
+                &folders_model,
+                &folder_ids,
+                &messages,
+                &accounts_model,
+            );
+            if let Some(idx) = folder_index(&folders_model, geleit_store::SAVED_FOLDER) {
+                ui.invoke_folder_selected(idx as i32);
+                if let Some(item) = find_message_item(&messages, id as i32) {
+                    ui.invoke_message_selected(item);
+                }
+            }
         });
     }
 
@@ -3829,6 +4032,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.invoke_message_selected(item);
                         }
                     }
+                    "openeml" => ui.invoke_open_mail_file(), // uses GELEIT_PICK_FILE for the path
                     "select" => {
                         // tick a couple of rows to show the multi-select / bulk-action bar
                         for i in 1..=2 {

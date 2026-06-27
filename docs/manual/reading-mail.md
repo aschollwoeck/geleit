@@ -71,6 +71,18 @@ with a **Load images** button. Nothing remote loads until you choose to: click i
 fetches that one message's images and re-shows it with them in place. (Scripts are never run, even
 then, and only that message's images are fetched.)
 
+## Saving and opening message files
+
+You can save any message to a standard **`.eml`** file and open `.eml` files back into GeleitMail —
+handy for archiving a message, moving one between computers, or sharing it.
+
+- **Save:** with a message open, choose **Save** at the top of the reading area, pick where to put it,
+  and GeleitMail writes the message (subject, sender/recipients, date, and the text + formatted
+  bodies) as a `.eml` file that any mail program can also open.
+- **Open:** choose **Open mail file…** at the bottom-left, pick a `.eml`, and it appears in a local
+  **Saved** folder and opens in the reading area — formatted exactly like your other mail. The Saved
+  folder stays on your device and is never uploaded to your provider.
+
 ## Writing, replying, and organizing
 
 Choose **New message** on the left to compose, or use **Reply**, **Reply all**, and **Forward** at
