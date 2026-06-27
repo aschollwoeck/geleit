@@ -204,6 +204,15 @@ pub fn parse_search(input: &str) -> ParsedSearch {
     }
 }
 
+/// The local folder that holds opened `.eml` files (READ-10). It never exists on the IMAP server,
+/// so folder pruning keeps it (see [`Store::prune_folders`]).
+pub const SAVED_FOLDER: &str = "Saved";
+
+/// Whether `name` is a local-only folder — kept across server folder syncs, never pushed to the server.
+fn is_local_folder(name: &str) -> bool {
+    name.eq_ignore_ascii_case(SAVED_FOLDER)
+}
+
 /// Sort rank for a folder name (lower = earlier). Inbox first, then the common special folders in a
 /// conventional order, then everything else (same rank → ordered by name). Matches provider variants
 /// loosely (e.g. "Deleted Items" → trash, "Junk Email" → junk).
@@ -850,6 +859,11 @@ impl Store {
     /// to reconcile the local folder list with the server after folder create/rename/delete (ORG-6).
     pub fn prune_folders(&self, account_id: i64, keep: &[String]) -> Result<(), StoreError> {
         for f in self.folders_for_account(account_id)? {
+            // Local-only folders (e.g. "Saved", which holds opened .eml files) never exist on the
+            // server, so the server's folder list wouldn't list them — keep them regardless.
+            if is_local_folder(&f.name) {
+                continue;
+            }
             if !keep.iter().any(|k| k == &f.name) {
                 self.conn
                     .execute("DELETE FROM folder WHERE id = ?1", [f.id])?;
@@ -2032,6 +2046,25 @@ mod tests {
             .map(|f| f.name)
             .collect();
         assert_eq!(names, ["INBOX", "Sent"]); // "Old" pruned
+    }
+
+    #[test]
+    fn prune_folders_keeps_local_saved_folder() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        for n in ["INBOX", SAVED_FOLDER, "Old"] {
+            s.upsert_folder(acc, n).unwrap();
+        }
+        // the server's folder list (keep) never includes "Saved", yet it must survive
+        s.prune_folders(acc, &["INBOX".to_owned()]).unwrap();
+        let names: Vec<_> = s
+            .folders_for_account(acc)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert!(names.contains(&SAVED_FOLDER.to_owned())); // local folder kept
+        assert!(!names.contains(&"Old".to_owned())); // server-absent folder pruned
     }
 
     #[test]
