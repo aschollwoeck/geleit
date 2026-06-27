@@ -4032,7 +4032,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.invoke_message_selected(item);
                         }
                     }
-                    "openeml" => ui.invoke_open_mail_file(), // uses GELEIT_PICK_FILE for the path
+                    "openeml" | "openload" => ui.invoke_open_mail_file(), // GELEIT_PICK_FILE path
                     "select" => {
                         // tick a couple of rows to show the multi-select / bulk-action bar
                         for i in 1..=2 {
@@ -4050,11 +4050,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `GELEIT_SHOT=loadimg`: after the message opens, trigger "Load images" so the remote-image
     // fetch + re-render can be verified by screenshot. Dev aid only.
     let _shot_timer2 = slint::Timer::default();
-    if std::env::var("GELEIT_SHOT").ok().as_deref() == Some("loadimg") {
+    if matches!(
+        std::env::var("GELEIT_SHOT").ok().as_deref(),
+        Some("loadimg") | Some("openload")
+    ) {
         let weak = ui.as_weak();
         _shot_timer2.start(
             slint::TimerMode::SingleShot,
-            Duration::from_millis(1800),
+            Duration::from_millis(2500),
             move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.invoke_load_remote();
