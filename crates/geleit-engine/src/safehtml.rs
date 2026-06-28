@@ -122,7 +122,8 @@ pub fn document(sanitized_body: &str, allow_remote_images: bool) -> String {
          <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; \
 img-src {img_src}; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'\">\
          <style>html{{font-family:system-ui,sans-serif;color:#1f2a2e;background:#fbfaf7;\
-margin:0;padding:12px;line-height:1.5}}a{{color:#1c7e7b}}img{{max-width:100%;height:auto}}</style>\
+margin:0;padding:12px;line-height:1.5}}a{{color:#1c7e7b}}img{{max-width:100%;height:auto}}\
+table{{border-collapse:separate!important;border-spacing:0!important}}</style>\
          </head><body>{body}</body></html>"
     )
 }
