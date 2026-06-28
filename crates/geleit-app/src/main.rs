@@ -13,15 +13,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use blitz_html::HtmlDocument;
 use geleit_engine::imap;
 use geleit_platform::os_secret::OsSecretStore;
 use geleit_store::Store;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
-/// The reading pane's currently-rendered HTML document, kept so link clicks can be hit-tested
-/// against its layout. `None` when the open message is plain text. Lives on the UI thread only.
-type HtmlDoc = Rc<RefCell<Option<HtmlDocument>>>;
+/// The reading pane's live, interactive HTML message (kept so we can render the viewport on demand
+/// and forward mouse/scroll events for selection/scrolling). `None` when the open message is plain
+/// text. Lives on the UI thread only.
+type HtmlDoc = Rc<RefCell<Option<htmlrender::HtmlView>>>;
 
 /// Open an external link (from a clicked rendered-HTML `<a>`) in the system browser.
 fn open_external(url: &str) {
@@ -30,28 +30,80 @@ fn open_external(url: &str) {
     }
 }
 
+/// Copy `text` to the system clipboard, best-effort, via the desktop clipboard tool (wl-copy on
+/// Wayland, then xclip / xsel on X11). A subprocess, like the file picker — no in-process dep.
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    for (cmd, args) in [
+        ("wl-copy", &[][..]),
+        ("xclip", &["-selection", "clipboard"][..]),
+        ("xsel", &["--clipboard", "--input"][..]),
+    ] {
+        if let Ok(mut child) = Command::new(cmd).args(args).stdin(Stdio::piped()).spawn() {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+            return;
+        }
+    }
+}
+
 /// The reading-pane width in logical px (window minus the folder rail, the message list, and the
 /// splitter handle), floored so rendering always has a sane width.
 fn reading_pane_width(ui: &Main) -> u32 {
     let scale = ui.window().scale_factor().max(1.0);
     let win_w = ui.window().size().width as f32 / scale;
-    (win_w - 240.0 - ui.get_list_width() - 6.0).max(120.0) as u32
+    // reserve 12px for the scrollbar so content doesn't sit under it
+    (win_w - 240.0 - ui.get_list_width() - 6.0 - 12.0).max(120.0) as u32
 }
 
-/// Render sanitized HTML into the reading pane as a CPU bitmap (no GL → no webview crashes) and keep
-/// its DOM so link clicks can be hit-tested. Width tracks the splitter; theme follows the palette.
+/// The reading-pane body height in logical px (window minus the reading-pane header above the body),
+/// floored. Drives the render viewport height. Approximated from the window size — exact layout
+/// measurement would need a `changed`-callback, which recurses Slint's layout; a small over/under is
+/// harmless (the body area clips the image / shows a thin margin).
+fn reading_pane_height(ui: &Main) -> u32 {
+    let scale = ui.window().scale_factor().max(1.0);
+    let win_h = ui.window().size().height as f32 / scale;
+    // header above the body: subject + sender + actions + spacing + padding (+ the remote cue)
+    let header = 188.0 + if ui.get_remote_blocked() { 40.0 } else { 0.0 };
+    (win_h - header).max(80.0) as u32
+}
+
+/// Push the freshly-rendered viewport image + scrollbar geometry to the UI from the live view.
+fn refresh_html(ui: &Main, view: &HtmlDoc) {
+    if let Some(v) = view.borrow_mut().as_mut() {
+        ui.set_r_html_image(v.render());
+        let content = v.content_height().max(1.0);
+        let vh = v.viewport_height();
+        let thumb_h = (vh / content).min(1.0);
+        let max_scroll = (content - vh).max(1.0);
+        let thumb_y = (v.scroll_y() / max_scroll).clamp(0.0, 1.0) * (1.0 - thumb_h);
+        ui.set_r_scroll_thumb_y(thumb_y);
+        ui.set_r_scroll_thumb_h(thumb_h);
+    }
+}
+
+/// Open sanitized HTML as a live, interactive view in the reading pane (viewport-rendered; no GL, no
+/// giant bitmap). Width tracks the splitter; height tracks the body area; theme follows the palette.
 fn show_html(ui: &Main, doc: &HtmlDoc, sanitized_html: &str) {
     let dark = ui.global::<Palette>().get_dark();
-    let rendered = htmlrender::render(sanitized_html, reading_pane_width(ui), dark);
-    ui.set_r_html_tiles(ModelRc::new(VecModel::from(rendered.tiles)));
+    let v = htmlrender::HtmlView::open(
+        sanitized_html,
+        reading_pane_width(ui),
+        reading_pane_height(ui),
+        dark,
+    );
+    *doc.borrow_mut() = Some(v);
     ui.set_r_is_html(true);
-    *doc.borrow_mut() = Some(rendered.doc);
+    refresh_html(ui, doc);
 }
 
-/// Switch the reading pane back to the plain-text view and drop the kept HTML DOM.
+/// Switch the reading pane back to the plain-text view and drop the live HTML view.
 fn hide_html(ui: &Main, doc: &HtmlDoc) {
     ui.set_r_is_html(false);
-    ui.set_r_html_tiles(ModelRc::new(VecModel::<slint::Image>::default()));
+    ui.set_r_html_image(slint::Image::default());
     *doc.borrow_mut() = None;
 }
 
@@ -155,9 +207,10 @@ slint::slint! {
         in property <string> r-sender;
         in property <string> r-date;
         in property <string> r-body;
-        in property <bool> r-is-html; // open message is rich HTML → show the rendered bitmap
-        in property <[image]> r-html-tiles; // CPU-rendered HTML, sliced into stacked tiles (Slint
-                                            // can't show one very tall image); links hit-tested on click
+        in property <bool> r-is-html; // open message is rich HTML → show the live rendered viewport
+        in property <image> r-html-image; // the rendered viewport (re-rendered on scroll/selection)
+        in property <float> r-scroll-thumb-y; // scrollbar thumb top, 0..1 of the track
+        in property <float> r-scroll-thumb-h; // scrollbar thumb height, 0..1 of the track
         in property <bool> r-starred; // the open message is starred (ORG-4)
         in property <[string]> r-attachments;
         in property <bool> picking-folder; // "Move to…" folder picker open (ORG-3)
@@ -253,6 +306,12 @@ slint::slint! {
         callback close-settings();
         callback toggle-theme();
         callback html-click(length, length); // click in the rendered HTML → hit-test for a link
+        callback html-scroll(length); // wheel/scroll delta in the reading body
+        callback html-pointer-down(length, length); // start a text selection (or click)
+        callback html-pointer-move(length, length); // extend selection while dragging
+        callback html-pointer-up(length, length);
+        callback copy-selection(); // Ctrl+C → copy the selected HTML text
+        callback scroll-to-frac(float); // drag the scrollbar thumb → scroll to a fraction (0..1)
         callback load-remote(); // PRIV-2: fetch + show this message's remote images
         callback apply-loaded-html(string); // worker → UI: re-render with images inlined as data:
         callback save-message(); // save the open message to a .eml file (READ-10)
@@ -295,6 +354,14 @@ slint::slint! {
                     || root.showing-settings {
                     if event.text == Key.Escape {
                         root.nav-escape();
+                        return accept;
+                    }
+                    return reject;
+                }
+                // Ctrl+C copies the selected HTML text (checked before plain "c" = compose)
+                if event.modifiers.control && event.text == "c" {
+                    if root.r-is-html {
+                        root.copy-selection();
                         return accept;
                     }
                     return reject;
@@ -1030,23 +1097,62 @@ slint::slint! {
                             }
                         }
                     }
-                    // Body: rich (HTML) messages render to a CPU bitmap (no GL → no webview crashes),
-                    // sliced into stacked tiles (Slint can't show one very tall image). Links stay
-                    // clickable via hit-testing the kept DOM at the click point (tile index × tile
-                    // height + local y = document y). Plain text otherwise.
-                    if root.r-is-html: ScrollView {
-                        VerticalLayout {
-                            alignment: start;
-                            for tile[i] in root.r-html-tiles: Image {
-                                source: tile;
-                                width: tile.width * 1px;
-                                height: tile.height * 1px;
-                                TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        root.html-click(self.mouse-x, i * 1024px + self.mouse-y);
+                    // Body: rich (HTML) messages are a LIVE Blitz view (READ-12) — only the visible
+                    // viewport is rendered (no GL, no giant bitmap), and mouse/scroll events are
+                    // forwarded to Blitz so text is selectable, scrollable, and links clickable.
+                    if root.r-is-html: Rectangle {
+                        clip: true;
+                        // the rendered viewport, top-left, at its natural pixel size (1:1)
+                        Image {
+                            x: 0;
+                            y: 0;
+                            source: root.r-html-image;
+                            width: root.r-html-image.width * 1px;
+                            height: root.r-html-image.height * 1px;
+                        }
+                        // input over the body: drag = select, click = link, wheel = scroll
+                        TouchArea {
+                            x: 0;
+                            y: 0;
+                            width: parent.width - 12px; // leave room for the scrollbar
+                            height: parent.height;
+                            mouse-cursor: text;
+                            pointer-event(e) => {
+                                if (e.kind == PointerEventKind.down) {
+                                    root.html-pointer-down(self.mouse-x, self.mouse-y);
+                                }
+                                if (e.kind == PointerEventKind.up) {
+                                    root.html-pointer-up(self.mouse-x, self.mouse-y);
+                                }
+                            }
+                            moved => { root.html-pointer-move(self.mouse-x, self.mouse-y); }
+                            clicked => { root.html-click(self.mouse-x, self.mouse-y); }
+                            scroll-event(e) => {
+                                root.html-scroll(e.delta-y);
+                                return accept;
+                            }
+                        }
+                        // scrollbar: click/drag the track to scroll; the thumb shows position + size
+                        Rectangle {
+                            x: parent.width - 10px;
+                            width: 8px;
+                            y: 0;
+                            height: parent.height;
+                            visible: root.r-scroll-thumb-h < 1.0;
+                            TouchArea {
+                                pointer-event(e) => {
+                                    if (e.kind == PointerEventKind.down) {
+                                        root.scroll-to-frac(self.mouse-y / self.height);
                                     }
                                 }
+                                moved => { root.scroll-to-frac(self.mouse-y / self.height); }
+                            }
+                            Rectangle { // thumb
+                                width: parent.width;
+                                y: root.r-scroll-thumb-y * parent.height;
+                                height: max(28px, root.r-scroll-thumb-h * parent.height);
+                                background: Palette.muted;
+                                border-radius: 4px;
                             }
                         }
                     }
@@ -2333,14 +2439,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.set_list_width(w.clamp(280.0, 680.0));
     }
 
-    // Wire the rendered-HTML link clicks: hit-test the kept DOM at the click point for an <a href>.
+    // Rendered-HTML interaction (READ-12): clicks open links (or clear a selection); drags select
+    // text; the wheel/scrollbar scroll; Ctrl+C copies. Each re-renders the viewport from the live view.
     {
-        let doc = html_doc.clone();
+        let weak = ui.as_weak();
+        let view = html_doc.clone();
         ui.on_html_click(move |x, y| {
-            if let Some(d) = doc.borrow().as_ref() {
-                if let Some(href) = htmlrender::link_at(d, x, y) {
-                    open_external(&href);
+            let Some(ui) = weak.upgrade() else { return };
+            let href = view.borrow().as_ref().and_then(|v| v.link_at(x, y));
+            match href {
+                Some(href) => open_external(&href),
+                None => {
+                    if let Some(v) = view.borrow_mut().as_mut() {
+                        v.clear_selection();
+                    }
+                    refresh_html(&ui, &view);
                 }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let view = html_doc.clone();
+        ui.on_html_scroll(move |dy| {
+            let Some(ui) = weak.upgrade() else { return };
+            let moved = view.borrow_mut().as_mut().is_some_and(|v| v.scroll_by(dy));
+            if moved {
+                refresh_html(&ui, &view);
+            }
+        });
+    }
+    {
+        let view = html_doc.clone();
+        ui.on_html_pointer_down(move |x, y| {
+            if let Some(v) = view.borrow_mut().as_mut() {
+                v.pointer_down(x, y);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let view = html_doc.clone();
+        ui.on_html_pointer_move(move |x, y| {
+            let Some(ui) = weak.upgrade() else { return };
+            let dragging = view
+                .borrow_mut()
+                .as_mut()
+                .is_some_and(|v| v.pointer_move(x, y));
+            if dragging {
+                refresh_html(&ui, &view);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let view = html_doc.clone();
+        ui.on_html_pointer_up(move |x, y| {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Some(v) = view.borrow_mut().as_mut() {
+                v.pointer_up(x, y);
+            }
+            refresh_html(&ui, &view);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let view = html_doc.clone();
+        ui.on_scroll_to_frac(move |f| {
+            let Some(ui) = weak.upgrade() else { return };
+            let moved = view.borrow_mut().as_mut().is_some_and(|v| {
+                let max = (v.content_height() - v.viewport_height()).max(0.0);
+                v.scroll_to(f.clamp(0.0, 1.0) * max)
+            });
+            if moved {
+                refresh_html(&ui, &view);
+            }
+        });
+    }
+    {
+        let view = html_doc.clone();
+        ui.on_copy_selection(move || {
+            if let Some(text) = view.borrow().as_ref().and_then(|v| v.selected_text()) {
+                copy_to_clipboard(&text);
             }
         });
     }
@@ -3976,13 +4156,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Persist the message-list width after a splitter drag (on release, not every frame).
+    // Persist the message-list width after a splitter drag (on release, not every frame), and
+    // re-render the HTML viewport at the new reading-pane width.
     {
         let weak = ui.as_weak();
         let store = store.clone();
+        let view = html_doc.clone();
         ui.on_splitter_released(move || {
             if let Some(ui) = weak.upgrade() {
                 let _ = store.set_setting("list_width", &ui.get_list_width().to_string());
+                let (w, h) = (reading_pane_width(&ui), reading_pane_height(&ui));
+                if let Some(v) = view.borrow_mut().as_mut() {
+                    v.resize(w, h);
+                }
+                refresh_html(&ui, &view);
             }
         });
     }
@@ -4059,6 +4246,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.invoke_load_remote();
+                }
+            },
+        );
+    }
+    // dev: after load, drive a scroll (GELEIT_SCROLL=px) and/or a text selection (GELEIT_SELECT=
+    // "x1,y1,x2,y2") so the interactive viewport can be verified by screenshot.
+    let _shot_timer3 = slint::Timer::default();
+    if std::env::var("GELEIT_SCROLL").is_ok() || std::env::var("GELEIT_SELECT").is_ok() {
+        let weak = ui.as_weak();
+        _shot_timer3.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(6000),
+            move || {
+                let Some(ui) = weak.upgrade() else { return };
+                if let Ok(px) = std::env::var("GELEIT_SCROLL")
+                    .unwrap_or_default()
+                    .parse::<f32>()
+                {
+                    ui.invoke_html_scroll(px);
+                }
+                if let Ok(sel) = std::env::var("GELEIT_SELECT") {
+                    let n: Vec<f32> = sel
+                        .split(',')
+                        .filter_map(|s| s.trim().parse().ok())
+                        .collect();
+                    if let [x1, y1, x2, y2] = n[..] {
+                        ui.invoke_html_pointer_down(x1, y1);
+                        ui.invoke_html_pointer_move(x2, y2);
+                        ui.invoke_html_pointer_up(x2, y2);
+                    }
                 }
             },
         );
