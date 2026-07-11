@@ -11,7 +11,7 @@ use geleit_engine::imap::{self, ImapConfig};
 use geleit_engine::message::{self, Draft};
 use geleit_engine::smtp::{self, SmtpSecurity, SmtpSettings};
 use geleit_platform::secret::SecretStore;
-use geleit_store::{ImapSettings, SmtpConfig, SmtpSecurityKind, Store, StoreError};
+use geleit_store::{ImapSettings, SmtpConfig, SmtpSecurityKind, StoreError};
 
 /// Validate raw Add-account form fields into `(email, ImapSettings)`. Pure — unit-tested. (Email
 /// format is checked by the store on insert; here we reject empty host/username and bad ports.)
@@ -97,36 +97,9 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
         .map_err(|_| "Couldn't start the sync runtime.".to_owned())
 }
 
-const DB_KEY_SERVICE: &str = "geleit-db";
-const DB_KEY_ACCOUNT: &str = "key";
-
-/// The database encryption key (SEC-1, ADR-0008): fetched from the keychain, or a fresh 32-byte
-/// random key generated and stored there on first run. Never logged (P2).
-///
-/// Only generates a key when the keychain reports the entry is genuinely **absent** — a read error
-/// or a present-but-wrong-size key is surfaced, never overwritten, so a transient keychain failure
-/// can't discard the real key and brick the encrypted DB.
-pub fn db_key(secrets: &dyn SecretStore) -> Result<Vec<u8>, String> {
-    match secrets.get(DB_KEY_SERVICE, DB_KEY_ACCOUNT) {
-        Ok(Some(key)) if key.len() == 32 => return Ok(key),
-        Ok(Some(_)) => return Err("The stored encryption key looks corrupt.".to_owned()),
-        Ok(None) => {} // first run → generate below
-        Err(_) => return Err("Couldn't read the encryption key from the keychain.".to_owned()),
-    }
-    let mut key = vec![0u8; 32];
-    getrandom::fill(&mut key).map_err(|_| "Couldn't generate an encryption key.".to_owned())?;
-    secrets
-        .set(DB_KEY_SERVICE, DB_KEY_ACCOUNT, &key)
-        .map_err(|_| "Couldn't store the encryption key.".to_owned())?;
-    Ok(key)
-}
-
-/// Open the **encrypted** local store, fetching (or creating) its key from the keychain.
-pub fn open_store(db_path: &str, secrets: &dyn SecretStore) -> Result<Store, String> {
-    let key = db_key(secrets)?;
-    Store::open_encrypted(db_path, &key)
-        .map_err(|_| "Couldn't open the encrypted mailbox.".to_owned())
-}
+// The encrypted-store bootstrap moved to `geleit_engine::localstore` in S9.1 — it is UI-agnostic and
+// the Tauri shell (M9) needs the identical logic. Re-exported so this module's callers are unchanged.
+pub use geleit_engine::localstore::open_store;
 
 /// Add (or reconnect) an account: persist its settings, store the password in the shared secrets,
 /// and do the first sync of the inbox. Returns the account's id (so the caller can switch to it).
@@ -676,17 +649,9 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn db_key_is_32_bytes_and_stable() {
-        use super::db_key;
-        use geleit_platform::secret::InMemorySecretStore;
-
-        let secrets = InMemorySecretStore::new();
-        let k1 = db_key(&secrets).unwrap();
-        assert_eq!(k1.len(), 32);
-        let k2 = db_key(&secrets).unwrap();
-        assert_eq!(k1, k2, "key persists, not regenerated each call");
-    }
+    // `db_key` moved to `geleit_engine::localstore` in S9.1 (both UIs need it), and its tests moved
+    // with it — where they also cover the guards this one didn't: a wrong-size key and a failing
+    // keychain read must be *reported*, never overwritten.
 
     #[test]
     fn passes_insecure_flag_through() {

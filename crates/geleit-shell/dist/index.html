@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>GeleitMail</title>
+  <link rel="stylesheet" href="/style.css">
+  <!-- No inline scripts anywhere in this app: the CSP stays a strict `script-src 'self'`. -->
+  <script src="/early.js"></script>
+</head>
+<body>
+  <!--
+    Skeleton paint. WebKit spends ~630 ms spawning its web process before a single line of our code
+    runs (measured — docs/technical/tauri-webkit-spike.md). A blank window for that long reads as a
+    broken app, so the chrome is painted as static HTML the instant the document parses. Leptos
+    replaces #app when it mounts. This is a constitution P3/P4 requirement, not polish.
+  -->
+  <div id="app">
+    <div class="app skeleton" aria-busy="true" aria-label="Loading your mail">
+      <nav class="rail">
+        <div class="brand">GeleitMail</div>
+        <div class="sk sk-folder"></div>
+        <div class="sk sk-folder"></div>
+        <div class="sk sk-folder"></div>
+        <div class="sk sk-folder"></div>
+      </nav>
+      <section class="list">
+        <div class="sk sk-row"></div>
+        <div class="sk sk-row"></div>
+        <div class="sk sk-row"></div>
+        <div class="sk sk-row"></div>
+        <div class="sk sk-row"></div>
+        <div class="sk sk-row"></div>
+      </section>
+      <main class="read"></main>
+    </div>
+  </div>
+
+  <script type="module" src="/boot.js"></script>
+</body>
+</html>

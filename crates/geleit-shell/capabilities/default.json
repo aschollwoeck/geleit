@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The app's own IPC only. No Tauri plugins are enabled — the shell has no filesystem, shell, or HTTP capability to grant, which is the point: after M9 the app has no HTTP client at all (ADR-0012).",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
