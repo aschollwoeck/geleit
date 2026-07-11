@@ -57,14 +57,15 @@ anything remote unless the reader asks.
 *This principle was amended in M9. The original — "Native, not a webview shell" — rested on the
 premise that a contained native/webview split was achievable. It was not; see ADR-0012.*
 
-**Leanness is measured, not asserted.** CI fails the build if any ceiling is breached:
+**Leanness is measured, not asserted.** CI fails the build if any ceiling is breached
+(`scripts/perf-budget.sh`, run headless under xvfb — S9.8):
 
-| Budget | Ceiling |
-|---|---|
-| Cold start (release, warm cache, to first paint) | **1200 ms** |
-| Idle RSS (inbox open, message selected) | **280 MB** |
-| Binary size (stripped) | **30 MB** |
-| Message-open latency (click → rendered) | **100 ms** |
+| Budget | Ceiling | Enforcement |
+|---|---|---|
+| Binary size (stripped) | **30 MB** | CI, every PR |
+| Cold start (release, warm cache, to first paint) | **1200 ms** | CI, every PR (timed exec→first paint) |
+| Idle RSS (window open) | **280 MB** | CI, every PR |
+| Message-open latency (click → rendered) | **100 ms** | Architecturally bounded: the open path is a local SQLite read + a local iframe render — **no network** — so it cannot exceed this in practice. Not separately timed (no precise headless render-complete signal); revisit if the open path ever gains I/O. |
 
 These are **ceilings, not targets**. A change that moves any of them toward its ceiling is a
 defect to be justified, not a cost to be absorbed. Tightening a ceiling is always in scope;
