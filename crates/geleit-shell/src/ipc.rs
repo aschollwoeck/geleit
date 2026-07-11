@@ -341,6 +341,64 @@ fn account_of(db: &str, secrets: &dyn SecretStore, id: i64) -> Result<i64, Strin
         .ok_or_else(|| "unknown account".to_owned())
 }
 
+/// Refresh an account's folder: sync the folder list + the current folder's recent envelopes, then
+/// backfill older mail in the background, emitting `sync-progress` events as batches land (P1 — the
+/// UI never blocks; feedback streams instead). Returns when the *recent* sync is done; the backfill
+/// keeps running and emitting. A network failure is reported calmly and leaves local mail untouched.
+#[tauri::command]
+pub async fn refresh(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+    folder: String,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
+
+    // Phase 1 — recent mail. Await this so the caller can re-list once it's in.
+    let (db1, secrets1, folder1) = (db.clone(), secrets.clone(), folder.clone());
+    let recent = tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_refresh(&db1, &*secrets1, account_id, &folder1)
+    })
+    .await
+    .map_err(|_| "The sync task stopped unexpectedly.".to_owned())?;
+    recent?;
+
+    // Phase 2 — backfill older mail in the background, streaming progress. Detached: it may outlive
+    // the command, and the UI shouldn't wait on it.
+    std::thread::spawn(move || {
+        // A drop guard emits the completion sentinel **no matter how the thread leaves** — including a
+        // panic — so the UI's progress strip can never get stuck. `-1` = finished cleanly, `-2` = it
+        // stopped early (so the UI can show a calm "will resume next refresh" note, S9.4-4).
+        struct Done {
+            app: tauri::AppHandle,
+            code: i64,
+        }
+        impl Drop for Done {
+            fn drop(&mut self) {
+                let _ = self.app.emit("sync-progress", self.code);
+            }
+        }
+        let mut done = Done {
+            app: app.clone(),
+            code: -2,
+        };
+
+        let mut emit = |count: usize| {
+            let _ = app.emit("sync-progress", count as i64);
+        };
+        if geleit_engine::sync_actions::run_backfill(
+            &db, &*secrets, account_id, &folder, 200, &mut emit,
+        )
+        .is_ok()
+        {
+            done.code = -1; // clean finish
+        }
+        // `done` drops here (or on a panic unwinding through this scope), emitting its code.
+    });
+    Ok(())
+}
+
 /// The persisted theme (`"dark"` / `"light"`), or `None` if the user has never chosen one.
 ///
 /// The store is the source of truth — the same `setting` row the Slint app writes — so a user's

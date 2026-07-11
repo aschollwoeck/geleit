@@ -88,7 +88,8 @@ pub use geleit_engine::localstore::open_store;
 // Re-exported for this module's callers (main.rs) and used by the flows below.
 use geleit_engine::sync_actions::{account_imap, runtime, to_config};
 pub use geleit_engine::sync_actions::{
-    run_delete_permanently, run_empty_folder, run_move, run_set_flag, run_set_seen,
+    run_backfill, run_delete_permanently, run_empty_folder, run_move, run_refresh,
+    run_remove_account, run_set_flag, run_set_seen,
 };
 
 /// Add (or reconnect) an account: persist its settings, store the password in the shared secrets,
@@ -333,83 +334,6 @@ pub fn run_delete_folder(
         "Couldn't delete the folder.",
         imap::delete_folder(&config, secrets, name),
     )
-}
-
-/// Sync `account_id`'s `folder` (+ folder list), reading settings from the store and the password
-/// from the shared secrets. Blocking + network: **run on a worker thread.**
-pub fn run_refresh(
-    db_path: &str,
-    secrets: &dyn SecretStore,
-    account_id: i64,
-    folder: &str,
-) -> Result<(), String> {
-    let store = open_store(db_path, secrets)?;
-    let settings = store
-        .imap_settings(account_id)
-        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
-        .ok_or_else(|| "This account isn't set up for syncing.".to_owned())?;
-
-    let config = to_config(&settings);
-    runtime()?
-        .block_on(async {
-            imap::sync_folders(&config, secrets, &store, account_id).await?;
-            imap::sync_folder_incremental(&config, secrets, &store, account_id, folder, 200)
-                .await?;
-            Ok::<(), imap::ImapError>(())
-        })
-        .map_err(|_| "Couldn't refresh — check your connection and try again.".to_owned())
-}
-
-/// Progressively backfill the rest of `folder` (older messages) in the background, calling
-/// `on_batch` with the running count after each batch. Reads settings from the store; blocking +
-/// network → **run on a worker thread.**
-pub fn run_backfill(
-    db_path: &str,
-    secrets: &dyn SecretStore,
-    account_id: i64,
-    folder: &str,
-    batch_size: u32,
-    on_batch: &mut dyn FnMut(usize),
-) -> Result<usize, String> {
-    let store = open_store(db_path, secrets)?;
-    let settings = store
-        .imap_settings(account_id)
-        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
-        .ok_or_else(|| "This account isn't set up for syncing.".to_owned())?;
-
-    let config = to_config(&settings);
-    runtime()?
-        .block_on(imap::backfill_folder(
-            &config, secrets, &store, account_id, folder, batch_size, on_batch,
-        ))
-        .map_err(|_| "Couldn't finish catching up — will resume next refresh.".to_owned())
-}
-
-/// Remove `account_id` from this device: delete its keychain password, then its local mail
-/// (folders/messages/bodies cascade). Idempotent if the account is already gone. Touches the
-/// keychain (D-Bus), so **run on a worker thread.**
-///
-/// Returns `Ok(true)` on a fully clean wipe, `Ok(false)` if the local mail was removed but the
-/// keychain password could **not** be cleared (so the caller can warn — SEC-3), `Err` if the mail
-/// wipe itself failed.
-pub fn run_remove_account(
-    db_path: &str,
-    secrets: &dyn SecretStore,
-    account_id: i64,
-) -> Result<bool, String> {
-    let store = open_store(db_path, secrets)?;
-    if store.account_by_id(account_id).ok().flatten().is_none() {
-        return Ok(true); // nothing to remove
-    }
-    // Forget the password (we still wipe the local mail even if this fails, but report it).
-    let password_cleared = match store.imap_settings(account_id) {
-        Ok(Some(settings)) => imap::delete_password(secrets, &settings.username).is_ok(),
-        _ => true, // no stored password to clear
-    };
-    store
-        .delete_account(account_id)
-        .map_err(|_| "Couldn't remove the account.".to_owned())?;
-    Ok(password_cleared)
 }
 
 #[cfg(test)]

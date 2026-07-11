@@ -17,6 +17,12 @@ exclude_globs = [
     # their mutants would survive spuriously. The pure `envelope()` helper is unit-tested; excluding
     # the whole file forgoes its *mutation* coverage — an accepted small gap (cf. refresh.rs).
     "**/smtp.rs",
+    # sync_actions.rs (M9 S9.3/S9.4) is the same class as imap.rs/refresh.rs: thin blocking wrappers
+    # over the network IMAP calls (star/seen/move/delete/refresh/backfill). Mutants survive
+    # spuriously because the network path can't run under `cargo mutants`. The IMAP logic they wrap
+    # is in imap.rs; the pure resolvers they're driven by (resolve_folder, folder roles) live in the
+    # shell's dto.rs and stay mutation-tested.
+    "**/geleit-engine/src/sync_actions.rs",
     "**/geleit-app/src/main.rs",
     "**/geleit-app/src/refresh.rs",
     # os_secret.rs is external keychain glue (Secret Service); verified by a live #[ignore] test,

@@ -82,6 +82,12 @@ struct MoveArgs {
     role: String,
 }
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RefreshArgs {
+    account_id: i64,
+    folder: String,
+}
+#[derive(Serialize)]
 struct NoArgs {}
 
 // Provided by the shim in index.html, which forwards to Tauri's global `invoke`. Keeping the shim in
@@ -91,6 +97,8 @@ struct NoArgs {}
 extern "C" {
     #[wasm_bindgen(js_name = geleitInvoke, catch)]
     async fn geleit_invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(js_name = geleitOnSyncProgress)]
+    fn geleit_on_sync_progress(cb: &wasm_bindgen::JsValue);
 }
 
 /// Call a shell command and decode its reply. Errors come back as the shell's calm, PII-free strings.
@@ -168,6 +176,19 @@ pub async fn theme() -> Result<Option<String>, String> {
     call("theme", &NoArgs {}).await
 }
 
+/// Kick a refresh of `folder`: recent mail syncs first (this resolves when it's in), then older mail
+/// backfills in the background, streaming `sync-progress` events (see [`on_sync_progress`]).
+pub async fn refresh(account_id: i64, folder: &str) -> Result<(), String> {
+    call(
+        "refresh",
+        &RefreshArgs {
+            account_id,
+            folder: folder.to_owned(),
+        },
+    )
+    .await
+}
+
 /// Dev/test seam — see `geleit-shell::ipc::dev_open_message`. Always `None` in a release build.
 pub async fn dev_open_message() -> Result<Option<i64>, String> {
     call("dev_open_message", &NoArgs {}).await
@@ -177,3 +198,20 @@ pub async fn dev_open_message() -> Result<Option<i64>, String> {
 pub async fn dev_load_images() -> Result<bool, String> {
     call("dev_load_images", &NoArgs {}).await
 }
+
+/// Subscribe to backend `sync-progress` events (S9.4). `cb` receives the running batch count, or
+/// `-1` when the background backfill has finished. No-op on the host target.
+#[cfg(target_arch = "wasm32")]
+pub fn on_sync_progress(cb: impl Fn(i64) + 'static) {
+    let closure = wasm_bindgen::closure::Closure::<dyn Fn(wasm_bindgen::JsValue)>::new(
+        move |v: wasm_bindgen::JsValue| {
+            if let Some(n) = v.as_f64() {
+                cb(n as i64);
+            }
+        },
+    );
+    geleit_on_sync_progress(closure.as_ref());
+    closure.forget(); // lives for the app's lifetime — the subscription never unsubscribes
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub fn on_sync_progress(_cb: impl Fn(i64) + 'static) {}

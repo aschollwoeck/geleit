@@ -99,6 +99,38 @@ pub fn App() -> impl IntoView {
     let scroll_top = RwSignal::new(0.0_f64);
     let viewport_h = RwSignal::new(700.0_f64); // a sane first value before the first scroll/measure
     let list_ref = NodeRef::<leptos::html::Section>::new();
+    // Sync state (S9.4): whether a refresh is in flight, and the background catch-up count.
+    let refreshing = RwSignal::new(false);
+    let catchup = RwSignal::new(Option::<i64>::None); // Some(n) while backfilling; None when idle
+
+    // Backfill progress streams in as `sync-progress` events; a negative value marks the catch-up
+    // finished (-1 = ok, -2 = it stopped early). Either way, clear the strip and re-list.
+    api::on_sync_progress(move |n| {
+        if n < 0 {
+            catchup.set(None);
+            if n == -2 {
+                error.set(Some(
+                    "Couldn't finish catching up — will resume next refresh.".into(),
+                ));
+            }
+            // The background catch-up pulled older mail — re-list so it appears. Guard with the
+            // request epoch: if the user has since switched folders, a late reply must not clobber
+            // the newer folder's list (same guard as choose_folder).
+            if let Some(fid) = selected_folder.get_untracked() {
+                let epoch = request.get_untracked() + 1;
+                request.set(epoch);
+                leptos::task::spawn_local(async move {
+                    if let Ok(m) = api::list_messages(fid, PAGE).await {
+                        if request.get_untracked() == epoch {
+                            messages.set(m);
+                        }
+                    }
+                });
+            }
+        } else {
+            catchup.set(Some(n));
+        }
+    });
 
     // Boot: first account → its folders → the first folder's messages.
     Effect::new(move |_| {
@@ -232,6 +264,48 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    // Refresh: sync recent mail (await), then the backfill streams progress via the event listener
+    // above. Reloads the list when the recent sync lands. Never blocks the UI (P1).
+    let do_refresh = move || {
+        let (Some(aid), Some(fid)) = (account.get(), selected_folder.get()) else {
+            return;
+        };
+        let folder_name = folders
+            .get()
+            .into_iter()
+            .find(|f| f.id == fid)
+            .map(|f| f.name)
+            .unwrap_or_default();
+        // Block a new refresh while one is in flight OR its background backfill is still streaming
+        // (catchup is Some) — two overlapping backfills would interleave counts into one strip and
+        // clear it prematurely.
+        if refreshing.get() || catchup.get().is_some() || folder_name.is_empty() {
+            return;
+        }
+        refreshing.set(true);
+        catchup.set(Some(0));
+        // Guard the post-sync re-list with the request epoch: if the user switches folders during
+        // the multi-second sync, the resolved list must not clobber the newer folder's mail.
+        let epoch = request.get_untracked() + 1;
+        request.set(epoch);
+        leptos::task::spawn_local(async move {
+            match api::refresh(aid, &folder_name).await {
+                Ok(()) => {
+                    if let Ok(m) = api::list_messages(fid, PAGE).await {
+                        if request.get_untracked() == epoch {
+                            messages.set(m);
+                        }
+                    }
+                }
+                Err(e) => {
+                    catchup.set(None);
+                    error.set(Some(e));
+                }
+            }
+            refreshing.set(false);
+        });
+    };
+
     // Reconcile the theme against the store. index.html already painted an optimistic theme from
     // localStorage (it can't await IPC and still paint instantly), but the *store* is the source of
     // truth — the same row the Slint app writes — so a user's choice survives the migration.
@@ -277,6 +351,25 @@ pub fn App() -> impl IntoView {
                 </For>
             </nav>
 
+            <div class="list-col">
+            <div class="list-head">
+                <button
+                    class="refresh"
+                    disabled=move || refreshing.get() || catchup.get().is_some()
+                    on:click=move |_| do_refresh()
+                >
+                    {move || if refreshing.get() { "Refreshing…" } else { "Refresh" }}
+                </button>
+                <Show when=move || catchup.get().is_some()>
+                    <span class="catchup">
+                        {move || match catchup.get() {
+                            Some(0) => "Checking for new mail…".to_owned(),
+                            Some(n) => format!("Catching up… {n}"),
+                            None => String::new(),
+                        }}
+                    </span>
+                </Show>
+            </div>
             <section
                 class="list"
                 node_ref=list_ref
@@ -370,6 +463,7 @@ pub fn App() -> impl IntoView {
                     </div>
                 </div>
             </section>
+            </div>
 
             <main class="read">
                 <Show
