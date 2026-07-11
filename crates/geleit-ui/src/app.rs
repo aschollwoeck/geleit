@@ -224,6 +224,14 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // Measure the list viewport once it's mounted, so a viewport taller than the initial estimate
+    // renders fully from the start rather than only after the first scroll.
+    Effect::new(move |_| {
+        if let Some(el) = list_ref.get() {
+            viewport_h.set(el.client_height() as f64);
+        }
+    });
+
     // Reconcile the theme against the store. index.html already painted an optimistic theme from
     // localStorage (it can't await IPC and still paint instantly), but the *store* is the source of
     // truth — the same row the Slint app writes — so a user's choice survives the migration.
@@ -292,23 +300,29 @@ pub fn App() -> impl IntoView {
                 // rows exists in the DOM. The window is translated down to its true offset.
                 <div
                     class="list-sizer"
-                    style:height=move || format!("{}px", messages.get().len() as f64 * ROW_H)
+                    // `.with(len)` reads the length WITHOUT cloning the Vec — this closure re-runs on
+                    // every scroll tick, and cloning the whole list here would defeat virtualization.
+                    style:height=move || format!("{}px", messages.with(Vec::len) as f64 * ROW_H)
                 >
                     <div
                         class="list-window"
                         style:transform=move || {
-                            let (first, _) = visible_range(
-                                scroll_top.get(), viewport_h.get(), ROW_H, messages.get().len());
+                            let total = messages.with(Vec::len);
+                            let (first, _) =
+                                visible_range(scroll_top.get(), viewport_h.get(), ROW_H, total);
                             format!("translateY({}px)", first as f64 * ROW_H)
                         }
                     >
                         {move || {
-                            let all = messages.get();
+                            let total = messages.with(Vec::len);
                             let (first, count) =
-                                visible_range(scroll_top.get(), viewport_h.get(), ROW_H, all.len());
-                            all.into_iter()
-                                .skip(first)
-                                .take(count) // only the visible window is cloned into the DOM
+                                visible_range(scroll_top.get(), viewport_h.get(), ROW_H, total);
+                            // Clone ONLY the visible window (~23 rows), never the whole list — the
+                            // point of virtualization, and this runs on every scroll tick.
+                            let window: Vec<Message> = messages
+                                .with(|all| all[first..first + count].to_vec());
+                            window
+                                .into_iter()
                                 .map(|msg| {
                                     let id = msg.id;
                                     let was_seen = msg.seen;

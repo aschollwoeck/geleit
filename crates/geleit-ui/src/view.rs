@@ -92,7 +92,11 @@ pub fn visible_range(scroll: f64, viewport: f64, row: f64, total: usize) -> (usi
     }
     const MARGIN: usize = 6; // rows of overscan on each side
     let first_visible = (scroll / row).floor().max(0.0) as usize;
-    let first = first_visible.saturating_sub(MARGIN);
+    // Clamp `first` into range: a stale scroll offset (e.g. rows removed by a bulk action before the
+    // next scroll event) could put it past the end, and `total - first` would then underflow.
+    let first = first_visible
+        .saturating_sub(MARGIN)
+        .min(total.saturating_sub(1));
     let visible_rows = (viewport / row).ceil() as usize + 1;
     let count = (visible_rows + 2 * MARGIN).min(total - first);
     (first, count)
@@ -151,6 +155,15 @@ mod tests {
         let (first, count) = visible_range(0.0, 600.0, 60.0, 3);
         assert_eq!(first, 0);
         assert_eq!(count, 3);
+    }
+
+    /// A stale scroll offset (rows removed by a bulk action before the next scroll event) must not
+    /// underflow `total - first`. Here the scroll implies row ~980 but only 5 rows remain.
+    #[test]
+    fn visible_range_survives_a_scroll_offset_past_the_shrunken_end() {
+        let (first, count) = visible_range(59_000.0, 600.0, 60.0, 5);
+        assert!(first < 5, "first={first}");
+        assert_eq!(first + count, 5);
     }
 
     #[test]

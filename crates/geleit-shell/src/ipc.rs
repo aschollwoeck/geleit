@@ -273,6 +273,11 @@ pub async fn move_to_role(
         _ => return Err("Unknown action.".to_owned()),
     };
     let st = state.inner().clone();
+
+    // Plan the move — but do NOT delete the local row yet. The safety net for an optimistic local
+    // delete ("self-heals on the next refresh") doesn't exist until S9.4, so deleting first would
+    // leave a failed move absent locally with no way back. Instead the local delete happens *after*
+    // the server confirms, below — so a failed move never removes the row from the store at all.
     let plan = with_store(st.clone(), move |store| {
         let Some((source, uid)) = store
             .message_location(id)
@@ -296,11 +301,6 @@ pub async fn move_to_role(
         if target == source {
             return Ok(None); // already there
         }
-        // Optimistic: remove it from the local folder now; it reappears in the target on next sync,
-        // or returns here if the server move fails. Never expunged, so no loss.
-        store
-            .delete_message(id)
-            .map_err(|_| "Couldn't move the message.".to_owned())?;
         Ok(Some((account_id, source, uid, target.to_owned())))
     })
     .await?;
@@ -308,9 +308,26 @@ pub async fn move_to_role(
     let Some((account_id, source, uid, target)) = plan else {
         return Ok(false);
     };
-    spawn_writeback(&st, move |db, secrets| {
-        geleit_engine::sync_actions::run_move(db, secrets, account_id, &source, uid as u32, &target)
-    });
+
+    // Do the server move first, on a blocking thread. `uid_mv` is a single server-atomic
+    // copy-and-remove, so there is no window where the message is duplicated or lost.
+    let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+    let (src, tgt) = (source.clone(), target.clone());
+    let moved = tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_move(&db, &*secrets, account_id, &src, uid as u32, &tgt)
+    })
+    .await
+    .map_err(|_| "The mailbox task stopped unexpectedly.".to_owned())?;
+    moved?; // a server failure returns here with the row still present locally — nothing lost
+
+    // Only now remove it locally, so the store and server agree. It reappears in the target folder
+    // on the next sync; it is never expunged, so no mail is lost.
+    with_store(st, move |store| {
+        store
+            .delete_message(id)
+            .map_err(|_| "Couldn't update the local mailbox.".to_owned())
+    })
+    .await?;
     Ok(true)
 }
 
