@@ -126,7 +126,10 @@ struct ThemeArg {
     theme: String,
 }
 /// The add-account form. camelCase to match the Tauri command parameters.
-#[derive(Serialize, Default, Clone, Debug, PartialEq, Eq)]
+///
+/// `Debug` is **hand-written** to redact the password — a derived `Debug` would print the credential
+/// in the clear from one stray `{:?}` (P2: credentials are never logged).
+#[derive(Serialize, Default, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountForm {
     pub email: String,
@@ -141,6 +144,17 @@ pub struct AccountForm {
     pub signature: String,
     pub allow_invalid_certs: bool,
 }
+
+impl std::fmt::Debug for AccountForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountForm")
+            .field("email", &self.email)
+            .field("imap_host", &self.imap_host)
+            .field("password", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Serialize)]
 struct NoArgs {}
 

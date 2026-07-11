@@ -17,7 +17,7 @@ choose your theme — none of which the shell could do yet.
 
 ## How
 
-- **Reuse:** `run_setup` + the pure validators `build_imap` / `build_smtp` move from the Slint
+- **Reuse:** `run_setup` + the pure validators `build_settings`/`build_smtp_settings` move from the Slint
   `refresh.rs` into the engine (re-exported — the pattern). `store::search_messages` (FTS5, M6) and
   `store::{get,set}_setting` already exist.
 - **Shell commands:** `add_account(form)` (worker — network + keychain), `search(account_id, query)`,

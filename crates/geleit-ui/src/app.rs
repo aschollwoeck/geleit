@@ -73,6 +73,24 @@ fn apply_theme(theme: &str) {
     let _ = theme;
 }
 
+/// Whether the document is currently in dark mode (the `data-theme` early.js painted). Used to seed
+/// the toggle before the store's persisted choice reconciles.
+fn document_is_dark() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+            .and_then(|e| e.get_attribute("data-theme"))
+            .as_deref()
+            == Some("dark")
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
 /// One labelled field in the add-account form. Factored out so the form stays readable; `get`/`set`
 /// bridge the field to its slot in the `AccountForm` signal.
 fn setup_field(
@@ -133,7 +151,9 @@ pub fn App() -> impl IntoView {
     // Setup (S9.6): Some while the add-account overlay is open, holding the editable form.
     let setup = RwSignal::new(Option::<AccountForm>::None);
     let connecting = RwSignal::new(false);
-    let dark = RwSignal::new(false);
+    // Seed from the theme early.js actually painted (it may have chosen dark from the OS preference
+    // when the store has no setting yet), so the toggle's label is right before the store reconciles.
+    let dark = RwSignal::new(document_is_dark());
 
     // Backfill progress streams in as `sync-progress` events; a negative value marks the catch-up
     // finished (-1 = ok, -2 = it stopped early). Either way, clear the strip and re-list.
@@ -145,14 +165,22 @@ pub fn App() -> impl IntoView {
                     "Couldn't finish catching up — will resume next refresh.".into(),
                 ));
             }
-            // The background catch-up pulled older mail — re-list so it appears. Guard with the
-            // request epoch: if the user has since switched folders, a late reply must not clobber
-            // the newer folder's list (same guard as choose_folder).
+            // The background catch-up pulled older mail — refresh the current view so it appears.
+            // Re-run the *search* if one is active (don't replace results with the folder), else
+            // re-list the folder. Epoch-guarded: a late reply must not clobber a newer view.
+            let q = query.get_untracked();
             if let Some(fid) = selected_folder.get_untracked() {
                 let epoch = request.get_untracked() + 1;
                 request.set(epoch);
                 leptos::task::spawn_local(async move {
-                    if let Ok(m) = api::list_messages(fid, PAGE).await {
+                    let result = if q.trim().is_empty() {
+                        api::list_messages(fid, PAGE).await
+                    } else if let Some(aid) = account.get_untracked() {
+                        api::search(aid, &q).await
+                    } else {
+                        return;
+                    };
+                    if let Ok(m) = result {
                         if request.get_untracked() == epoch {
                             messages.set(m);
                         }
@@ -187,6 +215,7 @@ pub fn App() -> impl IntoView {
     let choose_folder = move |id: i64| {
         selected_folder.set(Some(id));
         open.set(None);
+        query.set(String::new()); // switching folders leaves search mode; don't strand a stale term
         messages.set(Vec::new()); // don't show the previous folder's mail under the new folder's name
         let epoch = request.get_untracked() + 1;
         request.set(epoch);
@@ -435,10 +464,17 @@ pub fn App() -> impl IntoView {
         // the multi-second sync, the resolved list must not clobber the newer folder's mail.
         let epoch = request.get_untracked() + 1;
         request.set(epoch);
+        let q = query.get_untracked();
         leptos::task::spawn_local(async move {
             match api::refresh(aid, &folder_name).await {
                 Ok(()) => {
-                    if let Ok(m) = api::list_messages(fid, PAGE).await {
+                    // Refresh the current view — search results if a search is active, else the folder.
+                    let result = if q.trim().is_empty() {
+                        api::list_messages(fid, PAGE).await
+                    } else {
+                        api::search(aid, &q).await
+                    };
+                    if let Ok(m) = result {
                         if request.get_untracked() == epoch {
                             messages.set(m);
                         }
@@ -800,7 +836,15 @@ pub fn App() -> impl IntoView {
                             <label class="setup-check">
                                 <input type="checkbox"
                                     prop:checked=move || setup.get().map(|f| f.smtp_starttls).unwrap_or(false)
-                                    on:change=move |e| setup.update(|f| if let Some(f) = f { f.smtp_starttls = event_target_checked(&e); })
+                                    on:change=move |e| setup.update(|f| if let Some(f) = f {
+                                        f.smtp_starttls = event_target_checked(&e);
+                                        // Move the port to the standard for the chosen mode, but only if
+                                        // it's still on the *other* mode's default — never stomp a port
+                                        // the user typed. (Checking STARTTLS while the field still reads
+                                        // the implicit-TLS default 465 would otherwise send STARTTLS to 465.)
+                                        if f.smtp_starttls && f.smtp_port == "465" { f.smtp_port = "587".into(); }
+                                        if !f.smtp_starttls && f.smtp_port == "587" { f.smtp_port = "465".into(); }
+                                    })
                                 />
                                 "Use STARTTLS for outgoing mail (port 587)"
                             </label>
