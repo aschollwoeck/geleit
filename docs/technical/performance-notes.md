@@ -11,7 +11,7 @@ instantaneous; latency is a defect. Benchmark the **release** build, not debug.
   instantly; the server write-back happens on a worker and self-heals on the next refresh if it fails.
 - **Search is synchronous and instant:** FTS5 over the local (encrypted) DB is sub-millisecond at
   personal-mail volume, so search runs on the UI thread per keystroke — no spinner, no worker.
-- **Virtualized list:** the message list is a Slint `ListView` (only visible rows realized), so a
+- **Virtualized list:** the message list renders only the visible window (`view::visible_range`), so a
   large folder scrolls smoothly. Listing is capped (1000 rows) and search results (500) to bound work.
 - **In-place row updates:** read/star/select toggles patch the single changed row, preserving scroll
   and avoiding a full re-query.

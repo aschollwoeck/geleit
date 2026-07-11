@@ -1,4 +1,4 @@
-//! The frontend half of the IPC seam. Mirrors `geleit-shell::ipc`'s DTOs and calls its commands.
+//! The frontend half of the IPC seam. Mirrors `geleit-app::ipc`'s DTOs and calls its commands.
 //!
 //! This is the *only* data path the UI has. It deliberately depends on none of our crates — the
 //! frontend cannot reach the store except through a command the shell chose to expose.
@@ -323,12 +323,12 @@ pub async fn refresh(account_id: i64, folder: &str) -> Result<(), String> {
     .await
 }
 
-/// Dev/test seam — see `geleit-shell::ipc::dev_open_message`. Always `None` in a release build.
+/// Dev/test seam — see `geleit-app::ipc::dev_open_message`. Always `None` in a release build.
 pub async fn dev_open_message() -> Result<Option<i64>, String> {
     call("dev_open_message", &NoArgs {}).await
 }
 
-/// Dev/test seam — see `geleit-shell::ipc::dev_load_images`. Always `false` in a release build.
+/// Dev/test seam — see `geleit-app::ipc::dev_load_images`. Always `false` in a release build.
 pub async fn dev_load_images() -> Result<bool, String> {
     call("dev_load_images", &NoArgs {}).await
 }
@@ -350,12 +350,12 @@ pub fn on_sync_progress(cb: impl Fn(i64) + 'static) {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn on_sync_progress(_cb: impl Fn(i64) + 'static) {}
 
-/// Dev/test seam — see `geleit-shell::ipc::dev_compose`. Always `None` in a release build.
+/// Dev/test seam — see `geleit-app::ipc::dev_compose`. Always `None` in a release build.
 pub async fn dev_compose() -> Result<Option<String>, String> {
     call("dev_compose", &NoArgs {}).await
 }
 
-/// Dev/test seam — see `geleit-shell::ipc::dev_setup`. Always `false` in a release build.
+/// Dev/test seam — see `geleit-app::ipc::dev_setup`. Always `false` in a release build.
 pub async fn dev_setup() -> Result<bool, String> {
     call("dev_setup", &NoArgs {}).await
 }
