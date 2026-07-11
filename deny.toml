@@ -22,6 +22,21 @@ ignore = [
     # proc-macro-error 1.0.4 — unmaintained, pulled transitively via the webview/gtk macro stack
     # (not vulnerable). Goes away when the gtk3 stack does.
     "RUSTSEC-2024-0370",
+
+    # --- Both of the following are pulled ONLY by Slint and Blitz, which M9 deletes (ADR-0012).
+    # --- They are dormant-by-construction for us, and they disappear with S9.7's teardown.
+    #
+    # quick-xml 0.39 DoS advisories (quadratic start-tag scan; unbounded namespace allocation).
+    # Path: Slint → winit → sctk-adwaita → smithay-client-toolkit → wayland-scanner → quick-xml.
+    # `wayland-scanner` is a **build-time proc-macro** that parses the Wayland protocol XML shipped
+    # with the crate — it never sees untrusted input, so neither DoS is reachable. We cannot upgrade
+    # anyway: wayland-scanner's semver req holds quick-xml at 0.39 (fix is 0.41). Goes with Slint.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    #
+    # ttf-parser 0.25 — unmaintained (not vulnerable). Path: Blitz → blitz-paint → anyrender_svg →
+    # usvg → fontdb → ttf-parser. No safe upgrade exists. Goes with Blitz.
+    "RUSTSEC-2026-0192",
 ]
 
 [licenses]
