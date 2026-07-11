@@ -7,12 +7,12 @@ Decision and evidence: [ADR-0012](../adr/0012-tauri-shell-with-leptos-ui.md),
 ## Shape
 
 ```
-crates/geleit-shell   Tauri host: the window, the OS webview, the IPC seam.        (host binary)
+crates/geleit-app   Tauri host: the window, the OS webview, the IPC seam.        (host binary)
 crates/geleit-ui      Leptos frontend: components + pure view logic.               (wasm32 + host)
 ```
 
-`geleit-app` (Slint) still exists and still builds; it is deleted in **S9.7**, at which point
-`geleit-shell` takes over its name. Every slice leaves the project working.
+The Slint app was deleted in S9.7 and this crate took over the `geleit-app` name. (During M9's build
+it lived alongside Slint as `geleit-shell`; older commits/docs may use that name.)
 
 `geleit-{core,platform,store,engine}` are untouched.
 
@@ -28,7 +28,7 @@ crates/geleit-ui      Leptos frontend: components + pure view logic.            
 
 ## The IPC seam
 
-`geleit-shell/src/ipc.rs` holds the commands; `dto.rs` holds the types and the pure mapping.
+`geleit-app/src/ipc.rs` holds the commands; `dto.rs` holds the types and the pure mapping.
 
 - **DTOs, not store types.** The frontend never sees `geleit_store` types, so the schema can evolve
   without breaking the UI.
@@ -47,7 +47,7 @@ crates/geleit-ui      Leptos frontend: components + pure view logic.            
 ```
 scripts/build-ui.sh [--release]
   cargo build -p geleit-ui --target wasm32-unknown-unknown
-  wasm-bindgen --target web  →  crates/geleit-shell/dist/pkg/
+  wasm-bindgen --target web  →  crates/geleit-app/dist/pkg/
 ```
 
 That is the whole toolchain. It is what keeps `cargo` and `deny.toml` covering the project's
@@ -60,9 +60,9 @@ That is the whole toolchain. It is what keeps `cargo` and `deny.toml` covering t
    run if the CLI disagrees. CI pins the same version. (The crate version is pinned by `js-sys`, so
    the CLI follows the lockfile, not the other way round.)
 2. **Tauri embeds `dist/` into the binary at compile time.** Rebuilding the wasm alone changes
-   nothing you can see — you must rebuild `geleit-shell` afterwards:
+   nothing you can see — you must rebuild `geleit-app` afterwards:
    ```
-   ./scripts/build-ui.sh --release && cargo build -p geleit-shell
+   ./scripts/build-ui.sh --release && cargo build -p geleit-app
    ```
 
 ## No inline scripts — and you cannot use them
@@ -145,8 +145,8 @@ at build time.
 
 **`webview_document` is separate from `document` on purpose.** The old `document()` carries two Blitz
 workarounds — `border-collapse:separate!important` (which is *actively wrong* for a real engine) and
-`add_font_fallbacks`. The Slint app still needs them until S9.7, so S9.2 added a clean
-`webview_document` beside it rather than touching `document`. S9.7 deletes both together.
+`add_font_fallbacks`. S9.2 added a clean
+`webview_document` beside it rather than touching `document`. S9.7 deleted `document()` and both workarounds.
 - Webview network context is **`incognito: true`** — no cookie jar, no persistent cache — so image
   loads (once S9.2 allows them on request) cannot be correlated across sessions.
 - No Tauri plugins are enabled. There is no filesystem, shell, or HTTP capability to grant.
@@ -158,7 +158,7 @@ The frontend is split so that the parts worth testing *are* testable without a b
 | | |
 |---|---|
 | `geleit-ui/src/view.rs` | Pure display logic (dates, elision). Unit + **mutation** tested on host. |
-| `geleit-shell/src/dto.rs` | Pure store→UI mapping, folder ordering. Unit + **mutation** tested. |
+| `geleit-app/src/dto.rs` | Pure store→UI mapping, folder ordering. Unit + **mutation** tested. |
 | `app.rs`, `api.rs`, `ipc.rs` | View declaration and glue — excluded from mutants (survivors there are spurious), the same split as `geleit-app`'s `main.rs`/`viewmodel.rs`. |
 
 `geleit-ui` compiles for the **host** as well as wasm (`crate-type = ["cdylib", "rlib"]`, wasm
@@ -170,7 +170,7 @@ like any other crate. CI *also* builds it for wasm, so a wasm-only break can't s
 The build environment can't inject clicks (no `xdotool`), so a **debug-only** seam exists:
 
 ```
-GELEIT_DB=/path/demo.db GELEIT_OPEN=<message id> ./target/debug/geleit-shell
+GELEIT_DB=/path/demo.db GELEIT_OPEN=<message id> ./target/debug/geleit-app
 ```
 
 `GELEIT_OPEN` makes the UI open that message on boot, so the reading pane can be screenshot-verified.

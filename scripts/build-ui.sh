@@ -15,7 +15,7 @@ if [[ "${1:-}" == "--release" ]]; then
   CARGO_ARGS+=(--release)
 fi
 
-OUT=crates/geleit-shell/dist/pkg
+OUT=crates/geleit-app/dist/pkg
 WASM=target/wasm32-unknown-unknown/$PROFILE_DIR/geleit_ui.wasm
 
 # wasm-bindgen's CLI must EXACTLY match the wasm-bindgen crate version Leptos resolves; a mismatch

@@ -12,8 +12,9 @@ Scaffold established in slice **S0.1**. See ADR-0002 (CI), ADR-0003 (crate struc
   Home of sync / MIME / search / transport / auth. The `imap` module connects over TLS
   (`async-imap` + `tokio` + `rustls`/`ring`, ADR-0006), lists/persists folders, and syncs a
   folder's recent envelopes; the pure `envelope` module decodes header bytes (mutation-tested).
-- **`geleit-app`** — binary entrypoint; depends on `geleit-engine` + `geleit-core`. Becomes the
-  Slint shell (ADR-0001).
+- **`geleit-app`** — the Tauri host (window, OS webview, IPC seam); depends on `geleit-engine`.
+  Its Leptos (Rust→WASM) frontend is **`geleit-ui`**, which depends on none of our crates and reaches
+  the engine only over IPC (M9, ADR-0012). Was the Slint shell until M9.
 
 Direction: `app → engine → {core, platform, store}`. The reverse is impossible (Cargo's no-cycle
 rule); a CI check (`scripts/check-boundary.sh`) asserts the engine-side crates never depend on

@@ -1,51 +1,38 @@
 # cargo-mutants configuration.
 #
-# Exclude the IMAP module: it is network/TLS integration code verified by the `#[ignore]`d live
-# test against a local Dovecot (run with `--ignored`), which `cargo mutants` does not execute —
-# so mutants there survive spuriously, not because the code is untested. The reusable logic it
-# relies on (e.g. `Store::upsert_folder`) lives in `geleit-store` and stays mutation-tested.
-# Also exclude the app's main.rs: it is the Slint UI declaration + wiring (rendering, not logic);
-# the pure display mapping lives in `geleit-app/src/viewmodel.rs` and stays mutation-tested.
-# refresh.rs is network/threading/env glue (drives the engine sync off-thread) where mutants would
-# survive spuriously, like imap.rs. Its one pure helper, `build_imap_config`, is covered by unit
-# tests; excluding the whole file forgoes *mutation* coverage of that helper — an accepted small gap
-# rather than splitting this thin module.
+# We exclude network/transport/glue files whose mutants survive *spuriously* — the code they hold is
+# integration glue verified by `#[ignore]`d live tests (which `cargo mutants` doesn't run) or by
+# rendering/wiring that has no logic to mutate. The PURE logic each one is driven by is split into a
+# sibling file that STAYS mutation-tested. `imap.rs`/`smtp.rs` are the archetype: reusable logic lives
+# in `geleit-store`; the transport branches can't run without a live server.
 exclude_globs = [
     "**/imap.rs",
-    # smtp.rs is SMTP/TLS transport glue. The plaintext `send` path is covered by an in-process sink
-    # test, but the Implicit/StartTls + dangerous-TLS branches can't run in CI (no TLS server), so
-    # their mutants would survive spuriously. The pure `envelope()` helper is unit-tested; excluding
-    # the whole file forgoes its *mutation* coverage — an accepted small gap (cf. refresh.rs).
+    # smtp.rs is SMTP/TLS transport glue; the plaintext send is covered by an in-process sink test,
+    # but the Implicit/StartTls + dangerous-TLS branches can't run in CI. Pure `envelope()` is unit-tested.
     "**/smtp.rs",
-    # sync_actions.rs (M9 S9.3/S9.4) is the same class as imap.rs/refresh.rs: thin blocking wrappers
-    # over the network IMAP calls (star/seen/move/delete/refresh/backfill). Mutants survive
-    # spuriously because the network path can't run under `cargo mutants`. The IMAP logic they wrap
-    # is in imap.rs; the pure resolvers they're driven by (resolve_folder, folder roles) live in the
-    # shell's dto.rs and stay mutation-tested.
+    # sync_actions.rs: thin blocking wrappers over the network IMAP/SMTP calls (star/seen/move/delete/
+    # refresh/backfill/setup/send). Mutants survive spuriously — the network path can't run under
+    # mutants. The pure validators (build_settings/build_smtp_settings) are unit-tested; the pure
+    # resolvers they're driven by (resolve_folder, compose mapping) live in geleit-app/src/dto.rs.
     "**/geleit-engine/src/sync_actions.rs",
-    "**/geleit-app/src/main.rs",
-    "**/geleit-app/src/refresh.rs",
-    # os_secret.rs is external keychain glue (Secret Service); verified by a live #[ignore] test,
-    # which mutants doesn't run — survivors would be spurious. InMemorySecretStore stays covered.
+    # os_secret.rs is external keychain glue (Secret Service); verified by a live #[ignore] test.
     "**/geleit-platform/src/os_secret.rs",
 
-    # --- M9 (ADR-0012): the Tauri shell + Leptos frontend. Same split as geleit-app: exclude the
-    # --- rendering/wiring/glue, keep the PURE logic mutation-tested.
+    # --- geleit-app is the Tauri host (M9, ADR-0012). Its glue is excluded; the PURE logic lives in
+    # --- geleit-app/src/dto.rs (DTO mapping, sender/subject fallbacks, folder ordering, folder roles,
+    # --- compose mapping, email-date formatting) and STAYS mutation-tested.
     #
-    # app.rs is the Leptos view declaration + event wiring (rendering, not logic) — the counterpart of
-    # geleit-app/src/main.rs. The pure display mapping lives in geleit-ui/src/view.rs and STAYS covered.
-    "**/geleit-ui/src/app.rs",
-    # api.rs is IPC glue across the wasm boundary; it cannot run under `cargo mutants` at all (there
-    # is no webview), so its mutants would survive spuriously — cf. refresh.rs.
-    "**/geleit-ui/src/api.rs",
+    # ipc.rs: blocking-store command glue (open the DB, run a query).
+    "**/geleit-app/src/ipc.rs",
+    # main.rs: window/protocol/handler wiring — no logic to mutate.
+    "**/geleit-app/src/main.rs",
+    # mailproto::handle: protocol glue needing a live Tauri UriSchemeContext; its pure helpers
+    # (csp/placeholder/html_response) are unit-tested.
+    "**/geleit-app/src/mailproto.rs",
+
+    # --- geleit-ui is the Leptos frontend. Its view/IPC code can't run under mutants (no webview);
+    # --- the pure display logic lives in geleit-ui/src/view.rs and STAYS covered.
+    "**/geleit-ui/src/app.rs", # Leptos view declaration + event wiring
+    "**/geleit-ui/src/api.rs", # IPC glue across the wasm boundary
     "**/geleit-ui/src/lib.rs", # wasm entrypoint only
-    # ipc.rs is blocking-store glue (open the DB, run a query). Its pure half — the DTO mapping,
-    # sender/subject fallbacks, and folder ordering — was split into geleit-shell/src/dto.rs, which
-    # STAYS mutation-tested.
-    "**/geleit-shell/src/ipc.rs",
-    "**/geleit-shell/src/main.rs",
-    # mailproto::handle is protocol glue needing a live Tauri UriSchemeContext (can't run under
-    # mutants) — but its PURE helpers (csp/placeholder/html_response) are unit-tested, and the whole
-    # shell crate is outside CI's mutation scope anyway (it runs on core/platform/store/engine/app).
-    "**/geleit-shell/src/mailproto.rs",
 ]

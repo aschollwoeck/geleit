@@ -6,41 +6,34 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+# The Tauri host (M9, ADR-0012): owns the window, the OS webview, and the typed IPC seam to the
+# engine. It replaces `geleit-app` (Slint) at S9.7's teardown; until then both build side by side so
+# the shipped app keeps working through the migration.
+#
+# Note there is NO npm/bundler: the frontend is `geleit-ui` (Rust -> WASM), built by
+# `scripts/build-ui.sh` into `dist/`, which Tauri serves as static assets.
+
 [dependencies]
 geleit-store = { path = "../geleit-store" }
 geleit-engine = { path = "../geleit-engine" }
 geleit-platform = { path = "../geleit-platform" }
-# unstable-winit-030 exposes the winit window so a sandboxed wry webview can embed as a child
-# (S3.1, ADR-0001). renderer-software lets us render Slint WITHOUT a GL context, so it can't collide
-# with the embedded webview's GL (the collision caused GLXBadWindow crashes); selected at runtime.
-slint = { version = "1.16.1", features = ["renderer-software"] }
-chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-tokio = { version = "1", features = ["rt", "net", "time"] }
-getrandom = "0.4.3"
-# Pure-Rust, CPU HTML/CSS rendering (no GL) — replaces the webkit webview that caused the GL-on-X11
-# crashes. We render sanitized mail HTML to a bitmap + keep the DOM for hit-testing link clicks.
-blitz-html = "=0.3.0-alpha.5"
-blitz-dom = "=0.3.0-alpha.5"
-blitz-paint = "=0.3.0-alpha.5"
-blitz-traits = "=0.3.0-alpha.5"
-anyrender = "0.11"
-anyrender_vello_cpu = "0.14"
-peniko = "0.6"
-# Opt-in only (PRIV-2): fetch a message's remote images when the user clicks "Load images", to inline
-# them for the offline renderer. Minimal blocking HTTP + rustls; the ONLY allowed HTTP client (deny.toml).
-ureq = "2"
-base64 = "0.22"
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+# navigation guard: parse + classify URLs (already in the tree via tauri)
+url = "2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
 [dev-dependencies]
-png = "0.17" # for the blitz_spike example only
+tempfile = "3"
 
 [features]
 # Forwarded to the engine for self-signed dev servers; never enable in a release build.
 dangerous-tls = ["geleit-engine/dangerous-tls"]
 
-# The UI crate can't use the workspace `unsafe_code = "forbid"`: Slint's generated code carries
-# `#[allow(unsafe_code)]`, and `forbid` cannot be overridden. We `deny` instead — still blocks
-# unsafe in our own code (we never `#[allow]` it), but lets the generated UI shim compile.
+# Tauri's generated glue carries `#[allow(unsafe_code)]`, and the workspace's `forbid` cannot be
+# overridden — so we `deny` here instead. Our own code never allows unsafe.
 [lints.rust]
 unsafe_code = "deny"
 

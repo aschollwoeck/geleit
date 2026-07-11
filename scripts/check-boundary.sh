@@ -8,7 +8,7 @@
 #      and catches a UI crate being pulled in as a dev/build dep, which Cargo would happily allow.
 #
 #   2. The Leptos frontend (`geleit-ui`) must not depend on ANY of our engine crates. It reaches the
-#      engine ONLY over the Tauri IPC seam (`geleit-shell::ipc`). This is the one that actually bites:
+#      engine ONLY over the Tauri IPC seam (`geleit-app::ipc`). This is the one that actually bites:
 #      nothing in Cargo stops a component from `use geleit_store::...` and querying the database
 #      straight from view code, and once one does, the seam is decorative.
 #
@@ -17,7 +17,7 @@
 # and (b) SIGPIPE from `grep -q` cannot hide a real match (no pipeline in the `if`).
 set -euo pipefail
 
-UI_CRATES=("geleit-app" "geleit-shell" "geleit-ui")
+UI_CRATES=("geleit-app" "geleit-ui")
 ENGINE_CRATES=("geleit-core" "geleit-platform" "geleit-store" "geleit-engine")
 
 fail=0
@@ -39,7 +39,7 @@ frontend_deps="$(deps_of geleit-ui)"
 for engine in "${ENGINE_CRATES[@]}"; do
     if grep -qx "$engine" <<<"$frontend_deps"; then
         echo "BOUNDARY VIOLATION: geleit-ui depends on $engine — the frontend must reach the" >&2
-        echo "                    engine only through the IPC seam (geleit-shell::ipc), ADR-0012." >&2
+        echo "                    engine only through the IPC seam (geleit-app::ipc), ADR-0012." >&2
         fail=1
     fi
 done

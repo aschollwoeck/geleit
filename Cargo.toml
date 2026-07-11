@@ -5,9 +5,8 @@ members = [
     "crates/geleit-platform",
     "crates/geleit-store",
     "crates/geleit-engine",
+    # geleit-app is the Tauri shell + IPC seam (M9, ADR-0012); geleit-ui is its Leptos frontend.
     "crates/geleit-app",
-    # M9 (ADR-0012): the Tauri shell + Leptos frontend that replace geleit-app at S9.7.
-    "crates/geleit-shell",
     "crates/geleit-ui",
 ]
 # Throwaway feasibility spikes are standalone crates, kept out of the workspace so
