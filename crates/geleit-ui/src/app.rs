@@ -103,15 +103,27 @@ pub fn App() -> impl IntoView {
     let refreshing = RwSignal::new(false);
     let catchup = RwSignal::new(Option::<i64>::None); // Some(n) while backfilling; None when idle
 
-    // Backfill progress streams in as `sync-progress` events; -1 marks the catch-up finished.
+    // Backfill progress streams in as `sync-progress` events; a negative value marks the catch-up
+    // finished (-1 = ok, -2 = it stopped early). Either way, clear the strip and re-list.
     api::on_sync_progress(move |n| {
         if n < 0 {
             catchup.set(None);
-            // the background catch-up pulled older mail — re-list so it appears
+            if n == -2 {
+                error.set(Some(
+                    "Couldn't finish catching up — will resume next refresh.".into(),
+                ));
+            }
+            // The background catch-up pulled older mail — re-list so it appears. Guard with the
+            // request epoch: if the user has since switched folders, a late reply must not clobber
+            // the newer folder's list (same guard as choose_folder).
             if let Some(fid) = selected_folder.get_untracked() {
+                let epoch = request.get_untracked() + 1;
+                request.set(epoch);
                 leptos::task::spawn_local(async move {
                     if let Ok(m) = api::list_messages(fid, PAGE).await {
-                        messages.set(m);
+                        if request.get_untracked() == epoch {
+                            messages.set(m);
+                        }
                     }
                 });
             }
@@ -264,16 +276,25 @@ pub fn App() -> impl IntoView {
             .find(|f| f.id == fid)
             .map(|f| f.name)
             .unwrap_or_default();
-        if refreshing.get() || folder_name.is_empty() {
+        // Block a new refresh while one is in flight OR its background backfill is still streaming
+        // (catchup is Some) — two overlapping backfills would interleave counts into one strip and
+        // clear it prematurely.
+        if refreshing.get() || catchup.get().is_some() || folder_name.is_empty() {
             return;
         }
         refreshing.set(true);
         catchup.set(Some(0));
+        // Guard the post-sync re-list with the request epoch: if the user switches folders during
+        // the multi-second sync, the resolved list must not clobber the newer folder's mail.
+        let epoch = request.get_untracked() + 1;
+        request.set(epoch);
         leptos::task::spawn_local(async move {
             match api::refresh(aid, &folder_name).await {
                 Ok(()) => {
                     if let Ok(m) = api::list_messages(fid, PAGE).await {
-                        messages.set(m);
+                        if request.get_untracked() == epoch {
+                            messages.set(m);
+                        }
                     }
                 }
                 Err(e) => {
@@ -334,7 +355,7 @@ pub fn App() -> impl IntoView {
             <div class="list-head">
                 <button
                     class="refresh"
-                    disabled=move || refreshing.get()
+                    disabled=move || refreshing.get() || catchup.get().is_some()
                     on:click=move |_| do_refresh()
                 >
                     {move || if refreshing.get() { "Refreshing…" } else { "Refresh" }}

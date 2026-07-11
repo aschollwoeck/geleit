@@ -366,18 +366,35 @@ pub async fn refresh(
 
     // Phase 2 — backfill older mail in the background, streaming progress. Detached: it may outlive
     // the command, and the UI shouldn't wait on it.
-    let app2 = app.clone();
     std::thread::spawn(move || {
-        let mut emit = |count: usize| {
-            let _ = app2.emit("sync-progress", count as i64);
+        // A drop guard emits the completion sentinel **no matter how the thread leaves** — including a
+        // panic — so the UI's progress strip can never get stuck. `-1` = finished cleanly, `-2` = it
+        // stopped early (so the UI can show a calm "will resume next refresh" note, S9.4-4).
+        struct Done {
+            app: tauri::AppHandle,
+            code: i64,
+        }
+        impl Drop for Done {
+            fn drop(&mut self) {
+                let _ = self.app.emit("sync-progress", self.code);
+            }
+        }
+        let mut done = Done {
+            app: app.clone(),
+            code: -2,
         };
-        let done = geleit_engine::sync_actions::run_backfill(
+
+        let mut emit = |count: usize| {
+            let _ = app.emit("sync-progress", count as i64);
+        };
+        if geleit_engine::sync_actions::run_backfill(
             &db, &*secrets, account_id, &folder, 200, &mut emit,
-        );
-        // A final event tells the UI the catch-up is finished (or stopped) so it can clear the strip
-        // and re-list. Negative sentinel = "done".
-        let _ = app.emit("sync-progress", -1i64);
-        let _ = done;
+        )
+        .is_ok()
+        {
+            done.code = -1; // clean finish
+        }
+        // `done` drops here (or on a panic unwinding through this scope), emitting its code.
     });
     Ok(())
 }

@@ -143,6 +143,7 @@ pub fn run_refresh(
         })
         .map_err(|_| "Couldn't refresh — check your connection and try again.".to_owned())
 }
+
 /// Progressively backfill the rest of `folder` (older messages) in the background, calling
 /// `on_batch` with the running count after each batch. Reads settings from the store; blocking +
 /// network → **run on a worker thread.**
@@ -167,6 +168,11 @@ pub fn run_backfill(
         ))
         .map_err(|_| "Couldn't finish catching up — will resume next refresh.".to_owned())
 }
+
+/// Remove `account_id` from this device: delete its keychain password, then its local mail
+/// (folders/messages/bodies cascade). Idempotent if the account is already gone. Touches the
+/// keychain (D-Bus), so **run on a worker thread.**
+///
 /// Returns `Ok(true)` on a fully clean wipe, `Ok(false)` if the local mail was removed but the
 /// keychain password could **not** be cleared (so the caller can warn — SEC-3), `Err` if the mail
 /// wipe itself failed.
@@ -190,7 +196,9 @@ pub fn run_remove_account(
     Ok(password_cleared)
 }
 
-#[cfg(test)]
+// Only a live (`dangerous-tls`) test lives here; without that feature the module is empty, so its
+// imports are gated with it to avoid unused-import warnings in the default build.
+#[cfg(all(test, feature = "dangerous-tls"))]
 mod tests {
     use super::*;
     use geleit_platform::secret::InMemorySecretStore;
@@ -199,7 +207,6 @@ mod tests {
     /// The exact refresh + backfill path the Tauri `refresh` command drives (minus the event
     /// wrapper, which only forwards the `on_batch` count), against a local Dovecot. Proves the S9.3
     /// safety net actually pulls mail and streams progress.
-    #[cfg(feature = "dangerous-tls")]
     #[test]
     #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
     fn live_refresh_then_backfill_streams_progress() {
