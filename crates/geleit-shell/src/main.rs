@@ -25,42 +25,60 @@ use tauri::{WebviewUrl, WebviewWindowBuilder};
 
 /// Hand a URL to the user's real browser. Deliberately a subprocess rather than a Tauri plugin: no
 /// new capability to grant, and — the point — **no HTTP client in the app**. GeleitMail never fetches
-/// the page; the browser does.
+/// the page; the browser does. Only ever called with an `http(s)`/`mailto` URL already parsed by
+/// `url::Url` (so it is a well-formed URL, not arbitrary text).
 fn open_externally(url: &str) {
-    #[cfg(target_os = "linux")]
-    let (cmd, args): (&str, &[&str]) = ("xdg-open", &[]);
-    #[cfg(target_os = "macos")]
-    let (cmd, args): (&str, &[&str]) = ("open", &[]);
+    #[cfg(not(target_os = "windows"))]
+    {
+        #[cfg(target_os = "linux")]
+        let cmd = "xdg-open";
+        #[cfg(target_os = "macos")]
+        let cmd = "open";
+        let _ = std::process::Command::new(cmd).arg(url).spawn();
+    }
     #[cfg(target_os = "windows")]
-    let (cmd, args): (&str, &[&str]) = ("cmd", &["/C", "start", ""]);
-
-    let _ = std::process::Command::new(cmd).args(args).arg(url).spawn();
+    {
+        // NOT `cmd /C start`: `start` re-parses its line with cmd metacharacter rules (`&`, `|`,
+        // `^`, …) that std's argument quoting does not neutralize for cmd (the BatBadBut class,
+        // CVE-2024-24576), and the URL comes from an attacker-controlled mail link. `explorer.exe`
+        // takes the URL as a single argv element with no shell re-parsing. Refuse anything with a
+        // cmd/shell metacharacter as a second line of defence. (Windows isn't a shipping target yet
+        // — S8.4 — so this path is untested here; revisit with a real ShellExecuteW when it ships.)
+        if url.contains(['&', '|', '^', '<', '>', '"', '%', '\n', '\r']) {
+            return;
+        }
+        let _ = std::process::Command::new("explorer.exe").arg(url).spawn();
+    }
 }
+
+/// The exact hosts the app's own webview serves from on Windows, where custom schemes are exposed as
+/// `http://<scheme>.localhost`. On Linux/macOS these are real custom schemes and never reach the
+/// http branch. An arbitrary `*.localhost` is **not** ours — a mail link to `http://ipc.localhost/`
+/// must not be treated as in-app navigation.
+const OWN_HTTP_HOSTS: [&str; 3] = ["tauri.localhost", "ipc.localhost", "mail.localhost"];
 
 /// Decide what a navigation attempt is allowed to do.
 ///
-/// The app itself must **never** navigate: the only page it may show is its own. A link in a message
-/// is a request to leave, and leaving means the *system browser*, not this window — otherwise a
-/// message could replace the app with a look-alike page that still wears GeleitMail's frame.
+/// The app itself must **never** navigate to anything but its own origins: the only page it may show
+/// is its own UI. A link in a message is a request to leave, and leaving means the *system browser*,
+/// not this window — otherwise a crafted `http://…localhost` link could load the app's own origin
+/// (with its IPC bridge) in-window, or a message could replace GeleitMail with a look-alike page.
 ///
-/// Returns `true` to let the webview proceed (only ever for our own origins), `false` to cancel.
+/// Returns `true` to let the webview proceed (only for our own origins), `false` to cancel.
 fn allow_navigation(url: &url::Url) -> bool {
     match url.scheme() {
-        // our own UI and the mail origin (Windows serves custom schemes over http://<scheme>.localhost)
-        "tauri" | "mail" | "about" | "blob" | "data" => true,
-        "http" | "https" => {
-            let host = url.host_str().unwrap_or_default();
-            if host.ends_with(".localhost") || host == "localhost" {
-                return true; // Tauri's own asset/IPC/mail origins on Windows
-            }
-            open_externally(url.as_str());
+        // Our own UI and the mail origin (custom schemes on Linux/macOS). NOT data:/blob:/about —
+        // none is needed, and a top-level `data:text/html,<script>` navigation would run under an
+        // opaque origin, so they stay off the allowlist as defence in depth.
+        "tauri" | "mail" => true,
+        // On Windows the same origins appear as http://<scheme>.localhost — allow ONLY those exact
+        // hosts, never an arbitrary `*.localhost`.
+        "http" | "https" if url.host_str().is_some_and(|h| OWN_HTTP_HOSTS.contains(&h)) => true,
+        "http" | "https" | "mailto" => {
+            open_externally(url.as_str()); // a real link → the system browser
             false
         }
-        "mailto" => {
-            open_externally(url.as_str());
-            false
-        }
-        // anything else (javascript:, file:, …) is simply refused
+        // anything else (javascript:, file:, data:, blob:, …) is simply refused
         _ => false,
     }
 }
@@ -131,6 +149,7 @@ mod tests {
         assert!(nav("mail://localhost/42"));
         assert!(nav("http://tauri.localhost/index.html")); // Windows
         assert!(nav("http://mail.localhost/42")); // Windows
+        assert!(nav("http://ipc.localhost/cmd")); // Windows IPC
     }
 
     /// A link in a message must NOT navigate the app — otherwise a message could replace GeleitMail
@@ -143,16 +162,25 @@ mod tests {
         assert!(!nav("mailto:someone@example.com"));
     }
 
-    /// `localhost` must not be a loophole for an arbitrary remote host that merely *ends* in it.
+    /// `.localhost` must not be a blanket loophole. The S9.2 review flagged this: a mail link to the
+    /// app's OWN framework origins was allowed for *any* `*.localhost`, so `http://evil.localhost/`
+    /// (and, worse, `http://ipc.localhost` reached from a lookalike) would navigate in-window. Only
+    /// the exact framework hosts are ours; every other loopback host goes to the browser.
     #[test]
-    fn a_lookalike_host_is_not_treated_as_ours() {
+    fn an_arbitrary_localhost_host_is_not_treated_as_ours() {
+        assert!(!nav("http://evil.localhost/"));
+        assert!(!nav("http://notmail.localhost/42"));
         assert!(!nav("https://evil-localhost.example/"));
         assert!(!nav("https://tauri.localhost.evil.example/"));
     }
 
     #[test]
-    fn other_schemes_are_refused_outright() {
+    fn dangerous_schemes_are_refused_outright() {
         assert!(!nav("file:///etc/passwd"));
         assert!(!nav("javascript:alert(1)"));
+        // data:/blob: are NOT navigable — a top-level data:text/html would run under an opaque origin
+        assert!(!nav("data:text/html,<script>alert(1)</script>"));
+        assert!(!nav("blob:https://example.com/uuid"));
+        assert!(!nav("about:blank"));
     }
 }

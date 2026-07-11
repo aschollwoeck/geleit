@@ -134,7 +134,7 @@ Three independent layers, each proven to hold alone with the sanitizer switched 
 
 **"Load images" (PRIV-2) is a CSP relaxation, not a fetch.** Opting in re-points the iframe at
 `mail://localhost/<id>?images=1`; the handler re-serves that one message with `img-src` widened to
-`https:` and WebKit fetches. It is strictly **per message** — the frontend resets the opt-in on every
+**`https:` only** (never cleartext `http:`) and WebKit fetches. It is strictly **per message** — the frontend resets the opt-in on every
 `open`, so one click never turns remote loading on for the next message. There is **no HTTP client**.
 
 **Links** never navigate the app. `<base target="_blank">` turns a click into a new-window request;

@@ -33,8 +33,10 @@ margin:0;padding:28px;text-align:center}}</style></head><body>{text}</body></htm
 /// silently intersect, and reasoning about "what is actually allowed" would become guesswork.
 /// Sending it as a header too means the policy holds even if the markup weren't parsed as expected.
 fn csp(allow_remote_images: bool) -> String {
+    // https: only on opt-in — never cleartext http: (ADR-0012; matches webview_document exactly,
+    // which a test enforces).
     let img_src = if allow_remote_images {
-        "data: cid: https: http:"
+        "data: cid: https:"
     } else {
         "data: cid:"
     };
@@ -115,9 +117,11 @@ mod tests {
     }
 
     #[test]
-    fn remote_images_are_blocked_unless_opted_in() {
+    fn remote_images_are_blocked_unless_opted_in_and_only_over_https() {
         assert!(!csp(false).contains("https:"));
-        assert!(csp(true).contains("img-src data: cid: https: http:"));
+        assert!(csp(true).contains("img-src data: cid: https:"));
+        // never cleartext http: — even on opt-in (ADR-0012)
+        assert!(!csp(true).contains("http:;"));
         // ...and opting in NEVER unlocks anything but images
         assert!(!csp(true).contains("script-src"));
         assert!(csp(true).contains("default-src 'none'"));

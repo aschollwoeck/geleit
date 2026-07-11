@@ -109,22 +109,39 @@ fn is_safe_link(value: &str) -> bool {
     v.starts_with("http:") || v.starts_with("https:") || v.starts_with("mailto:")
 }
 
-/// Does a CSS value reference something remote — `background:url(http://tracker/…)`?
+/// Does CSS reference something remote — `background:url(http://tracker/…)` or the string form
+/// `@import "http://tracker/x.css"`?
 ///
 /// The sanitizer deliberately leaves `style`/`<style>` alone (the CSP, not the sanitizer, is what
 /// stops CSS loading remote resources), so a CSS-based tracker is **invisible** to a
-/// sanitize-vs-sanitize comparison. It is still *blocked* — but without this check the user would
-/// never be *told*, and "Load images" would never appear for a message whose tracker hides in CSS.
+/// sanitize-vs-sanitize comparison. It is still *blocked* by the CSP — but without this the user
+/// would never be *told*, and "Load images" would never appear for a tracker that hides in CSS.
 ///
-/// Anything that isn't clearly local (`data:`, `cid:`, a fragment) counts as remote: the CSP blocks
-/// those too, so erring toward showing the cue keeps the UI honest about what was withheld.
+/// A **best-effort cue, not the security boundary** (the CSP is). It catches the two common
+/// remote-CSS forms: `url(…)` — which covers `background`, `list-style-image`, `filter`, `cursor`,
+/// `image-set`, … — and the string form of `@import` (its `url(…)` form is caught by the first
+/// scan). Anything not clearly local (`data:`, `cid:`, a fragment) counts as remote, so we err
+/// toward showing the cue.
 fn css_references_remote(html: &str) -> bool {
     let lower = html.to_ascii_lowercase();
+
+    // `url(...)` in any property, in any quoting style.
     let mut rest = lower.as_str();
     while let Some(i) = rest.find("url(") {
         rest = &rest[i + 4..];
         let v = rest.trim_start().trim_start_matches(['"', '\'']);
         if !(v.starts_with("data:") || v.starts_with("cid:") || v.starts_with('#')) {
+            return true;
+        }
+    }
+
+    // `@import "http://…"` / `@import '…'` — the string form has no `url(`, so the scan above misses
+    // it. This was the gap the S9.2 review flagged: a CSS tracker with no `url()`.
+    let mut rest = lower.as_str();
+    while let Some(i) = rest.find("@import") {
+        rest = &rest[i + 7..];
+        let v = rest.trim_start().trim_start_matches(['"', '\'']);
+        if v.starts_with("http:") || v.starts_with("https:") || v.starts_with("//") {
             return true;
         }
     }
@@ -141,6 +158,13 @@ fn css_references_remote(html: &str) -> bool {
 /// A plain `<a href="https://…">` is *not* remote content: it fetches nothing until clicked.
 #[must_use]
 pub fn has_remote_content(raw: &str) -> bool {
+    // Cheap reject: a message with no scheme and no `url(` at all cannot reference anything remote,
+    // so skip the two sanitize passes entirely — the overwhelmingly common case for simple mail.
+    // (`//` catches scheme-relative `//host`.) This keeps message-open instant on plain HTML.
+    let lower = raw.to_ascii_lowercase();
+    if !lower.contains("://") && !lower.contains("//") && !lower.contains("url(") {
+        return false;
+    }
     let blocked = sanitize_html(raw);
     blocked != sanitize_html_allowing_remote(raw) || css_references_remote(&blocked)
 }
@@ -164,8 +188,11 @@ pub fn has_remote_content(raw: &str) -> bool {
 /// themes: mail is authored for a light background, and recolouring it would misrepresent the sender.
 #[must_use]
 pub fn webview_document(sanitized_body: &str, allow_remote_images: bool) -> String {
+    // Opt-in widens images to **https: only** — never cleartext http: (ADR-0012). A tracking beacon
+    // over http would be visible to any on-path observer; a reader who opted in still shouldn't be
+    // exposed to that. Inline `data:`/`cid:` are always fine.
     let img_src = if allow_remote_images {
-        "data: cid: https: http:"
+        "data: cid: https:"
     } else {
         "data: cid:"
     };
@@ -294,6 +321,26 @@ mod tests {
         assert!(css_references_remote(
             "background:url(data:x), url(http://tracker/p.png)"
         ));
+        // the @import STRING form (no url()) — the gap the S9.2 review flagged
+        assert!(css_references_remote(r#"@import "http://tracker/x.css";"#));
+        assert!(css_references_remote("@import '//cdn/x.css';"));
+        assert!(!css_references_remote(r#"@import "data:text/css,body{}";"#));
+    }
+
+    #[test]
+    fn a_css_import_tracker_with_no_url_is_now_surfaced() {
+        // Reaches has_remote_content through a full message (this is the review's exact scenario).
+        assert!(has_remote_content(
+            r#"<style>@import "http://tracker.example/beacon.css";</style><p>hi</p>"#
+        ));
+    }
+
+    #[test]
+    fn plain_mail_short_circuits_before_sanitizing() {
+        // No scheme, no url() → the cheap reject returns false without the two sanitize passes.
+        assert!(!has_remote_content(
+            "<p>Just some <b>words</b> and a fragment <a href=\"#top\">link</a>.</p>"
+        ));
     }
 
     #[test]
@@ -329,9 +376,11 @@ mod tests {
     }
 
     #[test]
-    fn opting_in_widens_only_img_src() {
+    fn opting_in_widens_img_src_to_https_only_never_cleartext() {
         let doc = webview_document("<p>hi</p>", true);
-        assert!(doc.contains("img-src data: cid: https: http:;"));
+        assert!(doc.contains("img-src data: cid: https:;"));
+        // cleartext http: images are NOT loaded even on opt-in — a beacon over http is on-path visible
+        assert!(!doc.contains("http:;"));
         assert!(!doc.contains("script-src"));
         assert!(doc.contains("default-src 'none'"));
     }
