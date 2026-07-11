@@ -79,12 +79,79 @@ pub fn elide(text: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
+/// The window of row indices to actually render, for a virtualized list. Given the scroll offset,
+/// the viewport height, a fixed row height, and the total row count, returns `(first, count)` — the
+/// first visible row (minus a margin) and how many to draw (viewport plus margin on both sides).
+///
+/// The margin means rows already exist just outside the viewport, so a fast scroll doesn't flash
+/// blank before they paint. Pure — unit-tested at the boundaries, where virtualization bugs live.
+#[must_use]
+pub fn visible_range(scroll: f64, viewport: f64, row: f64, total: usize) -> (usize, usize) {
+    if total == 0 || row <= 0.0 || viewport <= 0.0 {
+        return (0, 0);
+    }
+    const MARGIN: usize = 6; // rows of overscan on each side
+    let first_visible = (scroll / row).floor().max(0.0) as usize;
+    let first = first_visible.saturating_sub(MARGIN);
+    let visible_rows = (viewport / row).ceil() as usize + 1;
+    let count = (visible_rows + 2 * MARGIN).min(total - first);
+    (first, count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// 2026-07-11T12:00:00Z (a Saturday).
     const NOW: i64 = 1_783_771_200;
+
+    #[test]
+    fn visible_range_at_the_top_starts_at_zero() {
+        let (first, count) = visible_range(0.0, 600.0, 60.0, 1000);
+        assert_eq!(first, 0);
+        // 11 visible rows (ceil(600/60)+1) + 12 overscan (6 each side) = 23
+        assert_eq!(count, 23);
+    }
+
+    #[test]
+    fn visible_range_in_the_middle_includes_a_leading_margin() {
+        // scrolled to row 100 (100*60=6000). first should be 100-6=94.
+        let (first, _) = visible_range(6000.0, 600.0, 60.0, 1000);
+        assert_eq!(first, 94);
+    }
+
+    #[test]
+    fn visible_range_never_runs_past_the_end() {
+        let (first, count) = visible_range(59_000.0, 600.0, 60.0, 1000);
+        assert!(first + count <= 1000, "first={first} count={count}");
+    }
+
+    /// At the very bottom the window is clamped to *exactly* the remaining rows — not the full
+    /// window size — so it lands on the last row and never indexes past the end.
+    #[test]
+    fn visible_range_at_the_bottom_stops_exactly_at_the_last_row() {
+        // max scroll for 1000 rows of 60px in a 600px viewport = 60000 - 600 = 59400
+        let (first, count) = visible_range(59_400.0, 600.0, 60.0, 1000);
+        assert_eq!(first + count, 1000, "must end exactly at the last row");
+        assert!(
+            count < 23,
+            "the window is clamped to the remaining rows, got {count}"
+        );
+    }
+
+    #[test]
+    fn visible_range_handles_degenerate_inputs() {
+        assert_eq!(visible_range(0.0, 600.0, 60.0, 0), (0, 0)); // empty list
+        assert_eq!(visible_range(0.0, 0.0, 60.0, 100), (0, 0)); // no viewport yet
+        assert_eq!(visible_range(0.0, 600.0, 0.0, 100), (0, 0)); // zero row height
+    }
+
+    #[test]
+    fn visible_range_covers_a_short_list_entirely() {
+        let (first, count) = visible_range(0.0, 600.0, 60.0, 3);
+        assert_eq!(first, 0);
+        assert_eq!(count, 3);
+    }
 
     #[test]
     fn today_shows_the_time_of_day() {

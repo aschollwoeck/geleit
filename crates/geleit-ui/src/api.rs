@@ -29,6 +29,8 @@ pub struct Message {
     pub seen: bool,
     pub flagged: bool,
     pub has_attachments: bool,
+    /// Conversation size (READ-5); the UI shows `conversation · N` only when `> 1`.
+    pub thread_count: u32,
 }
 
 /// A message opened for reading.
@@ -66,6 +68,18 @@ struct FolderArgs {
 #[serde(rename_all = "camelCase")]
 struct IdArgs {
     id: i64,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StarArgs {
+    id: i64,
+    on: bool,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveArgs {
+    id: i64,
+    role: String,
 }
 #[derive(Serialize)]
 struct NoArgs {}
@@ -125,6 +139,27 @@ pub async fn list_messages(folder_id: i64, limit: i64) -> Result<Vec<Message>, S
 
 pub async fn open_message(id: i64) -> Result<MessageBody, String> {
     call("open_message", &IdArgs { id }).await
+}
+
+pub async fn set_star(id: i64, on: bool) -> Result<(), String> {
+    call("set_star", &StarArgs { id, on }).await
+}
+
+pub async fn set_unread(id: i64) -> Result<(), String> {
+    call("set_unread", &IdArgs { id }).await
+}
+
+/// Move a message to a role folder: "archive" | "trash" | "spam" | "inbox". Returns whether it acted
+/// (false = the account has no such folder).
+pub async fn move_to_role(id: i64, role: &str) -> Result<bool, String> {
+    call(
+        "move_to_role",
+        &MoveArgs {
+            id,
+            role: role.to_owned(),
+        },
+    )
+    .await
 }
 
 /// The persisted theme (`"dark"`/`"light"`), or `None` if the user never chose one. The store — not

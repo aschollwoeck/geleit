@@ -7,7 +7,7 @@
 //! keychain via the shared `SecretStore` (`OsSecretStore` in the app — S2.1), so it persists
 //! across restarts.
 
-use geleit_engine::imap::{self, ImapConfig};
+use geleit_engine::imap;
 use geleit_engine::message::{self, Draft};
 use geleit_engine::smtp::{self, SmtpSecurity, SmtpSettings};
 use geleit_platform::secret::SecretStore;
@@ -81,25 +81,15 @@ pub fn build_smtp_settings(host: &str, port: &str, starttls: bool) -> Result<Smt
     })
 }
 
-fn to_config(s: &ImapSettings) -> ImapConfig {
-    ImapConfig {
-        host: s.host.clone(),
-        port: s.port,
-        username: s.username.clone(),
-        allow_invalid_certs: s.allow_invalid_certs,
-    }
-}
-
-fn runtime() -> Result<tokio::runtime::Runtime, String> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| "Couldn't start the sync runtime.".to_owned())
-}
-
 // The encrypted-store bootstrap moved to `geleit_engine::localstore` in S9.1 — it is UI-agnostic and
 // the Tauri shell (M9) needs the identical logic. Re-exported so this module's callers are unchanged.
 pub use geleit_engine::localstore::open_store;
+// Message-action write-backs moved to `geleit_engine::sync_actions` in S9.3 (both UIs need them).
+// Re-exported for this module's callers (main.rs) and used by the flows below.
+use geleit_engine::sync_actions::{account_imap, runtime, to_config};
+pub use geleit_engine::sync_actions::{
+    run_delete_permanently, run_empty_folder, run_move, run_set_flag, run_set_seen,
+};
 
 /// Add (or reconnect) an account: persist its settings, store the password in the shared secrets,
 /// and do the first sync of the inbox. Returns the account's id (so the caller can switch to it).
@@ -269,79 +259,6 @@ pub fn run_send(
     Ok(())
 }
 
-/// Write a star (`\Flagged`) change back to the server (ORG-4). Blocking + network: **worker thread.**
-pub fn run_set_flag(
-    db_path: &str,
-    secrets: &dyn SecretStore,
-    account_id: i64,
-    folder: &str,
-    uid: u32,
-    flagged: bool,
-) -> Result<(), String> {
-    let config = account_imap(db_path, secrets, account_id)?;
-    runtime()?
-        .block_on(imap::set_flag(&config, secrets, folder, uid, flagged))
-        .map_err(|_| "Couldn't update the star on the server.".to_owned())
-}
-
-/// Write a read-state (`\Seen`) change back to the server (SYNC-5). Blocking + network: **worker thread.**
-pub fn run_set_seen(
-    db_path: &str,
-    secrets: &dyn SecretStore,
-    account_id: i64,
-    folder: &str,
-    uid: u32,
-    seen: bool,
-) -> Result<(), String> {
-    let config = account_imap(db_path, secrets, account_id)?;
-    runtime()?
-        .block_on(imap::set_seen(&config, secrets, folder, uid, seen))
-        .map_err(|_| "Couldn't update read state on the server.".to_owned())
-}
-
-/// Move a message by UID from `source` to `target` on the server (ORG-1/2/3 write-back). Blocking +
-/// network: **worker thread.**
-pub fn run_move(
-    db_path: &str,
-    secrets: &dyn SecretStore,
-    account_id: i64,
-    source: &str,
-    uid: u32,
-    target: &str,
-) -> Result<(), String> {
-    let config = account_imap(db_path, secrets, account_id)?;
-    runtime()?
-        .block_on(imap::move_message(&config, secrets, source, uid, target))
-        .map_err(|_| "Couldn't move the message on the server.".to_owned())
-}
-
-/// Permanently delete one message by UID (ORG-2). Blocking + network: **worker thread.**
-pub fn run_delete_permanently(
-    db_path: &str,
-    secrets: &dyn SecretStore,
-    account_id: i64,
-    folder: &str,
-    uid: u32,
-) -> Result<(), String> {
-    let config = account_imap(db_path, secrets, account_id)?;
-    runtime()?
-        .block_on(imap::delete_permanently(&config, secrets, folder, uid))
-        .map_err(|_| "Couldn't delete the message on the server.".to_owned())
-}
-
-/// Empty a folder on the server (ORG-2, empty-trash). Blocking + network: **worker thread.**
-pub fn run_empty_folder(
-    db_path: &str,
-    secrets: &dyn SecretStore,
-    account_id: i64,
-    folder: &str,
-) -> Result<(), String> {
-    let config = account_imap(db_path, secrets, account_id)?;
-    runtime()?
-        .block_on(imap::empty_folder(&config, secrets, folder))
-        .map_err(|_| "Couldn't empty the folder on the server.".to_owned())
-}
-
 /// Create / rename / delete a server folder (ORG-6), then re-sync that account's folder list so the
 /// local rail reflects it. Blocking + network: **worker thread.** `op` runs the IMAP folder command.
 fn folder_op(
@@ -416,21 +333,6 @@ pub fn run_delete_folder(
         "Couldn't delete the folder.",
         imap::delete_folder(&config, secrets, name),
     )
-}
-
-/// A specific account's IMAP config (host/port/username/allow-invalid), by id — for write-back ops.
-fn account_imap(
-    db_path: &str,
-    secrets: &dyn SecretStore,
-    account_id: i64,
-) -> Result<ImapConfig, String> {
-    let store = open_store(db_path, secrets)?;
-    let imap = store
-        .imap_settings(account_id)
-        .ok()
-        .flatten()
-        .ok_or_else(|| "This account isn't set up.".to_owned())?;
-    Ok(to_config(&imap))
 }
 
 /// Sync `account_id`'s `folder` (+ folder list), reading settings from the store and the password

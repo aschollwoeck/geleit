@@ -4,10 +4,14 @@
 //! script-free, CSP-locked `<iframe>` — do not smuggle `html` into this document early: rendering
 //! mail in the app's own document is exactly the thing ADR-0012's sandbox exists to prevent.
 use crate::api::{self, Folder, Message, MessageBody};
-use crate::view::{elide, format_date};
+use crate::view::{elide, format_date, visible_range};
 use leptos::either::Either;
 use leptos::prelude::*;
 use std::collections::HashSet;
+
+/// Fixed row height (px), matched by `.row` in the stylesheet. Virtualization needs a known height to
+/// map scroll offset → row index; a fixed height keeps that exact and the list smooth.
+const ROW_H: f64 = 64.0;
 
 /// Wall-clock seconds (UTC).
 fn now_secs() -> i64 {
@@ -91,6 +95,10 @@ pub fn App() -> impl IntoView {
     // PRIV-2 is strictly PER MESSAGE: opting one message in must never carry over to the next, or a
     // single click would quietly turn remote loading on for everything you read afterwards.
     let load_images = RwSignal::new(false);
+    // Virtualization: the list's scroll offset and viewport height drive which rows exist in the DOM.
+    let scroll_top = RwSignal::new(0.0_f64);
+    let viewport_h = RwSignal::new(700.0_f64); // a sane first value before the first scroll/measure
+    let list_ref = NodeRef::<leptos::html::Section>::new();
 
     // Boot: first account → its folders → the first folder's messages.
     Effect::new(move |_| {
@@ -148,6 +156,74 @@ pub fn App() -> impl IntoView {
     };
     let choose_message = open_by_id;
 
+    // Star / unstar the currently-open message (optimistic; the shell writes back to the server).
+    let toggle_star = move || {
+        let Some(id) = open.get().map(|b| b.id) else {
+            return;
+        };
+        let now_on = !messages
+            .get_untracked()
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.flagged)
+            .unwrap_or(false);
+        messages.update(|list| {
+            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                m.flagged = now_on;
+            }
+        });
+        leptos::task::spawn_local(async move {
+            if let Err(e) = api::set_star(id, now_on).await {
+                error.set(Some(e));
+            }
+        });
+    };
+
+    // Mark the open message unread again (brings the dot back; persisted + written back).
+    let mark_unread = move || {
+        let Some(id) = open.get().map(|b| b.id) else {
+            return;
+        };
+        read_now.update(|s| {
+            s.remove(&id);
+        });
+        messages.update(|list| {
+            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                m.seen = false;
+            }
+        });
+        leptos::task::spawn_local(async move {
+            if let Err(e) = api::set_unread(id).await {
+                error.set(Some(e));
+            }
+        });
+    };
+
+    // Archive / trash / spam the open message: remove it from the list now, close the pane, and let
+    // the shell move it on the server. If the account has no such folder, restore nothing changed.
+    let move_open = move |role: &'static str| {
+        let Some(id) = open.get().map(|b| b.id) else {
+            return;
+        };
+        let snapshot = messages.get_untracked();
+        messages.update(|list| list.retain(|m| m.id != id));
+        open.set(None);
+        leptos::task::spawn_local(async move {
+            match api::move_to_role(id, role).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    // no such folder — nothing moved; put the row back so the list stays truthful
+                    messages.set(snapshot);
+                    error.set(Some("This account has no folder for that.".to_owned()));
+                }
+                Err(e) => {
+                    messages.set(snapshot);
+                    error.set(Some(e));
+                }
+            }
+        });
+    };
+
     // Reconcile the theme against the store. index.html already painted an optimistic theme from
     // localStorage (it can't await IPC and still paint instantly), but the *store* is the source of
     // truth — the same row the Slint app writes — so a user's choice survives the migration.
@@ -193,7 +269,16 @@ pub fn App() -> impl IntoView {
                 </For>
             </nav>
 
-            <section class="list">
+            <section
+                class="list"
+                node_ref=list_ref
+                on:scroll=move |_| {
+                    if let Some(el) = list_ref.get() {
+                        scroll_top.set(el.scroll_top() as f64);
+                        viewport_h.set(el.client_height() as f64);
+                    }
+                }
+            >
                 <Show when=move || loaded.get() && messages.get().is_empty() && error.get().is_none()>
                     <p class="empty">
                         {move || if account.get().is_none() {
@@ -203,41 +288,73 @@ pub fn App() -> impl IntoView {
                         }}
                     </p>
                 </Show>
-                <For each=move || messages.get() key=|m| m.id let:msg>
-                    {
-                        let id = msg.id;
-                        let was_seen = msg.seen;
-                        let date = local_date(msg.date);
-                        let snippet = elide(&msg.snippet, 90);
-                        let (from, subject) = (msg.from.clone(), msg.subject.clone());
-                        let (flagged, attach) = (msg.flagged, msg.has_attachments);
-                        view! {
-                            <article
-                                class="row"
-                                // reads only the small read-this-session set, never the message list
-                                class:unread=move || !was_seen && !read_now.with(|s| s.contains(&id))
-                                class:sel=move || open.get().is_some_and(|b| b.id == id)
-                                on:click=move |_| choose_message(id)
-                            >
-                                <div class="row-top">
-                                    <span class="dot" aria-hidden="true"></span>
-                                    <span class="from">{from}</span>
-                                    <span class="marks">
-                                        <Show when=move || attach>
-                                            <span title="Has attachments">"📎"</span>
-                                        </Show>
-                                        <Show when=move || flagged>
-                                            <span class="star" title="Starred">"★"</span>
-                                        </Show>
-                                    </span>
-                                    <span class="date">{date}</span>
-                                </div>
-                                <div class="subj">{subject}</div>
-                                <div class="prev">{snippet}</div>
-                            </article>
+                // The full scrollable height, so the scrollbar is correct even though only a window of
+                // rows exists in the DOM. The window is translated down to its true offset.
+                <div
+                    class="list-sizer"
+                    style:height=move || format!("{}px", messages.get().len() as f64 * ROW_H)
+                >
+                    <div
+                        class="list-window"
+                        style:transform=move || {
+                            let (first, _) = visible_range(
+                                scroll_top.get(), viewport_h.get(), ROW_H, messages.get().len());
+                            format!("translateY({}px)", first as f64 * ROW_H)
                         }
-                    }
-                </For>
+                    >
+                        {move || {
+                            let all = messages.get();
+                            let (first, count) =
+                                visible_range(scroll_top.get(), viewport_h.get(), ROW_H, all.len());
+                            all.into_iter()
+                                .skip(first)
+                                .take(count) // only the visible window is cloned into the DOM
+                                .map(|msg| {
+                                    let id = msg.id;
+                                    let was_seen = msg.seen;
+                                    let date = local_date(msg.date);
+                                    let snippet = elide(&msg.snippet, 90);
+                                    let (from, subject) = (msg.from.clone(), msg.subject.clone());
+                                    let (flagged, attach) = (msg.flagged, msg.has_attachments);
+                                    let convo = msg.thread_count;
+                                    view! {
+                                        <article
+                                            class="row"
+                                            class:unread=move || {
+                                                !was_seen && !read_now.with(|s| s.contains(&id))
+                                            }
+                                            class:sel=move || open.get().is_some_and(|b| b.id == id)
+                                            on:click=move |_| choose_message(id)
+                                        >
+                                            <div class="row-top">
+                                                <span class="dot" aria-hidden="true"></span>
+                                                <span class="from">{from}</span>
+                                                <span class="marks">
+                                                    <Show when=move || attach>
+                                                        <span title="Has attachments">"📎"</span>
+                                                    </Show>
+                                                    <Show when=move || flagged>
+                                                        <span class="star" title="Starred">"★"</span>
+                                                    </Show>
+                                                </span>
+                                                <span class="date">{date}</span>
+                                            </div>
+                                            <div class="subj">{subject}</div>
+                                            <div class="row-bottom">
+                                                <span class="prev">{snippet}</span>
+                                                <Show when=move || { convo > 1 }>
+                                                    <span class="convo">
+                                                        {format!("conversation · {convo}")}
+                                                    </span>
+                                                </Show>
+                                            </div>
+                                        </article>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </div>
+                </div>
             </section>
 
             <main class="read">
@@ -255,6 +372,13 @@ pub fn App() -> impl IntoView {
                                         {body.from.clone()}
                                         {body.date.map(|_| " · ".to_owned())}
                                         {local_date(body.date)}
+                                    </div>
+                                    <div class="actions">
+                                        <button title="Star" on:click=move |_| toggle_star()>"★ Star"</button>
+                                        <button title="Archive" on:click=move |_| move_open("archive")>"Archive"</button>
+                                        <button title="Delete" on:click=move |_| move_open("trash")>"Delete"</button>
+                                        <button title="Mark as spam" on:click=move |_| move_open("spam")>"Spam"</button>
+                                        <button title="Mark unread" on:click=move |_| mark_unread()>"Unread"</button>
                                     </div>
                                 </header>
 
