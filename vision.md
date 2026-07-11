@@ -46,8 +46,11 @@ your mail is just *there*. The feel is the product; there is no gimmick feature 
 - **Organization** — folders/labels, archive/delete/flag/move, plus rules, snooze, notifications.
 - **Transparent encryption at rest** — OS-keychain-backed; no master-password friction.
 - **Cross-platform desktop** — Windows, macOS, Linux from one codebase.
-- **Native throughout** — lean binaries, low RAM; the HTML renderer is the one sandboxed,
-  contained exception (email is fundamentally a web document).
+- **Lean and Rust, not Electron** — Rust end to end (engine, store, and UI), and **no bundled
+  browser**: GeleitMail uses the operating system's webview, so there is no second runtime to ship
+  or trust. Every message renders inside a script-free, CSP-locked sandbox that cannot execute code
+  or fetch anything remote unless you ask. Leanness is capped and measured in CI, not asserted
+  (constitution P4). *Amended in M9 — see ADR-0012 for why native HTML rendering was abandoned.*
 
 ## Deliberately later (not part of the first finished desktop product)
 

@@ -1,7 +1,12 @@
 # ADR-0007: Slint under the Royalty-free license
 
 ## Status
-Accepted (slice S1.7). Resolves the "Slint licensing tier" open decision from `GELEITMAIL.md`.
+**Retired by [ADR-0012](0012-tauri-shell-with-leptos-ui.md)** (M9) — moot once Slint is removed from
+the project. Tauri (MIT/Apache-2.0) and Leptos (MIT) carry no comparable licensing question, so the
+`LicenseRef-Slint-Royalty-free-2.0` allowance is dropped from `deny.toml`.
+
+Previously: Accepted (slice S1.7). Resolved the "Slint licensing tier" open decision from
+`GELEITMAIL.md`.
 
 ## Context
 Slint is tri-licensed: `GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR commercial`. GeleitMail

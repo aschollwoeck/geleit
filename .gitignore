@@ -26,3 +26,10 @@ dist/
 
 # never commit saved mail files (may contain personal mail)
 *.eml
+
+# ...nor screenshots of them. Spike/debug captures of real mail expose personal data (M9): keep
+# them out of the repo entirely. Manual images (docs/manual/images/) are curated by hand.
+/*.png
+
+# wasm-bindgen output for the M9 cold-start spike (generated from ui/src)
+spikes/wasm-coldstart/ui/pkg/

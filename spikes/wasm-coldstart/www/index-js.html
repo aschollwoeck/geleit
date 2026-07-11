@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="/style.css">
+  <script>
+    window.mark = function (name) { window.ipc.postMessage("MARK " + name); };
+    window.mark("html_parsed");
+  </script>
+</head>
+<body>
+  <script type="module">
+    window.mark("wasm_fetch_start"); // (same label; here it's just the module fetch)
+    import { start } from '/app.js';
+    window.mark("wasm_start");       // (same label; here: JS runtime entrypoint reached)
+    start();
+    window.mark("mounted");
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => { window.mark("first_paint"); window.mark("done"); });
+    });
+  </script>
+</body>
+</html>

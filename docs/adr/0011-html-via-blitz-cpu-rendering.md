@@ -1,6 +1,9 @@
 # ADR-0011: Render HTML mail with Blitz on the CPU (replacing the embedded webkit webview)
 
-Status: Accepted — supersedes the embedded-webview decision (ADR-0001 / S3.1).
+Status: **Superseded by [ADR-0012](0012-tauri-shell-with-leptos-ui.md)** (M9). Blitz is pre-alpha and
+could not render real mail correctly: against a real message we hand-fixed five separate defects and
+the result was still visibly wrong. HTML is now rendered by the OS webview. Previously: Accepted —
+superseded the embedded-webview decision (ADR-0001 / S3.1).
 
 ## Context
 HTML mail was rendered by an embedded **webkit2gtk webview** (wry, `build_as_child` into the Slint
