@@ -341,6 +341,84 @@ fn account_of(db: &str, secrets: &dyn SecretStore, id: i64) -> Result<i64, Strin
         .ok_or_else(|| "unknown account".to_owned())
 }
 
+/// Add (or reconnect) an account: validate the form, create the account, store the password in the
+/// keychain, and do a first sync (S9.6). Worker — network + keychain (P1). Returns the account id.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn add_account(
+    state: tauri::State<'_, AppState>,
+    email: String,
+    display_name: String,
+    imap_host: String,
+    imap_port: String,
+    username: String,
+    password: String,
+    smtp_host: String,
+    smtp_port: String,
+    smtp_starttls: bool,
+    signature: String,
+    allow_invalid_certs: bool,
+) -> Result<i64, String> {
+    use geleit_engine::sync_actions::{build_settings, build_smtp_settings};
+    // Validate the form up front (pure) — a bad field is a calm message, not a failed connection.
+    let (email, imap) = build_settings(
+        &email,
+        &imap_host,
+        &imap_port,
+        &username,
+        allow_invalid_certs,
+    )?;
+    let smtp = build_smtp_settings(&smtp_host, &smtp_port, smtp_starttls)?;
+    let display = (!display_name.trim().is_empty()).then(|| display_name.trim().to_owned());
+
+    let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_setup(
+            &db,
+            &*secrets,
+            &email,
+            display.as_deref(),
+            imap,
+            smtp,
+            &signature,
+            &password,
+        )
+    })
+    .await
+    .map_err(|_| "The setup task stopped unexpectedly.".to_owned())?
+}
+
+/// Search an account's mail (FTS5, M6). Instant + local (P1); supports `from:`/`subject:`/
+/// `has:attachment` operators. Returns headers as list rows.
+#[tauri::command]
+pub async fn search(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+    query: String,
+) -> Result<Vec<MessageDto>, String> {
+    with_store(state.inner().clone(), move |store| {
+        let headers = store
+            .search_messages(account_id, &query, 300)
+            .map_err(|_| "Couldn't search your mail.".to_owned())?;
+        let mut dtos: Vec<MessageDto> = headers.iter().cloned().map(MessageDto::from).collect();
+        crate::dto::with_thread_counts(&headers, &mut dtos);
+        Ok(dtos)
+    })
+    .await
+}
+
+/// Persist the theme choice (`"dark"` / `"light"`) — the same `setting` row S9.1 reads on boot, so a
+/// choice survives restart. The frontend already flipped the document; this makes it stick.
+#[tauri::command]
+pub async fn set_theme(state: tauri::State<'_, AppState>, theme: String) -> Result<(), String> {
+    with_store(state.inner().clone(), move |store| {
+        store
+            .set_setting("theme", &theme)
+            .map_err(|_| "Couldn't save your setting.".to_owned())
+    })
+    .await
+}
+
 /// Build a reply / reply-all / forward draft, prefilled from a stored message (S9.5). Pure over the
 /// store — no network. `kind` is "reply" | "reply_all" | "forward".
 #[tauri::command]
@@ -529,4 +607,12 @@ pub async fn dev_load_images() -> bool {
 #[tauri::command]
 pub async fn dev_compose() -> Option<String> {
     std::env::var("GELEIT_COMPOSE").ok()
+}
+
+/// Dev/test seam, debug builds only: `GELEIT_SETUP=1` opens the add-account overlay on boot. Never
+/// in release.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_setup() -> bool {
+    std::env::var("GELEIT_SETUP").is_ok_and(|v| v == "1")
 }

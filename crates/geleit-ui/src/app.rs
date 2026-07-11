@@ -3,7 +3,7 @@
 //! S9.1 deliberately renders the **plaintext** body only. HTML mail arrives in S9.2, confined to a
 //! script-free, CSP-locked `<iframe>` — do not smuggle `html` into this document early: rendering
 //! mail in the app's own document is exactly the thing ADR-0012's sandbox exists to prevent.
-use crate::api::{self, ComposeDraft, Folder, Message, MessageBody};
+use crate::api::{self, AccountForm, ComposeDraft, Folder, Message, MessageBody};
 use crate::view::{elide, format_date, visible_range};
 use leptos::either::Either;
 use leptos::prelude::*;
@@ -73,6 +73,47 @@ fn apply_theme(theme: &str) {
     let _ = theme;
 }
 
+/// Whether the document is currently in dark mode (the `data-theme` early.js painted). Used to seed
+/// the toggle before the store's persisted choice reconciles.
+fn document_is_dark() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+            .and_then(|e| e.get_attribute("data-theme"))
+            .as_deref()
+            == Some("dark")
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
+/// One labelled field in the add-account form. Factored out so the form stays readable; `get`/`set`
+/// bridge the field to its slot in the `AccountForm` signal.
+fn setup_field(
+    label: &'static str,
+    placeholder: &'static str,
+    password: bool,
+    get: impl Fn() -> String + Send + 'static,
+    set: impl Fn(String) + 'static,
+) -> impl IntoView {
+    view! {
+        <label class="setup-field">
+            <span>{label}</span>
+            <input
+                class="field"
+                type=if password { "password" } else { "text" }
+                placeholder=placeholder
+                prop:value=get
+                on:input=move |e| set(event_target_value(&e))
+            />
+        </label>
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let account = RwSignal::new(Option::<i64>::None);
@@ -105,6 +146,14 @@ pub fn App() -> impl IntoView {
                                                       // Compose state (S9.5): Some while the compose overlay is open, holding the editable draft.
     let compose = RwSignal::new(Option::<ComposeDraft>::None);
     let sending = RwSignal::new(false);
+    // Search (S9.6): the query text; empty = show the folder, non-empty = show results.
+    let query = RwSignal::new(String::new());
+    // Setup (S9.6): Some while the add-account overlay is open, holding the editable form.
+    let setup = RwSignal::new(Option::<AccountForm>::None);
+    let connecting = RwSignal::new(false);
+    // Seed from the theme early.js actually painted (it may have chosen dark from the OS preference
+    // when the store has no setting yet), so the toggle's label is right before the store reconciles.
+    let dark = RwSignal::new(document_is_dark());
 
     // Backfill progress streams in as `sync-progress` events; a negative value marks the catch-up
     // finished (-1 = ok, -2 = it stopped early). Either way, clear the strip and re-list.
@@ -116,14 +165,22 @@ pub fn App() -> impl IntoView {
                     "Couldn't finish catching up — will resume next refresh.".into(),
                 ));
             }
-            // The background catch-up pulled older mail — re-list so it appears. Guard with the
-            // request epoch: if the user has since switched folders, a late reply must not clobber
-            // the newer folder's list (same guard as choose_folder).
+            // The background catch-up pulled older mail — refresh the current view so it appears.
+            // Re-run the *search* if one is active (don't replace results with the folder), else
+            // re-list the folder. Epoch-guarded: a late reply must not clobber a newer view.
+            let q = query.get_untracked();
             if let Some(fid) = selected_folder.get_untracked() {
                 let epoch = request.get_untracked() + 1;
                 request.set(epoch);
                 leptos::task::spawn_local(async move {
-                    if let Ok(m) = api::list_messages(fid, PAGE).await {
+                    let result = if q.trim().is_empty() {
+                        api::list_messages(fid, PAGE).await
+                    } else if let Some(aid) = account.get_untracked() {
+                        api::search(aid, &q).await
+                    } else {
+                        return;
+                    };
+                    if let Ok(m) = result {
                         if request.get_untracked() == epoch {
                             messages.set(m);
                         }
@@ -158,6 +215,7 @@ pub fn App() -> impl IntoView {
     let choose_folder = move |id: i64| {
         selected_folder.set(Some(id));
         open.set(None);
+        query.set(String::new()); // switching folders leaves search mode; don't strand a stale term
         messages.set(Vec::new()); // don't show the previous folder's mail under the new folder's name
         let epoch = request.get_untracked() + 1;
         request.set(epoch);
@@ -267,6 +325,72 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    // Search (S9.6): run the store's FTS5 search; empty query returns to the current folder. Guarded
+    // by the request epoch so a slow search can't clobber a folder the user switched to.
+    let run_search = move |q: String| {
+        query.set(q.clone());
+        let Some(aid) = account.get() else { return };
+        let epoch = request.get_untracked() + 1;
+        request.set(epoch);
+        leptos::task::spawn_local(async move {
+            let result = if q.trim().is_empty() {
+                match selected_folder.get_untracked() {
+                    Some(fid) => api::list_messages(fid, PAGE).await,
+                    None => Ok(Vec::new()),
+                }
+            } else {
+                api::search(aid, &q).await
+            };
+            match result {
+                Ok(m) if request.get_untracked() == epoch => messages.set(m),
+                Ok(_) => {}
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
+    // Theme toggle (S9.6): flip the document now (instant) and persist to the store.
+    let toggle_theme = move || {
+        let next = if dark.get() { "light" } else { "dark" };
+        dark.set(next == "dark");
+        apply_theme(next);
+        let next = next.to_owned();
+        leptos::task::spawn_local(async move {
+            let _ = api::set_theme(&next).await;
+        });
+    };
+
+    // Add-account overlay (S9.6): open a blank form with sensible defaults.
+    let open_setup = move || {
+        setup.set(Some(AccountForm {
+            imap_port: "993".into(),
+            smtp_port: "465".into(),
+            ..AccountForm::default()
+        }));
+    };
+
+    // Submit the setup form: validate + connect + first sync on a worker; on success, load the new
+    // account's mail.
+    let submit_setup = move || {
+        let Some(form) = setup.get() else { return };
+        if connecting.get() {
+            return;
+        }
+        connecting.set(true);
+        leptos::task::spawn_local(async move {
+            match api::add_account(&form).await {
+                Ok(aid) => {
+                    setup.set(None);
+                    account.set(Some(aid));
+                    load_folders(aid, folders, selected_folder, messages, error, request).await;
+                    loaded.set(true);
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            connecting.set(false);
+        });
+    };
+
     // Open a blank compose window (New message).
     let compose_new = move || compose.set(Some(ComposeDraft::default()));
 
@@ -340,10 +464,17 @@ pub fn App() -> impl IntoView {
         // the multi-second sync, the resolved list must not clobber the newer folder's mail.
         let epoch = request.get_untracked() + 1;
         request.set(epoch);
+        let q = query.get_untracked();
         leptos::task::spawn_local(async move {
             match api::refresh(aid, &folder_name).await {
                 Ok(()) => {
-                    if let Ok(m) = api::list_messages(fid, PAGE).await {
+                    // Refresh the current view — search results if a search is active, else the folder.
+                    let result = if q.trim().is_empty() {
+                        api::list_messages(fid, PAGE).await
+                    } else {
+                        api::search(aid, &q).await
+                    };
+                    if let Ok(m) = result {
                         if request.get_untracked() == epoch {
                             messages.set(m);
                         }
@@ -364,6 +495,7 @@ pub fn App() -> impl IntoView {
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
             if let Ok(Some(t)) = api::theme().await {
+                dark.set(t == "dark");
                 apply_theme(&t);
             }
         });
@@ -379,6 +511,9 @@ pub fn App() -> impl IntoView {
                 if api::dev_load_images().await.unwrap_or(false) {
                     load_images.set(true);
                 }
+            }
+            if api::dev_setup().await.unwrap_or(false) {
+                open_setup();
             }
             if let Ok(Some(kind)) = api::dev_compose().await {
                 if kind == "new" {
@@ -399,6 +534,12 @@ pub fn App() -> impl IntoView {
             <nav class="rail">
                 <div class="brand">"GeleitMail"</div>
                 <button class="compose-new" on:click=move |_| compose_new()>"✎ New message"</button>
+                <div class="rail-tools">
+                    <button class="tool" title="Add account" on:click=move |_| open_setup()>"＋ Account"</button>
+                    <button class="tool" title="Toggle theme" on:click=move |_| toggle_theme()>
+                        {move || if dark.get() { "☀ Light" } else { "☾ Dark" }}
+                    </button>
+                </div>
                 <For each=move || folders.get() key=|f| f.id let:folder>
                     {
                         let (id, name) = (folder.id, folder.name.clone());
@@ -417,6 +558,12 @@ pub fn App() -> impl IntoView {
 
             <div class="list-col">
             <div class="list-head">
+                <input
+                    class="search"
+                    placeholder="Search mail"
+                    prop:value=move || query.get()
+                    on:input=move |e| run_search(event_target_value(&e))
+                />
                 <button
                     class="refresh"
                     disabled=move || refreshing.get() || catchup.get().is_some()
@@ -445,13 +592,17 @@ pub fn App() -> impl IntoView {
                 }
             >
                 <Show when=move || loaded.get() && messages.get().is_empty() && error.get().is_none()>
-                    <p class="empty">
-                        {move || if account.get().is_none() {
-                            "No account yet. Add one to start reading your mail."
-                        } else {
-                            "Nothing here."
-                        }}
-                    </p>
+                    <div class="empty">
+                        <Show
+                            when=move || account.get().is_none()
+                            fallback=|| view! { <p>"Nothing here."</p> }
+                        >
+                            <p>"No account yet. Add one to start reading your mail."</p>
+                            <button class="compose-new" on:click=move |_| open_setup()>
+                                "Add account"
+                            </button>
+                        </Show>
+                    </div>
                 </Show>
                 // The full scrollable height, so the scrollbar is correct even though only a window of
                 // rows exists in the DOM. The window is translated down to its true offset.
@@ -643,6 +794,66 @@ pub fn App() -> impl IntoView {
                                 {move || if sending.get() { "Sending…" } else { "Send" }}
                             </button>
                             <button class="cancel" on:click=move |_| compose.set(None)>"Cancel"</button>
+                        </div>
+                    </div>
+                </div>
+            </Show>
+
+            // Add-account overlay (S9.6) — the app's own document, a plain form. Credentials go
+            // straight to the shell → the OS keychain; they never touch a webview or a log.
+            <Show when=move || setup.get().is_some()>
+                <div class="compose-scrim">
+                    <div class="compose setup" role="dialog" aria-label="Add account">
+                        <div class="compose-head">
+                            <span>"Add account"</span>
+                            <button class="close" title="Cancel" on:click=move |_| setup.set(None)>"✕"</button>
+                        </div>
+                        <div class="setup-fields">
+                            {setup_field("Email", "email@example.com", false,
+                                move || setup.get().map(|f| f.email).unwrap_or_default(),
+                                move |v| setup.update(|f| if let Some(f) = f { f.email = v; }))}
+                            {setup_field("Display name (optional)", "Your name", false,
+                                move || setup.get().map(|f| f.display_name).unwrap_or_default(),
+                                move |v| setup.update(|f| if let Some(f) = f { f.display_name = v; }))}
+                            {setup_field("IMAP host", "imap.example.com", false,
+                                move || setup.get().map(|f| f.imap_host).unwrap_or_default(),
+                                move |v| setup.update(|f| if let Some(f) = f { f.imap_host = v; }))}
+                            {setup_field("IMAP port", "993", false,
+                                move || setup.get().map(|f| f.imap_port).unwrap_or_default(),
+                                move |v| setup.update(|f| if let Some(f) = f { f.imap_port = v; }))}
+                            {setup_field("Username", "usually your email", false,
+                                move || setup.get().map(|f| f.username).unwrap_or_default(),
+                                move |v| setup.update(|f| if let Some(f) = f { f.username = v; }))}
+                            {setup_field("Password", "", true,
+                                move || setup.get().map(|f| f.password).unwrap_or_default(),
+                                move |v| setup.update(|f| if let Some(f) = f { f.password = v; }))}
+                            {setup_field("SMTP host", "smtp.example.com", false,
+                                move || setup.get().map(|f| f.smtp_host).unwrap_or_default(),
+                                move |v| setup.update(|f| if let Some(f) = f { f.smtp_host = v; }))}
+                            {setup_field("SMTP port", "465", false,
+                                move || setup.get().map(|f| f.smtp_port).unwrap_or_default(),
+                                move |v| setup.update(|f| if let Some(f) = f { f.smtp_port = v; }))}
+                            <label class="setup-check">
+                                <input type="checkbox"
+                                    prop:checked=move || setup.get().map(|f| f.smtp_starttls).unwrap_or(false)
+                                    on:change=move |e| setup.update(|f| if let Some(f) = f {
+                                        f.smtp_starttls = event_target_checked(&e);
+                                        // Move the port to the standard for the chosen mode, but only if
+                                        // it's still on the *other* mode's default — never stomp a port
+                                        // the user typed. (Checking STARTTLS while the field still reads
+                                        // the implicit-TLS default 465 would otherwise send STARTTLS to 465.)
+                                        if f.smtp_starttls && f.smtp_port == "465" { f.smtp_port = "587".into(); }
+                                        if !f.smtp_starttls && f.smtp_port == "587" { f.smtp_port = "465".into(); }
+                                    })
+                                />
+                                "Use STARTTLS for outgoing mail (port 587)"
+                            </label>
+                        </div>
+                        <div class="compose-foot">
+                            <button class="send" disabled=move || connecting.get() on:click=move |_| submit_setup()>
+                                {move || if connecting.get() { "Connecting…" } else { "Connect" }}
+                            </button>
+                            <button class="cancel" on:click=move |_| setup.set(None)>"Cancel"</button>
                         </div>
                     </div>
                 </div>

@@ -108,10 +108,14 @@ fn main() {
         ipc::refresh,
         ipc::compose_draft,
         ipc::send_message,
+        ipc::add_account,
+        ipc::search,
+        ipc::set_theme,
         ipc::theme,
         ipc::dev_open_message,
         ipc::dev_load_images,
         ipc::dev_compose,
+        ipc::dev_setup,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -125,6 +129,9 @@ fn main() {
         ipc::refresh,
         ipc::compose_draft,
         ipc::send_message,
+        ipc::add_account,
+        ipc::search,
+        ipc::set_theme,
         ipc::theme,
     ]);
 

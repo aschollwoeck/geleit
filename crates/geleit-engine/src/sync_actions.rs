@@ -13,7 +13,7 @@ use crate::localstore::open_store;
 use crate::message::{self, Draft};
 use crate::smtp::{self, SmtpSecurity, SmtpSettings};
 use geleit_platform::secret::SecretStore;
-use geleit_store::{ImapSettings, SmtpSecurityKind};
+use geleit_store::{ImapSettings, SmtpConfig, SmtpSecurityKind, StoreError};
 
 /// Map stored IMAP settings to a connection config.
 pub fn to_config(s: &ImapSettings) -> ImapConfig {
@@ -294,6 +294,141 @@ pub fn run_send(
     Ok(())
 }
 
+/// Validate raw Add-account form fields into `(email, ImapSettings)`. Pure — unit-tested. (Email
+/// format is checked by the store on insert; here we reject empty host/username and bad ports.)
+pub fn build_settings(
+    email: &str,
+    host: &str,
+    port: &str,
+    username: &str,
+    allow_invalid_certs: bool,
+) -> Result<(String, ImapSettings), String> {
+    let email = email.trim();
+    let host = host.trim();
+    let username = username.trim();
+    if email.is_empty() {
+        return Err("Enter your email address.".to_owned());
+    }
+    if host.is_empty() {
+        return Err("Enter your mail server (IMAP host).".to_owned());
+    }
+    if username.is_empty() {
+        return Err("Enter your username.".to_owned());
+    }
+    let port: u16 = match port.trim() {
+        "" => 993,
+        p => p
+            .parse()
+            .ok()
+            .filter(|&n| n != 0)
+            .ok_or_else(|| "Enter a valid port (1–65535).".to_owned())?,
+    };
+    Ok((
+        email.to_owned(),
+        ImapSettings {
+            host: host.to_owned(),
+            port,
+            username: username.to_owned(),
+            allow_invalid_certs,
+        },
+    ))
+}
+
+/// Validate raw SMTP form fields into an `SmtpConfig`. Pure — unit-tested. An empty port defaults to
+/// the standard for the chosen security (465 implicit / 587 STARTTLS).
+pub fn build_smtp_settings(host: &str, port: &str, starttls: bool) -> Result<SmtpConfig, String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("Enter your outgoing mail server (SMTP host).".to_owned());
+    }
+    let security = if starttls {
+        SmtpSecurityKind::StartTls
+    } else {
+        SmtpSecurityKind::Implicit
+    };
+    let port: u16 = match port.trim() {
+        "" if starttls => 587,
+        "" => 465,
+        p => p
+            .parse()
+            .ok()
+            .filter(|&n| n != 0)
+            .ok_or_else(|| "Enter a valid SMTP port (1–65535).".to_owned())?,
+    };
+    Ok(SmtpConfig {
+        host: host.to_owned(),
+        port,
+        security,
+    })
+}
+
+/// Keyed by **email**: re-running with an existing email reconfigures that account; a new email adds
+/// a new account (ACC-5, multi-account).
+#[allow(clippy::too_many_arguments)]
+pub fn run_setup(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    email: &str,
+    display_name: Option<&str>,
+    settings: ImapSettings,
+    smtp: SmtpConfig,
+    signature: &str,
+    password: &str,
+) -> Result<i64, String> {
+    let store = open_store(db_path, secrets)?;
+    let existing = store
+        .account_by_email(email.trim())
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?;
+    let (account_id, is_new) = match existing {
+        Some(a) => {
+            store
+                .update_imap_settings(a.id, &settings)
+                .map_err(|_| "Couldn't save the account.".to_owned())?;
+            (a.id, false)
+        }
+        None => {
+            let id = store
+                .add_imap_account(email, display_name, &settings)
+                .map_err(|e| match e {
+                    StoreError::InvalidEmail => "Enter a valid email address.".to_owned(),
+                    _ => "Couldn't save the account.".to_owned(),
+                })?;
+            (id, true)
+        }
+    };
+    // Persist SMTP settings + signature (sending, M4). A failure on a new account rolls back below.
+    if store.update_smtp_settings(account_id, &smtp).is_err()
+        || store.update_signature(account_id, signature).is_err()
+    {
+        if is_new {
+            let _ = store.delete_account(account_id);
+        }
+        return Err("Couldn't save the account.".to_owned());
+    }
+
+    if imap::store_password(secrets, &settings.username, password.as_bytes()).is_err() {
+        if is_new {
+            let _ = store.delete_account(account_id); // don't leave a half-created account
+        }
+        return Err("Couldn't store the password.".to_owned());
+    }
+
+    let config = to_config(&settings);
+    let synced = runtime()?.block_on(async {
+        imap::sync_folders(&config, secrets, &store, account_id).await?;
+        imap::sync_folder_incremental(&config, secrets, &store, account_id, "INBOX", 200).await?;
+        Ok::<(), imap::ImapError>(())
+    });
+    if synced.is_err() {
+        if is_new {
+            let _ = store.delete_account(account_id); // roll back a half-created account
+        }
+        // engine error discarded (that discard is the P2 safeguard); calm, actionable message (§10)
+        return Err("Couldn't connect — check your details and try again.".to_owned());
+    }
+    Ok(account_id)
+}
+
 #[cfg(test)]
 mod pure_tests {
     use super::parse_addrs;
@@ -306,6 +441,51 @@ mod pure_tests {
         );
         assert!(parse_addrs("   ").is_empty());
         assert!(parse_addrs("").is_empty());
+    }
+
+    #[test]
+    fn build_settings_validates_and_defaults() {
+        // valid, with the insecure flag passed through
+        let (email, s) = super::build_settings("me@x.com", "imap.x", "993", "me", true).unwrap();
+        assert_eq!(email, "me@x.com");
+        assert!(s.allow_invalid_certs);
+        assert_eq!(s.port, 993);
+        // empty port defaults to 993
+        assert_eq!(
+            super::build_settings("me@x.com", "h", "", "u", false)
+                .unwrap()
+                .1
+                .port,
+            993
+        );
+        // rejects empties + bad ports
+        assert!(super::build_settings("", "h", "993", "u", false).is_err());
+        assert!(super::build_settings("me@x.com", "", "993", "u", false).is_err());
+        assert!(super::build_settings("me@x.com", "h", "0", "u", false).is_err());
+        assert!(super::build_settings("me@x.com", "h", "notaport", "u", false).is_err());
+    }
+
+    #[test]
+    fn build_smtp_defaults_by_security() {
+        use geleit_store::SmtpSecurityKind;
+        assert_eq!(
+            super::build_smtp_settings("smtp.x", "", false)
+                .unwrap()
+                .port,
+            465
+        );
+        assert_eq!(
+            super::build_smtp_settings("smtp.x", "", true).unwrap().port,
+            587
+        );
+        assert_eq!(
+            super::build_smtp_settings("smtp.x", "", true)
+                .unwrap()
+                .security,
+            SmtpSecurityKind::StartTls
+        );
+        assert!(super::build_smtp_settings("", "587", true).is_err());
+        assert!(super::build_smtp_settings("smtp.x", "0", true).is_err());
     }
 }
 
@@ -320,6 +500,54 @@ mod tests {
     /// The exact refresh + backfill path the Tauri `refresh` command drives (minus the event
     /// wrapper, which only forwards the `on_batch` count), against a local Dovecot. Proves the S9.3
     /// safety net actually pulls mail and streams progress.
+    /// The full `run_setup` path the Tauri `add_account` command drives (S9.6), against Dovecot:
+    /// validate → create → store the password → first sync. Reads the mailbox back with `open_store`
+    /// (SQLCipher-aware) — the old Slint test used `Store::open` and had been broken since
+    /// encryption-at-rest landed (it opened the encrypted DB unencrypted).
+    #[test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    fn live_setup_creates_and_syncs_an_account() {
+        let path = std::env::temp_dir().join("geleit-s96-setup-test.db");
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+
+        let secrets = InMemorySecretStore::new();
+        let (email, imap) = build_settings(
+            "geleittest@localhost",
+            "127.0.0.1",
+            "993",
+            "geleittest",
+            true,
+        )
+        .expect("valid imap form");
+        let smtp = build_smtp_settings("127.0.0.1", "465", false).expect("valid smtp form");
+
+        let acc = run_setup(
+            path,
+            &secrets,
+            &email,
+            Some("geleittest"),
+            imap,
+            smtp,
+            "",
+            "testpass123",
+        )
+        .expect("setup + first sync");
+
+        // Read back through the ENCRYPTED store (the bug the old Slint test hid).
+        let store = open_store(path, &secrets).expect("reopen encrypted");
+        let inbox = store
+            .folders_for_account(acc)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.name == "INBOX")
+            .expect("INBOX synced")
+            .id;
+        assert!(!store.messages_in_folder(inbox, 10).unwrap().is_empty());
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
     fn live_refresh_then_backfill_streams_progress() {
