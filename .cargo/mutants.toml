@@ -38,4 +38,8 @@ exclude_globs = [
     # STAYS mutation-tested.
     "**/geleit-shell/src/ipc.rs",
     "**/geleit-shell/src/main.rs",
+    # mailproto::handle is protocol glue needing a live Tauri UriSchemeContext (can't run under
+    # mutants) — but its PURE helpers (csp/placeholder/html_response) are unit-tested, and the whole
+    # shell crate is outside CI's mutation scope anyway (it runs on core/platform/store/engine/app).
+    "**/geleit-shell/src/mailproto.rs",
 ]

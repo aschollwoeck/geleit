@@ -16,8 +16,14 @@
 //!
 //! CSS is *not* deeply parsed; its safety rests on the CSP, which is the real network boundary —
 //! a CSS `url(http://…)` is blocked by the browser regardless of what the sanitizer let through, and
-//! modern WebKit ignores legacy script-in-CSS (`expression()`/`behavior`). The webview is also
-//! clipped to the reading pane, so CSS can't escape it. Pure — unit- and mutation-tested.
+//! modern WebKit ignores legacy script-in-CSS (`expression()`/`behavior`). A CSS `url()` is invisible
+//! to the sanitize-vs-sanitize diff, so [`has_remote_content`] scans for it separately — the CSP
+//! *blocks* it either way, but the user should still be *told* it was there. Pure — unit- and
+//! mutation-tested.
+//!
+//! Two document wrappers add the CSP + a base stylesheet: [`document`] (the Slint/Blitz renderer,
+//! carrying two Blitz workarounds) and [`webview_document`] (the M9 OS webview, ADR-0012 — no
+//! workarounds; served from its own `mail://` origin, never `srcdoc`).
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -101,6 +107,78 @@ fn is_remote_url(value: &str) -> bool {
 fn is_safe_link(value: &str) -> bool {
     let v = value.trim().to_ascii_lowercase();
     v.starts_with("http:") || v.starts_with("https:") || v.starts_with("mailto:")
+}
+
+/// Does a CSS value reference something remote — `background:url(http://tracker/…)`?
+///
+/// The sanitizer deliberately leaves `style`/`<style>` alone (the CSP, not the sanitizer, is what
+/// stops CSS loading remote resources), so a CSS-based tracker is **invisible** to a
+/// sanitize-vs-sanitize comparison. It is still *blocked* — but without this check the user would
+/// never be *told*, and "Load images" would never appear for a message whose tracker hides in CSS.
+///
+/// Anything that isn't clearly local (`data:`, `cid:`, a fragment) counts as remote: the CSP blocks
+/// those too, so erring toward showing the cue keeps the UI honest about what was withheld.
+fn css_references_remote(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    let mut rest = lower.as_str();
+    while let Some(i) = rest.find("url(") {
+        rest = &rest[i + 4..];
+        let v = rest.trim_start().trim_start_matches(['"', '\'']);
+        if !(v.starts_with("data:") || v.starts_with("cid:") || v.starts_with('#')) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Does this message carry remote content that we blocked (PRIV-3)?
+///
+/// Two signals, because one alone misses half the trackers:
+/// 1. the two sanitizations **differ** — something remote was stripped from an attribute (`<img
+///    src="https://…">`, a remote `<link>`); and
+/// 2. the surviving CSS still **references** something remote (see [`css_references_remote`]).
+///
+/// A plain `<a href="https://…">` is *not* remote content: it fetches nothing until clicked.
+#[must_use]
+pub fn has_remote_content(raw: &str) -> bool {
+    let blocked = sanitize_html(raw);
+    blocked != sanitize_html_allowing_remote(raw) || css_references_remote(&blocked)
+}
+
+/// Wrap already-sanitized body HTML in a document for the **OS webview** (M9, ADR-0012).
+///
+/// The same strict CSP as [`document`] — `default-src 'none'`, no `script-src` at all, and `img-src`
+/// as the only directive ever relaxed (on explicit opt-in, PRIV-2) — but **without the two Blitz
+/// workarounds**, which must never reach a real browser engine:
+///
+/// * `table{border-collapse:separate!important}` existed to hide Blitz's phantom table borders. On a
+///   real engine it is **actively wrong**: it would corrupt every email that legitimately collapses
+///   its borders.
+/// * [`add_font_fallbacks`] existed because Blitz dropped digit glyphs for uninstalled fonts.
+///
+/// This document is served from its **own origin** (`mail://`), never `srcdoc` — a `srcdoc` iframe
+/// *inherits* the embedding page's CSP, which would silently strip the message's inline styles.
+///
+/// `<base target="_blank">` makes a link click surface as a new-window request, which the shell
+/// intercepts and hands to the system browser. The page background stays "paper" light in both app
+/// themes: mail is authored for a light background, and recolouring it would misrepresent the sender.
+#[must_use]
+pub fn webview_document(sanitized_body: &str, allow_remote_images: bool) -> String {
+    let img_src = if allow_remote_images {
+        "data: cid: https: http:"
+    } else {
+        "data: cid:"
+    };
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+         <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; \
+img-src {img_src}; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'\">\
+         <base target=\"_blank\">\
+         <style>html{{font-family:system-ui,sans-serif;color:#1f2a2e;background:#fff;\
+margin:0;padding:14px 16px;line-height:1.5}}a{{color:#1c7e7b}}\
+img{{max-width:100%;height:auto}}</style>\
+         </head><body>{sanitized_body}</body></html>"
+    )
 }
 
 /// Wrap already-sanitized body HTML in a minimal document carrying a strict Content-Security-Policy
@@ -193,7 +271,79 @@ pub fn add_font_fallbacks(html: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_font_fallbacks, document, sanitize_html, sanitize_html_allowing_remote};
+    use super::{
+        add_font_fallbacks, document, has_remote_content, sanitize_html,
+        sanitize_html_allowing_remote, webview_document,
+    };
+
+    #[test]
+    fn css_url_detection_distinguishes_local_from_remote() {
+        use super::css_references_remote;
+        // remote — in any quoting style
+        assert!(css_references_remote("background:url(http://x/y.png)"));
+        assert!(css_references_remote("background:url('https://x/y.png')"));
+        assert!(css_references_remote(r#"background:url("//cdn/y.png")"#));
+        // local / inert — must NOT trip the cue
+        assert!(!css_references_remote(
+            "background:url(data:image/gif;base64,AA)"
+        ));
+        assert!(!css_references_remote("background:url(cid:logo)"));
+        assert!(!css_references_remote("clip-path:url(#mask)")); // same-document fragment
+        assert!(!css_references_remote("color:#fff; padding:4px")); // no url() at all
+                                                                    // the SECOND url() is what's remote — a single scan of the first must not stop early
+        assert!(css_references_remote(
+            "background:url(data:x), url(http://tracker/p.png)"
+        ));
+    }
+
+    #[test]
+    fn remote_content_is_detected_only_when_something_was_actually_stripped() {
+        assert!(has_remote_content(
+            r#"<img src="https://tracker.example/pixel.gif">"#
+        ));
+        assert!(has_remote_content(
+            r#"<p style="background:url('http://x.example/t.png')">hi</p>"#
+        ));
+        // inline + cid images are not remote — no cue should appear for them
+        assert!(!has_remote_content(
+            r#"<img src="data:image/gif;base64,R0lGOD"><img src="cid:logo">"#
+        ));
+        assert!(!has_remote_content("<p>just words</p>"));
+        // a plain http *link* is not remote content — it fetches nothing until clicked
+        assert!(!has_remote_content(
+            r#"<a href="https://example.com">x</a>"#
+        ));
+    }
+
+    #[test]
+    fn the_webview_document_blocks_remote_images_by_default_and_never_allows_script() {
+        let doc = webview_document("<p>hi</p>", false);
+        assert!(doc.contains("default-src 'none'"));
+        assert!(doc.contains("img-src data: cid:;"));
+        assert!(!doc.contains("https:"), "remote images must be blocked");
+        assert!(
+            !doc.contains("script-src"),
+            "no script-src at all — scripts are never permitted, even on opt-in"
+        );
+        assert!(doc.contains("form-action 'none'"));
+    }
+
+    #[test]
+    fn opting_in_widens_only_img_src() {
+        let doc = webview_document("<p>hi</p>", true);
+        assert!(doc.contains("img-src data: cid: https: http:;"));
+        assert!(!doc.contains("script-src"));
+        assert!(doc.contains("default-src 'none'"));
+    }
+
+    /// The Blitz workarounds must NEVER reach a real browser engine: `border-collapse:separate` would
+    /// corrupt every email that legitimately collapses its table borders.
+    #[test]
+    fn the_webview_document_carries_no_blitz_workarounds() {
+        let doc = webview_document("<table><tr><td>x</td></tr></table>", false);
+        assert!(!doc.contains("border-collapse"));
+        assert!(!doc.contains("border-spacing"));
+    }
 
     #[test]
     fn font_fallback_added_only_when_missing() {

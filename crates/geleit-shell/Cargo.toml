@@ -19,6 +19,8 @@ geleit-engine = { path = "../geleit-engine" }
 geleit-platform = { path = "../geleit-platform" }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
+# navigation guard: parse + classify URLs (already in the tree via tauri)
+url = "2"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

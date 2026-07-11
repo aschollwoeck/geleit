@@ -31,6 +31,11 @@ pub struct Message {
     pub has_attachments: bool,
 }
 
+/// A message opened for reading.
+///
+/// The HTML body is deliberately **absent**: hostile markup never enters the app's document, not even
+/// as a string. When `is_html`, the reading pane points a sandboxed `<iframe>` at `mail://localhost/<id>`
+/// and the shell serves the sanitized message on its own origin (ADR-0012, S9.2).
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 pub struct MessageBody {
     pub id: i64,
@@ -38,8 +43,9 @@ pub struct MessageBody {
     pub from: String,
     pub date: Option<i64>,
     pub plain: Option<String>,
-    /// Carried but **not rendered** in S9.1 — the sandboxed iframe lands in S9.2.
-    pub html: Option<String>,
+    pub is_html: bool,
+    /// Remote content was blocked (PRIV-3) → show the cue + "Load images" (PRIV-2).
+    pub has_remote: bool,
 }
 
 // Tauri looks up command arguments by their **camelCase** names on the JS side, so the payload must
@@ -130,4 +136,9 @@ pub async fn theme() -> Result<Option<String>, String> {
 /// Dev/test seam — see `geleit-shell::ipc::dev_open_message`. Always `None` in a release build.
 pub async fn dev_open_message() -> Result<Option<i64>, String> {
     call("dev_open_message", &NoArgs {}).await
+}
+
+/// Dev/test seam — see `geleit-shell::ipc::dev_load_images`. Always `false` in a release build.
+pub async fn dev_load_images() -> Result<bool, String> {
+    call("dev_load_images", &NoArgs {}).await
 }
