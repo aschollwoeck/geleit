@@ -203,6 +203,46 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 
 ---
 
+## M9 — UI rebuild on Tauri + Leptos 🔨 IN PROGRESS
+**Why:** the reading pane *is* the product, and **no Rust-native path renders real mail correctly.**
+Both attempts failed on their merits — the embedded webview crashed on X11 (ADR-0001) and the
+pure-Rust CPU renderer (Blitz, ADR-0011) could not render real mail. M9 moves the shell to the OS
+webview, where mail renders correctly with **zero** workarounds and hostile mail is provably inert.
+Required **amending constitution P4**. Decision + evidence: **[ADR-0012]**,
+`docs/technical/tauri-webkit-spike.md`.
+
+**Delivers:** correct HTML rendering (the M3 promise, finally kept); deletes `htmlrender.rs`,
+`remoteimg.rs`, `ureq`, Slint, and the Blitz stack. **`core`/`platform`/`store`/`engine` (6,069
+lines) are untouched** — only `geleit-app` is rewritten.
+
+**Costs (accepted, capped in CI by P4):** cold start ~275 ms → ~1000 ms (WebKit boot; ~630 ms of it
+before our code runs), idle RSS ~60 MB → ~150–250 MB.
+
+- **S9.1** — Tauri shell + Leptos scaffold: window, skeleton paint, IPC seam to the engine, folder
+  rail / list / reading-pane chrome. Nothing renders mail yet; proves the app boots and talks to
+  the store.
+- **S9.2** — **Reading pane**: sandboxed iframe, CSP, plain text + HTML, remote-image gate (PRIV-2 as
+  a CSP relaxation), links to the system browser. *The slice this whole milestone exists for.*
+  > **Trap:** a `srcdoc` iframe **inherits the app's CSP**, which has no `style-src 'unsafe-inline'` —
+  > so `srcdoc` would silently strip every message's inline styles and render all mail unstyled.
+  > Serve the message from its **own origin** (custom protocol) so it carries the CSP
+  > `safehtml::document()` already emits. See `docs/technical/tauri-shell.md`.
+- **S9.3** — Message list + folders: selection, threading, unread/star/flags, virtualized list.
+- **S9.4** — Refresh/sync wiring + progressive feedback.
+- **S9.5** — Compose / reply / forward / drafts / attachments.
+- **S9.6** — Search; settings, accounts, manage folders, save/open `.eml`.
+- **S9.7** — **Teardown**: delete Slint, Blitz, `remoteimg.rs`, `ureq`; ban `ureq` in `deny.toml`;
+  drop the Slint license allowance; remove the two Blitz workarounds from `safehtml.rs` (one of
+  them, `border-collapse:separate!important`, is *actively wrong* for a real engine).
+- **S9.8** — **Perf budgets in CI** (constitution P4): cold start ≤1200 ms, idle RSS ≤280 MB, binary
+  ≤30 MB, message-open ≤100 ms. Plus the skeleton-paint mitigation so the window is never blank.
+
+> **Packaging note:** S8.4's macOS/Windows blocker *softens* — Tauri wraps WebView2 (Windows) and
+> WKWebView (macOS) and ships a bundler for all three, so cross-platform stops being a webview
+> problem and becomes a keychain-porting problem.
+
+---
+
 ## Beyond the first release (toward the full vision)
 Slices defined when we reach them.
 

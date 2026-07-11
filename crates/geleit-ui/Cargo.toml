@@ -1,0 +1,33 @@
+[package]
+name = "geleit-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The Leptos frontend (M9, ADR-0012), compiled Rust -> WASM. There is NO npm: `cargo` and
+# `deny.toml` keep covering the whole tree.
+#
+# It depends on NONE of our crates on purpose — it reaches the engine only over the Tauri IPC seam
+# (geleit-shell::ipc), so view code cannot touch the store even by accident (ADR-0003).
+#
+# `rlib` as well as `cdylib` so the crate still builds for the HOST target: that is what lets
+# `cargo clippy`/`cargo test` cover it in CI like any other crate. The wasm entrypoint is cfg-gated.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+leptos = { version = "0.8", features = ["csr"] }
+serde = { version = "1", features = ["derive"] }
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "Storage"] }
+
+[lints.rust]
+unsafe_code = "deny" # wasm-bindgen's generated glue allows unsafe; our own code never does
+
+[lints.clippy]
+all = "warn"

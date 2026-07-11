@@ -1,6 +1,26 @@
 # cargo-deny configuration (guidelines §6). Run: `cargo deny check`.
 # Gates every dependency on security advisories, license compatibility, bans, and source.
 
+# Only the platforms GeleitMail actually ships on. Without this, cargo-deny scans EVERY target,
+# including Android and iOS — and `tauri` declares `reqwest` under a mobile-only
+# `[target.'cfg(any(target_os = "android", all(target_vendor = "apple", not(target_os = "macos"))))']`
+# block. That tripped the no-egress ban (below) over a crate that can never be compiled into a
+# desktop binary. Scoping the graph makes the ban mean what it claims: **no HTTP client in the app we
+# ship**. If mobile is ever targeted, this list must grow — and reqwest's arrival there is then a
+# deliberate, reviewed decision, not a silent one.
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    # The Leptos frontend compiles to wasm. Nothing is wasm-ONLY in the tree today, so this changes
+    # no result — it is cheap insurance for the day a `cfg(target_arch = "wasm32")` dependency lands
+    # and would otherwise slip past the gate entirely.
+    "wasm32-unknown-unknown",
+]
+
 [advisories]
 version = 2
 yanked = "deny"
@@ -22,6 +42,41 @@ ignore = [
     # proc-macro-error 1.0.4 — unmaintained, pulled transitively via the webview/gtk macro stack
     # (not vulnerable). Goes away when the gtk3 stack does.
     "RUSTSEC-2024-0370",
+
+    # --- M9 / ADR-0012: the Tauri + Leptos stack. All UNMAINTAINED, none vulnerable. They are
+    # --- structural (the OS webview requires GTK3; Leptos's macros use these), so there is no
+    # --- alternative short of not having a working HTML renderer — which is the thing M9 exists to
+    # --- fix. Revisit when wry/webkit2gtk move to GTK4 and when Leptos drops the macro deps.
+    #
+    # gtk-rs GTK3 bindings — webkit2gtk (the OS webview) still requires GTK3; no GTK4 path exists.
+    # Path: tauri -> muda -> gtk. Supersedes the per-crate 2024-041x ignores below.
+    "RUSTSEC-2024-0411",
+    # paste — unmaintained proc-macro. Path: leptos -> either_of -> paste.
+    "RUSTSEC-2024-0436",
+    # proc-macro-error2 — unmaintained. Path: leptos -> leptos_macro.
+    "RUSTSEC-2026-0173",
+    # unic-* — unmaintained Unicode tables. Path: tauri -> tauri-utils -> urlpattern -> unic-*.
+    # BUILD-TIME ONLY (tauri-codegen), and they parse Tauri's own config, not untrusted input.
+    "RUSTSEC-2025-0075",
+    "RUSTSEC-2025-0080",
+    "RUSTSEC-2025-0081",
+    "RUSTSEC-2025-0098",
+    "RUSTSEC-2025-0100",
+
+    # --- Both of the following are pulled ONLY by Slint and Blitz, which M9 deletes (ADR-0012).
+    # --- They are dormant-by-construction for us, and they disappear with S9.7's teardown.
+    #
+    # quick-xml 0.39 DoS advisories (quadratic start-tag scan; unbounded namespace allocation).
+    # Path: Slint → winit → sctk-adwaita → smithay-client-toolkit → wayland-scanner → quick-xml.
+    # `wayland-scanner` is a **build-time proc-macro** that parses the Wayland protocol XML shipped
+    # with the crate — it never sees untrusted input, so neither DoS is reachable. We cannot upgrade
+    # anyway: wayland-scanner's semver req holds quick-xml at 0.39 (fix is 0.41). Goes with Slint.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    #
+    # ttf-parser 0.25 — unmaintained (not vulnerable). Path: Blitz → blitz-paint → anyrender_svg →
+    # usvg → fontdb → ttf-parser. No safe upgrade exists. Goes with Blitz.
+    "RUSTSEC-2026-0192",
 ]
 
 [licenses]

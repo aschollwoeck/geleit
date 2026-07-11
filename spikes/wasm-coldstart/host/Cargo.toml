@@ -1,0 +1,13 @@
+[package]
+name = "coldstart_host"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Times cold start of a WebKitGTK webview from process exec to first paint, for a Leptos/wasm UI vs
+# an identical vanilla-JS UI. Same engine Tauri uses, so the numbers transfer.
+[dependencies]
+wry = "0.55.1"
+tao = "0.35"
+
+[workspace]

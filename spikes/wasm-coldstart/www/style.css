@@ -1,0 +1,21 @@
+/* Shared by both builds so the DOM/paint work is identical and only the runtime differs. */
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; color: #1f2a2e; }
+.app { display: grid; grid-template-columns: 200px 380px 1fr; height: 100%; }
+.rail { background: #16211f; color: #cfe3df; padding: 12px; }
+.brand { font-weight: 700; margin-bottom: 16px; }
+.folder { padding: 7px 8px; border-radius: 6px; cursor: pointer; }
+.folder:hover { background: #22322f; }
+.list { border-right: 1px solid #e3e0d8; overflow-y: auto; background: #fbfaf7; }
+.search { width: 100%; padding: 9px 10px; border: 0; border-bottom: 1px solid #e3e0d8; outline: 0; }
+.row { padding: 9px 12px; border-bottom: 1px solid #eeece5; cursor: pointer; }
+.row:hover { background: #f2efe7; }
+.row.sel { background: #e6f0ee; box-shadow: inset 3px 0 0 #1c7e7b; }
+.row.unread .subj { font-weight: 700; }
+.from { font-size: 12px; color: #5c6a6e; }
+.subj { font-size: 13px; margin: 1px 0; }
+.prev { font-size: 12px; color: #7b8887; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.date { font-size: 11px; color: #9aa5a4; }
+.read { padding: 22px 26px; overflow-y: auto; }
+.read h1 { font-size: 19px; margin: 0 0 6px; }
+.meta { font-size: 12px; color: #7b8887; margin-bottom: 14px; }

@@ -1,0 +1,15 @@
+[package]
+name = "tauri_reading_pane"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Throwaway spike — prove the WebKitGTK webview (the engine Tauri wraps via wry) can render real mail
+# HTML correctly on X11 as a TOP-LEVEL window, with mail confined to a script-free sandboxed iframe
+# and a CSP that blocks trackers. This is the "switch to Tauri" feasibility gate. Not in the workspace.
+[dependencies]
+geleit-engine = { path = "../../crates/geleit-engine" }
+wry = "0.55.1"
+tao = "0.35"
+
+[workspace]

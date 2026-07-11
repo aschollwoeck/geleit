@@ -6,6 +6,7 @@
 
 mod envelope;
 pub mod imap;
+pub mod localstore;
 pub mod message;
 mod mime;
 pub mod safehtml;
