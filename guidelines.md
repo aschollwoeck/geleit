@@ -2,7 +2,7 @@
 
 The single written standard referenced by `constitution.md` P9. New code matches the
 surrounding code and these rules. Where a rule and the constitution conflict, the
-constitution wins. The UI framework was committed to **Slint** in M0 (ADR-0001); the UI
+constitution wins. The UI framework was committed to **Tauri + Leptos** in M9 (ADR-0012, superseding ADR-0001); the UI
 conventions in §13 are final.
 
 Status: **initial draft.** Refine as the codebase grows; amend deliberately, not silently.
@@ -151,26 +151,35 @@ extensive over the project's life, and is never deferred to a "docs later" phase
 - `main` stays buildable and test-green at all times.
 - Don't commit secrets, fixtures containing real mail, or generated artifacts.
 
-## 13. UI conventions (Slint)
+## 13. UI conventions (Tauri + Leptos)
 
-Framework committed to **Slint** in ADR-0001 (accepted after the M0 spikes S0.2/S0.3).
+The shell is **Tauri** (OS webview) and the UI is **Leptos** (Rust → WASM), committed in M9 after
+both native-HTML-rendering routes failed ([ADR-0012], superseding ADR-0001/0011). No npm — `cargo`
+and `deny.toml` cover the whole tree. Details: `docs/technical/tauri-shell.md`.
 
-- **No business logic in the UI.** The UI crate renders state from the engine and forwards user
-  intents back; all logic lives in the engine crates (§2). The engine is the source of truth.
-- **State flow.** The UI observes engine state (models/properties) and sends intents (actions)
-  to the engine. No engine call blocks the UI thread (P1); long work runs in the engine and its
-  results update the UI's models.
-- **Large lists** (messages, folders) use Slint's **virtualized `ListView`** bound to a model —
-  never instantiate per-row widgets eagerly (S0.3: this is what keeps 50k rows at ≥60fps with
-  data-only memory).
-- **HTML email renders only in the sandboxed webview component** (ADR-0001), never in the main
-  Slint scene. Before rendering, email HTML is **sanitized** (scripts/handlers removed, remote
-  refs neutralized) and **JavaScript is disabled** in the webview; remote content is blocked by
-  default (PRIV-1). Use a **CSS-aware sanitizer** that keeps safe inline CSS while stripping
-  remote `url(...)`/`@import` (S0.2 finding — a blanket style-strip ruins fidelity).
-- **Rendering backend.** Prefer the GPU (FemtoVG/OpenGL) backend; the software fallback works
-  but is slower (S0.3).
-- **Calm/fast (P3).** Every interaction targets instant feedback from local state; long
-  operations show non-blocking progress, never a frozen UI.
-- **Accessibility & keyboard navigation** are first-class, not afterthoughts.
-- **Theming.** Light/dark (APP-3) from a single set of theme tokens.
+- **Two crates, one boundary.** `geleit-app` is the Tauri host (window, IPC commands, the `mail://`
+  origin); `geleit-ui` is the Leptos frontend. **`geleit-ui` depends on none of our crates** — it
+  reaches the engine *only* over the typed IPC seam. `check-boundary.sh` enforces this: view code
+  cannot touch the store even by accident.
+- **No business logic in the UI.** Pure display logic (dates, elision, virtualization math) lives in
+  `geleit-ui/src/view.rs`; store→UI mapping and pure resolvers live in `geleit-app/src/dto.rs`. Both
+  are **mutation-tested**. Glue (IPC commands, view wiring) is excluded from mutants.
+- **Never block the webview (P1).** Every IPC command is `async` and hops to a blocking thread; the
+  store is opened once and kept behind a `Mutex`. Network work runs on a worker and streams results
+  back (Tauri events for progress).
+- **Large lists** are **virtualized** — render only the visible window (`view::visible_range`), never
+  the whole list; reading `.with(Vec::len)` and cloning only the window keeps the scroll path O(1).
+- **HTML email renders only in a sandboxed `<iframe>` on its own `mail://` origin** — never `srcdoc`
+  (which inherits the app CSP and strips mail styles). The message body **never enters the app
+  document**, not even as a string. Three layers: ammonia sanitizer, iframe `sandbox` with no
+  `allow-scripts`/`allow-same-origin`, and `webview_document`'s `default-src 'none'` CSP. Remote
+  content is blocked by default (PRIV-1); "Load images" is a per-message CSP relaxation, not a fetch.
+- **No inline scripts.** `dist/*.js` are external files, so the app CSP stays a strict
+  `script-src 'self'` (Tauri's nonce injection doesn't reach inline module scripts anyway).
+- **Skeleton paint.** WebKit takes ~630 ms to boot; `index.html` paints the chrome statically first,
+  so the window is never blank.
+- **Calm/fast (P3).** Instant feedback from local state; long operations show non-blocking progress.
+- **Accessibility & keyboard navigation** are first-class. **Theming:** light/dark from `design.md`'s
+  token table (CSS custom properties), the choice persisted in the store.
+
+[ADR-0012]: docs/adr/0012-tauri-shell-with-leptos-ui.md

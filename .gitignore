@@ -22,8 +22,8 @@ target
 # (the Tauri shell's dist/ holds hand-written static assets and IS committed;
 # only its generated wasm output is ignored — see below)
 dist/
-!crates/geleit-shell/dist/
-crates/geleit-shell/dist/pkg/
+!crates/geleit-app/dist/
+crates/geleit-app/dist/pkg/
 
 # stray screenshots dropped in the repo root (manual images live in docs/manual/images/)
 /Screenshot*.png
@@ -36,7 +36,7 @@ crates/geleit-shell/dist/pkg/
 /*.png
 
 # Tauri generates these permission/capability schemas at build time from tauri.conf.json.
-crates/geleit-shell/gen/schemas/
+crates/geleit-app/gen/schemas/
 
 # wasm-bindgen output for the M9 cold-start spike (generated from ui/src)
 spikes/wasm-coldstart/ui/pkg/
