@@ -3,7 +3,7 @@
 //! S9.1 deliberately renders the **plaintext** body only. HTML mail arrives in S9.2, confined to a
 //! script-free, CSP-locked `<iframe>` — do not smuggle `html` into this document early: rendering
 //! mail in the app's own document is exactly the thing ADR-0012's sandbox exists to prevent.
-use crate::api::{self, Folder, Message, MessageBody};
+use crate::api::{self, ComposeDraft, Folder, Message, MessageBody};
 use crate::view::{elide, format_date, visible_range};
 use leptos::either::Either;
 use leptos::prelude::*;
@@ -102,6 +102,9 @@ pub fn App() -> impl IntoView {
     // Sync state (S9.4): whether a refresh is in flight, and the background catch-up count.
     let refreshing = RwSignal::new(false);
     let catchup = RwSignal::new(Option::<i64>::None); // Some(n) while backfilling; None when idle
+                                                      // Compose state (S9.5): Some while the compose overlay is open, holding the editable draft.
+    let compose = RwSignal::new(Option::<ComposeDraft>::None);
+    let sending = RwSignal::new(false);
 
     // Backfill progress streams in as `sync-progress` events; a negative value marks the catch-up
     // finished (-1 = ok, -2 = it stopped early). Either way, clear the strip and re-list.
@@ -264,6 +267,51 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    // Open a blank compose window (New message).
+    let compose_new = move || compose.set(Some(ComposeDraft::default()));
+
+    // Open compose prefilled for reply / reply_all / forward of the open message.
+    let compose_from_open = move |kind: &'static str| {
+        let Some(id) = open.get().map(|b| b.id) else {
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            match api::compose_draft(id, kind).await {
+                Ok(d) => compose.set(Some(d)),
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
+    // Send the current compose draft. Runs on a worker (P1); closes the overlay on success.
+    let send_compose = move || {
+        let (Some(aid), Some(d)) = (account.get(), compose.get()) else {
+            return;
+        };
+        if sending.get() || d.to.trim().is_empty() {
+            error.set(Some("Add at least one recipient.".to_owned()));
+            return;
+        }
+        sending.set(true);
+        leptos::task::spawn_local(async move {
+            match api::send_message(
+                aid,
+                d.to,
+                d.cc,
+                d.subject,
+                d.body,
+                d.in_reply_to,
+                d.references,
+            )
+            .await
+            {
+                Ok(()) => compose.set(None),
+                Err(e) => error.set(Some(e)),
+            }
+            sending.set(false);
+        });
+    };
+
     // Refresh: sync recent mail (await), then the backfill streams progress via the event listener
     // above. Reloads the list when the recent sync lands. Never blocks the UI (P1).
     let do_refresh = move || {
@@ -328,6 +376,17 @@ pub fn App() -> impl IntoView {
                     load_images.set(true);
                 }
             }
+            if let Ok(Some(kind)) = api::dev_compose().await {
+                if kind == "new" {
+                    compose_new();
+                } else {
+                    compose_from_open(match kind.as_str() {
+                        "reply" => "reply",
+                        "reply_all" => "reply_all",
+                        _ => "forward",
+                    });
+                }
+            }
         });
     });
 
@@ -335,6 +394,7 @@ pub fn App() -> impl IntoView {
         <div class="app">
             <nav class="rail">
                 <div class="brand">"GeleitMail"</div>
+                <button class="compose-new" on:click=move |_| compose_new()>"✎ New message"</button>
                 <For each=move || folders.get() key=|f| f.id let:folder>
                     {
                         let (id, name) = (folder.id, folder.name.clone());
@@ -482,6 +542,9 @@ pub fn App() -> impl IntoView {
                                         {local_date(body.date)}
                                     </div>
                                     <div class="actions">
+                                        <button title="Reply" on:click=move |_| compose_from_open("reply")>"Reply"</button>
+                                        <button title="Reply all" on:click=move |_| compose_from_open("reply_all")>"Reply all"</button>
+                                        <button title="Forward" on:click=move |_| compose_from_open("forward")>"Forward"</button>
                                         <button title="Star" on:click=move |_| toggle_star()>"★ Star"</button>
                                         <button title="Archive" on:click=move |_| move_open("archive")>"Archive"</button>
                                         <button title="Delete" on:click=move |_| move_open("trash")>"Delete"</button>
@@ -531,6 +594,49 @@ pub fn App() -> impl IntoView {
                     })}
                 </Show>
             </main>
+
+            // Compose overlay (S9.5) — the app's own document, a plain form. Never a webview: no
+            // untrusted content is rendered here, so it needs no sandbox.
+            <Show when=move || compose.get().is_some()>
+                <div class="compose-scrim">
+                    <div class="compose" role="dialog" aria-label="Compose message">
+                        <div class="compose-head">
+                            <span>"New message"</span>
+                            <button class="close" title="Discard" on:click=move |_| compose.set(None)>"✕"</button>
+                        </div>
+                        <input
+                            class="field" placeholder="To"
+                            prop:value=move || compose.get().map(|d| d.to).unwrap_or_default()
+                            on:input=move |e| compose.update(|c| { if let Some(c) = c { c.to = event_target_value(&e); } })
+                        />
+                        <input
+                            class="field" placeholder="Cc"
+                            prop:value=move || compose.get().map(|d| d.cc).unwrap_or_default()
+                            on:input=move |e| compose.update(|c| { if let Some(c) = c { c.cc = event_target_value(&e); } })
+                        />
+                        <input
+                            class="field" placeholder="Subject"
+                            prop:value=move || compose.get().map(|d| d.subject).unwrap_or_default()
+                            on:input=move |e| compose.update(|c| { if let Some(c) = c { c.subject = event_target_value(&e); } })
+                        />
+                        <textarea
+                            class="field body" placeholder="Write your message…"
+                            prop:value=move || compose.get().map(|d| d.body).unwrap_or_default()
+                            on:input=move |e| compose.update(|c| { if let Some(c) = c { c.body = event_target_value(&e); } })
+                        ></textarea>
+                        <div class="compose-foot">
+                            <button
+                                class="send"
+                                disabled=move || sending.get()
+                                on:click=move |_| send_compose()
+                            >
+                                {move || if sending.get() { "Sending…" } else { "Send" }}
+                            </button>
+                            <button class="cancel" on:click=move |_| compose.set(None)>"Cancel"</button>
+                        </div>
+                    </div>
+                </div>
+            </Show>
 
             <Show when=move || error.get().is_some()>
                 <div class="toast" role="alert">

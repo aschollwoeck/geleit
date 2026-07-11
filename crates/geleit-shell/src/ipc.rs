@@ -341,6 +341,74 @@ fn account_of(db: &str, secrets: &dyn SecretStore, id: i64) -> Result<i64, Strin
         .ok_or_else(|| "unknown account".to_owned())
 }
 
+/// Build a reply / reply-all / forward draft, prefilled from a stored message (S9.5). Pure over the
+/// store — no network. `kind` is "reply" | "reply_all" | "forward".
+#[tauri::command]
+pub async fn compose_draft(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    kind: String,
+) -> Result<crate::dto::ComposeDraft, String> {
+    with_store(state.inner().clone(), move |store| {
+        let h = store
+            .header_by_id(id)
+            .map_err(|_| "Couldn't open this message.".to_owned())?
+            .ok_or_else(|| "That message is no longer here.".to_owned())?;
+        let account_id = store
+            .account_for_message(id)
+            .map_err(|_| "Couldn't open this message.".to_owned())?
+            .ok_or_else(|| "Couldn't open this message.".to_owned())?;
+        let account = store
+            .account_by_id(account_id)
+            .map_err(|_| "Couldn't read the account.".to_owned())?
+            .ok_or_else(|| "Couldn't read the account.".to_owned())?;
+        let body = store.body_for(id).ok().flatten().unwrap_or_default();
+        crate::dto::compose_draft_from(
+            &h,
+            body.plain.as_deref().unwrap_or_default(),
+            account.display_name,
+            account.email,
+            &kind,
+        )
+    })
+    .await
+}
+
+/// Send a message via the current account's SMTP server (S9.5). Runs on a worker (blocking +
+/// network, P1); reuses the engine send path (signature, Sent-save, threading all handled there).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn send_message(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+    to: String,
+    cc: String,
+    subject: String,
+    body: String,
+    in_reply_to: Option<String>,
+    references: Vec<String>,
+) -> Result<(), String> {
+    let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_send(
+            &db,
+            &*secrets,
+            account_id,
+            &to,
+            &cc,
+            &subject,
+            &body,
+            in_reply_to,
+            references,
+            Vec::new(), // attachments-in-compose is a named follow-up (S9.5 spec)
+            false,      // markdown toggle is a follow-up
+            None,       // draft persistence is a follow-up
+        )
+    })
+    .await
+    .map_err(|_| "The send task stopped unexpectedly.".to_owned())?
+}
+
 /// Refresh an account's folder: sync the folder list + the current folder's recent envelopes, then
 /// backfill older mail in the background, emitting `sync-progress` events as batches land (P1 — the
 /// UI never blocks; feedback streams instead). Returns when the *recent* sync is done; the backfill
@@ -437,4 +505,12 @@ pub async fn dev_open_message() -> Option<i64> {
 #[tauri::command]
 pub async fn dev_load_images() -> bool {
     std::env::var("GELEIT_IMAGES").is_ok_and(|v| v == "1")
+}
+
+/// Dev/test seam, debug builds only: `GELEIT_COMPOSE=new|reply|reply_all|forward` opens the compose
+/// overlay on boot so it can be screenshot-verified without a click. Never in release.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_compose() -> Option<String> {
+    std::env::var("GELEIT_COMPOSE").ok()
 }
