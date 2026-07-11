@@ -288,7 +288,11 @@ pub fn App() -> impl IntoView {
         let (Some(aid), Some(d)) = (account.get(), compose.get()) else {
             return;
         };
-        if sending.get() || d.to.trim().is_empty() {
+        if sending.get() {
+            return; // already sending (the button is disabled too)
+        }
+        // A recipient in To *or* Cc is enough — the engine accepts a Cc-only message.
+        if d.to.trim().is_empty() && d.cc.trim().is_empty() {
             error.set(Some("Add at least one recipient.".to_owned()));
             return;
         }
@@ -601,7 +605,13 @@ pub fn App() -> impl IntoView {
                 <div class="compose-scrim">
                     <div class="compose" role="dialog" aria-label="Compose message">
                         <div class="compose-head">
-                            <span>"New message"</span>
+                            <span>{move || {
+                                let s = compose.get().map(|d| d.subject).unwrap_or_default();
+                                let s = s.to_lowercase();
+                                if s.starts_with("re:") { "Reply" }
+                                else if s.starts_with("fwd:") || s.starts_with("fw:") { "Forward" }
+                                else { "New message" }
+                            }}</span>
                             <button class="close" title="Discard" on:click=move |_| compose.set(None)>"✕"</button>
                         </div>
                         <input

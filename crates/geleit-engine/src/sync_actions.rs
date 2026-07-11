@@ -294,8 +294,23 @@ pub fn run_send(
     Ok(())
 }
 
-// Only a live (`dangerous-tls`) test lives here; without that feature the module is empty, so its
-// imports are gated with it to avoid unused-import warnings in the default build.
+#[cfg(test)]
+mod pure_tests {
+    use super::parse_addrs;
+
+    #[test]
+    fn parse_addrs_splits_trims_and_drops_empties() {
+        assert_eq!(
+            parse_addrs(" a@x.com , b@y.com ;c@z.com,"),
+            vec!["a@x.com", "b@y.com", "c@z.com"]
+        );
+        assert!(parse_addrs("   ").is_empty());
+        assert!(parse_addrs("").is_empty());
+    }
+}
+
+// The live (`dangerous-tls`) test's imports are gated with it to avoid unused-import warnings in the
+// default build.
 #[cfg(all(test, feature = "dangerous-tls"))]
 mod tests {
     use super::*;

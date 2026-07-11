@@ -375,7 +375,9 @@ pub async fn compose_draft(
 }
 
 /// Send a message via the current account's SMTP server (S9.5). Runs on a worker (blocking +
-/// network, P1); reuses the engine send path (signature, Sent-save, threading all handled there).
+/// network, P1); reuses the engine send path (Sent-save + threading). The account signature is
+/// appended here — `run_send` does not add it (the Slint app appends in its UI layer too), so this
+/// is the one place that must.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn send_message(
@@ -388,6 +390,20 @@ pub async fn send_message(
     in_reply_to: Option<String>,
     references: Vec<String>,
 ) -> Result<(), String> {
+    // Append the account's signature (SEND-7). Read it up front on the store thread.
+    let signature = with_store(state.inner().clone(), move |store| {
+        Ok(store
+            .signature(account_id)
+            .ok()
+            .flatten()
+            .unwrap_or_default())
+    })
+    .await?;
+    let body = format!(
+        "{body}{}",
+        geleit_engine::message::signature_block(&signature)
+    );
+
     let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
     tauri::async_runtime::spawn_blocking(move || {
         geleit_engine::sync_actions::run_send(
