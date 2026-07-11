@@ -40,11 +40,35 @@ Interactions are instant. The interface is quiet, uncluttered, and low-effort to
 understand. Absence of noise (no ads, no clutter, no nagging) is a feature we protect.
 A performance or clutter regression is treated as a defect.
 
-### P4. Native, not a webview shell
-True native Rust UI, lean binaries, low RAM — this is the brand. The one unavoidable
-exception is the **HTML email renderer**, which must be a *sandboxed, isolated component*
-(email is fundamentally a web document, with no safe native renderer). That exception is
-contained; it does not make the whole app a browser.
+### P4. Lean and Rust, not Electron
+GeleitMail is a Rust application end to end — engine, store, and UI. It ships **no bundled
+browser**: it uses the operating system's webview, so the binary stays lean (~10–20 MB, not
+Electron's ~150 MB) and there is no second runtime to ship, patch, or trust.
+
+Email is fundamentally a web document. Two attempts at native HTML rendering failed on their
+merits — an embedded webview *component* proved unstable on X11 (ADR-0001), and a pure-Rust CPU
+renderer could not render real mail correctly (ADR-0011). We accept the consequence: rendering
+hostile HTML **correctly and safely** requires a real, hardened browser engine (ADR-0012).
+
+So the shell is the system webview — and every message is confined **inside** it to a
+script-free, CSP-locked sandbox that cannot execute code, reach the IPC bridge, or fetch
+anything remote unless the reader asks.
+
+*This principle was amended in M9. The original — "Native, not a webview shell" — rested on the
+premise that a contained native/webview split was achievable. It was not; see ADR-0012.*
+
+**Leanness is measured, not asserted.** CI fails the build if any ceiling is breached:
+
+| Budget | Ceiling |
+|---|---|
+| Cold start (release, warm cache, to first paint) | **1200 ms** |
+| Idle RSS (inbox open, message selected) | **280 MB** |
+| Binary size (stripped) | **30 MB** |
+| Message-open latency (click → rendered) | **100 ms** |
+
+These are **ceilings, not targets**. A change that moves any of them toward its ceiling is a
+defect to be justified, not a cost to be absorbed. Tightening a ceiling is always in scope;
+raising one requires a written justification in the PR and an ADR if it is structural.
 
 ### P5. Built for private people, not power users
 Default to simplicity and safe defaults over configurability. Setup is effortless. No
@@ -113,8 +137,9 @@ slice and accumulates — never deferred to a "docs later" phase.
   mail within seconds, backfill the rest quietly.
 - Multi-account ⇒ the storage schema and sync scheduler are **account-scoped from the first
   line of backend code**.
-- Native (P4) ⇒ UI leans Slint (decision finalized in M0 via feasibility spikes), HTML
-  render is sandboxed.
+- Lean-and-Rust (P4) ⇒ the shell is the OS webview via **Tauri**, the UI is **Leptos** (Rust →
+  WASM, so the app stays Rust end to end with no npm), and every message renders inside a
+  script-free, CSP-locked sandbox (ADR-0012, amended in M9 — originally Slint, ADR-0001).
 - Integrity (P6) ⇒ the IMAP sync engine and local store are the make-or-break core: their
   schema and sync model are designed up front, proven by a thin end-to-end vertical slice
   (M1), then hardened (M2) before breadth is built on them. We build **value-first** — a

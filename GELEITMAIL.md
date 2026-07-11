@@ -43,12 +43,22 @@ Pure Rust. This is where the real work and real risk live:
 
 ### UI (swappable front layer — the easier part, decision still OPEN)
 
-Focus is Rust-native. Leading candidates:
+**Decided (M9): Tauri + Leptos.** See [ADR-0012](docs/adr/0012-tauri-shell-with-leptos-ui.md). The
+original evaluation below is kept for the record; M0 chose Slint, and M9 overturned that after both
+native-HTML-rendering routes failed. The deciding factor was never the shell — it was that **no
+Rust-native path renders real mail correctly**, and the reading pane *is* the product.
 
-- **Tauri** — web frontend (React/Svelte/Solid) in OS-native webview. Mature, fastest path to a good-looking dense UI, tiny binaries vs Electron. Downside: per-OS webview rendering differences (WebView2 / WebKit). **Current lean.**
-- **Slint** — truly native Rust UI, no webview, lean. Best "pure Rust" option. Downside: younger ecosystem, fewer complex prebuilt widgets (rich text, advanced lists) — more built by hand.
-- **Iced** — pure Rust, retained-mode, Elm architecture (powers System76 COSMIC). Credible no-web option but pre-1.0, missing widgets.
-- **Dioxus** — React-like; still leans on webview for desktop, so not really escaping the Tauri model.
+- **Tauri** — OS-native webview shell. Mature, tiny binaries vs Electron, and the only option that
+  renders hostile mail HTML correctly and safely. Paired with **Leptos** (Rust → WASM) the app stays
+  Rust end to end with **no npm**, so `cargo` and `deny.toml` still cover the whole tree. Cost:
+  ~700 ms slower cold start (webview boot) and higher RSS — both now capped in CI. **Chosen (M9).**
+- **Slint** — truly native Rust UI, no webview, lean. *Chosen in M0, removed in M9:* the embedded
+  webview it needed for HTML crashed on X11 (ADR-0001), and the pure-Rust renderer that replaced it
+  (Blitz, ADR-0011) could not render real mail.
+- **Iced** — pure Rust, retained-mode, Elm architecture (powers System76 COSMIC). Same fatal gap as
+  Slint: no safe, correct HTML renderer behind it.
+- **Dioxus** — React-like; leans on the same `wry` webview for desktop, so it does not escape the
+  Tauri model. Loses Tauri's bundler, updater, and permission model.
 
 Rejected for this use case: **egui** (immediate-mode is awkward for text-heavy, accessibility-sensitive, stateful mail UI), **Electron** (undercuts the lean/privacy pitch).
 

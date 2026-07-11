@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="/style.css">
+  <script>
+    // Every mark is posted straight to the Rust host, which stamps it against the process's own
+    // Instant — so the numbers include process exec + webview spawn, not just in-page time.
+    window.mark = function (name) { window.ipc.postMessage("MARK " + name); };
+    window.mark("html_parsed");
+  </script>
+</head>
+<body>
+  <script type="module">
+    window.mark("wasm_fetch_start");
+    import init from '/pkg/coldstart_ui.js';
+    // init() fetches + compiles + instantiates the wasm, then runs #[wasm_bindgen(start)],
+    // which marks "wasm_start" and "mounted".
+    await init();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => { window.mark("first_paint"); window.mark("done"); });
+    });
+  </script>
+</body>
+</html>

@@ -61,11 +61,23 @@ If the message has files attached, an **Attachments** list appears under the mes
 file's name and size. (Saving attachments to your computer is coming soon.)
 
 Messages written in rich (HTML) formatting are shown **formatted** — with their colors, fonts,
-layout, images, and links intact. GeleitMail renders them itself, entirely on your device: there's
-no embedded browser, **scripts can't run, and trackers/remote images aren't loaded** until you ask,
-so opening a message can't quietly fetch anything from the internet or execute code. You can
-**scroll** the message, **select text** by dragging and copy it with **Ctrl+C**, and **click links**
-(they open in your normal web browser). Plain-text messages show as before.
+layout, images, and links intact, exactly as the sender wrote them. You can **scroll** the message,
+**select text** by dragging and copy it with **Ctrl+C**, and **click links** (they open in your
+normal web browser). Plain-text messages show as before.
+
+To display formatted mail, GeleitMail uses the web engine that already ships with your operating
+system — the same one that draws web pages elsewhere on your computer. It does **not** bundle a
+browser of its own. Every message is then locked inside a sealed compartment, where:
+
+- **Scripts cannot run.** Code hidden in a message is inert — it can't do anything, even if the
+  message is deliberately malicious.
+- **Nothing is fetched from the internet.** Tracking pixels, remote images, and remote styling are
+  all blocked, so simply opening a message tells the sender nothing — not that you read it, not
+  when, not from where.
+- **A message cannot reach the rest of the app**, your files, or your other mail.
+
+Nothing loads remotely until you ask for it (see below), and no message has ever been able to run
+code — that stays true whether or not you load its images.
 
 When a message *did* contain remote content, you'll see a small **"Remote content blocked"** note
 with a **Load images** button. Nothing remote loads until you choose to: click it and GeleitMail

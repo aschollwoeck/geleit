@@ -1,7 +1,14 @@
 # ADR-0001: Native Slint UI with a sandboxed webview component for HTML email
 
 ## Status
-**Accepted** (S0.4) — both M0 feasibility gates passed: S0.2 (safe HTML rendering, see
+**Superseded by [ADR-0012](0012-tauri-shell-with-leptos-ui.md)** (M9). The embedded webview proved
+unstable on X11 (`GLXBadWindow`, raised from winit's error handler when the webview's async GL errors
+surfaced on the shared X11 connection); neither size-gating nor switching Slint to its software
+renderer fixed it. The successor to *this* decision (Blitz, ADR-0011) then failed to render real mail.
+The shell is now the OS webview via Tauri, which also required amending constitution P4 — the "webview
+shell contradicts P4" reasoning below is the exact premise that M9 overturned.
+
+Previously: **Accepted** (S0.4) — both M0 feasibility gates passed: S0.2 (safe HTML rendering, see
 `docs/technical/s0.2-html-spike-findings.md`) and S0.3 (virtualized 50k-row list, see
 `docs/technical/s0.3-list-spike-findings.md`). The UI conventions that follow from this are in
 `guidelines.md` §13.
