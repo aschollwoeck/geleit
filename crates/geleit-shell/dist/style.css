@@ -93,10 +93,38 @@ html, body {
 .folder.sel { background: var(--accent-quiet); color: var(--accent-strong); font-weight: 600; }
 .folder:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 
-/* ---- message list ---- */
-.list {
-  background: var(--surface);
+/* ---- message list column: a fixed header (refresh + progress) over the scrolling list ---- */
+.list-col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0; /* let the list scroll instead of the column growing */
   border-right: 1px solid var(--divider);
+  background: var(--surface);
+}
+.list-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--divider);
+}
+.refresh {
+  border: 1px solid var(--divider);
+  background: var(--surface);
+  color: var(--accent-strong);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.refresh:hover:not(:disabled) { background: var(--surface-raised); }
+.refresh:disabled { color: var(--text-faint); cursor: default; }
+.catchup { color: var(--text-muted); font-size: 12px; }
+.list {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 /* Virtualization: the sizer holds the full scroll height; the window is translated to the visible

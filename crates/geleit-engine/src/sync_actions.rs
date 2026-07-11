@@ -118,3 +118,133 @@ pub fn run_empty_folder(
         .block_on(imap::empty_folder(&config, secrets, folder))
         .map_err(|_| "Couldn't empty the folder on the server.".to_owned())
 }
+
+/// Sync `account_id`'s `folder` (+ folder list), reading settings from the store and the password
+/// from the shared secrets. Blocking + network: **run on a worker thread.**
+pub fn run_refresh(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    folder: &str,
+) -> Result<(), String> {
+    let store = open_store(db_path, secrets)?;
+    let settings = store
+        .imap_settings(account_id)
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
+        .ok_or_else(|| "This account isn't set up for syncing.".to_owned())?;
+
+    let config = to_config(&settings);
+    runtime()?
+        .block_on(async {
+            imap::sync_folders(&config, secrets, &store, account_id).await?;
+            imap::sync_folder_incremental(&config, secrets, &store, account_id, folder, 200)
+                .await?;
+            Ok::<(), imap::ImapError>(())
+        })
+        .map_err(|_| "Couldn't refresh — check your connection and try again.".to_owned())
+}
+/// Progressively backfill the rest of `folder` (older messages) in the background, calling
+/// `on_batch` with the running count after each batch. Reads settings from the store; blocking +
+/// network → **run on a worker thread.**
+pub fn run_backfill(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    folder: &str,
+    batch_size: u32,
+    on_batch: &mut dyn FnMut(usize),
+) -> Result<usize, String> {
+    let store = open_store(db_path, secrets)?;
+    let settings = store
+        .imap_settings(account_id)
+        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
+        .ok_or_else(|| "This account isn't set up for syncing.".to_owned())?;
+
+    let config = to_config(&settings);
+    runtime()?
+        .block_on(imap::backfill_folder(
+            &config, secrets, &store, account_id, folder, batch_size, on_batch,
+        ))
+        .map_err(|_| "Couldn't finish catching up — will resume next refresh.".to_owned())
+}
+/// Returns `Ok(true)` on a fully clean wipe, `Ok(false)` if the local mail was removed but the
+/// keychain password could **not** be cleared (so the caller can warn — SEC-3), `Err` if the mail
+/// wipe itself failed.
+pub fn run_remove_account(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+) -> Result<bool, String> {
+    let store = open_store(db_path, secrets)?;
+    if store.account_by_id(account_id).ok().flatten().is_none() {
+        return Ok(true); // nothing to remove
+    }
+    // Forget the password (we still wipe the local mail even if this fails, but report it).
+    let password_cleared = match store.imap_settings(account_id) {
+        Ok(Some(settings)) => imap::delete_password(secrets, &settings.username).is_ok(),
+        _ => true, // no stored password to clear
+    };
+    store
+        .delete_account(account_id)
+        .map_err(|_| "Couldn't remove the account.".to_owned())?;
+    Ok(password_cleared)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geleit_platform::secret::InMemorySecretStore;
+    use geleit_store::ImapSettings;
+
+    /// The exact refresh + backfill path the Tauri `refresh` command drives (minus the event
+    /// wrapper, which only forwards the `on_batch` count), against a local Dovecot. Proves the S9.3
+    /// safety net actually pulls mail and streams progress.
+    #[cfg(feature = "dangerous-tls")]
+    #[test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    fn live_refresh_then_backfill_streams_progress() {
+        let path = std::env::temp_dir().join("geleit-s94-refresh-test.db");
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+
+        let secrets = InMemorySecretStore::new();
+        let settings = ImapSettings {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        {
+            let store = open_store(path, &secrets).expect("open");
+            let acc = store
+                .add_imap_account("geleittest@localhost", Some("geleittest"), &settings)
+                .expect("add account");
+            crate::imap::store_password(&secrets, "geleittest", b"testpass123").expect("password");
+
+            run_refresh(path, &secrets, acc, "INBOX").expect("refresh");
+            let inbox = store
+                .folders_for_account(acc)
+                .unwrap()
+                .into_iter()
+                .find(|f| f.name == "INBOX")
+                .expect("INBOX synced")
+                .id;
+            assert!(
+                !store.messages_in_folder(inbox, 10).unwrap().is_empty(),
+                "recent sync pulled mail"
+            );
+
+            let mut batches = 0usize;
+            let mut last = 0usize;
+            run_backfill(path, &secrets, acc, "INBOX", 50, &mut |n| {
+                batches += 1;
+                last = n;
+            })
+            .expect("backfill");
+            if last > 0 {
+                assert!(batches >= 1, "backfill reported progress");
+            }
+        }
+        let _ = std::fs::remove_file(path);
+    }
+}

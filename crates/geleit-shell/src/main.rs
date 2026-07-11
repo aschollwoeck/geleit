@@ -105,6 +105,7 @@ fn main() {
         ipc::set_star,
         ipc::set_unread,
         ipc::move_to_role,
+        ipc::refresh,
         ipc::theme,
         ipc::dev_open_message,
         ipc::dev_load_images,
@@ -118,6 +119,7 @@ fn main() {
         ipc::set_star,
         ipc::set_unread,
         ipc::move_to_role,
+        ipc::refresh,
         ipc::theme,
     ]);
 

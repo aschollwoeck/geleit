@@ -341,6 +341,47 @@ fn account_of(db: &str, secrets: &dyn SecretStore, id: i64) -> Result<i64, Strin
         .ok_or_else(|| "unknown account".to_owned())
 }
 
+/// Refresh an account's folder: sync the folder list + the current folder's recent envelopes, then
+/// backfill older mail in the background, emitting `sync-progress` events as batches land (P1 — the
+/// UI never blocks; feedback streams instead). Returns when the *recent* sync is done; the backfill
+/// keeps running and emitting. A network failure is reported calmly and leaves local mail untouched.
+#[tauri::command]
+pub async fn refresh(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+    folder: String,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
+
+    // Phase 1 — recent mail. Await this so the caller can re-list once it's in.
+    let (db1, secrets1, folder1) = (db.clone(), secrets.clone(), folder.clone());
+    let recent = tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_refresh(&db1, &*secrets1, account_id, &folder1)
+    })
+    .await
+    .map_err(|_| "The sync task stopped unexpectedly.".to_owned())?;
+    recent?;
+
+    // Phase 2 — backfill older mail in the background, streaming progress. Detached: it may outlive
+    // the command, and the UI shouldn't wait on it.
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let mut emit = |count: usize| {
+            let _ = app2.emit("sync-progress", count as i64);
+        };
+        let done = geleit_engine::sync_actions::run_backfill(
+            &db, &*secrets, account_id, &folder, 200, &mut emit,
+        );
+        // A final event tells the UI the catch-up is finished (or stopped) so it can clear the strip
+        // and re-list. Negative sentinel = "done".
+        let _ = app.emit("sync-progress", -1i64);
+        let _ = done;
+    });
+    Ok(())
+}
+
 /// The persisted theme (`"dark"` / `"light"`), or `None` if the user has never chosen one.
 ///
 /// The store is the source of truth — the same `setting` row the Slint app writes — so a user's

@@ -21,3 +21,9 @@ try {
 window.geleitInvoke = function (cmd, args) {
   return window.__TAURI__.core.invoke(cmd, args);
 };
+
+// Subscribe to backend sync-progress events (S9.4). `cb` gets the batch count, or -1 when the
+// backfill has finished. Kept in this shim for the same npm-free reason as invoke.
+window.geleitOnSyncProgress = function (cb) {
+  window.__TAURI__.event.listen('sync-progress', function (e) { cb(e.payload); });
+};
