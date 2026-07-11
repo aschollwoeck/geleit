@@ -116,6 +116,32 @@ struct SendArgs {
     references: Vec<String>,
 }
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchArgs {
+    account_id: i64,
+    query: String,
+}
+#[derive(Serialize)]
+struct ThemeArg {
+    theme: String,
+}
+/// The add-account form. camelCase to match the Tauri command parameters.
+#[derive(Serialize, Default, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountForm {
+    pub email: String,
+    pub display_name: String,
+    pub imap_host: String,
+    pub imap_port: String,
+    pub username: String,
+    pub password: String,
+    pub smtp_host: String,
+    pub smtp_port: String,
+    pub smtp_starttls: bool,
+    pub signature: String,
+    pub allow_invalid_certs: bool,
+}
+#[derive(Serialize)]
 struct NoArgs {}
 
 // Provided by the shim in index.html, which forwards to Tauri's global `invoke`. Keeping the shim in
@@ -193,6 +219,33 @@ pub async fn move_to_role(id: i64, role: &str) -> Result<bool, String> {
         &MoveArgs {
             id,
             role: role.to_owned(),
+        },
+    )
+    .await
+}
+
+pub async fn search(account_id: i64, query: &str) -> Result<Vec<Message>, String> {
+    call(
+        "search",
+        &SearchArgs {
+            account_id,
+            query: query.to_owned(),
+        },
+    )
+    .await
+}
+
+/// Add (or reconnect) an account; returns its id. Worker on the shell side (network + keychain).
+pub async fn add_account(form: &AccountForm) -> Result<i64, String> {
+    call("add_account", form).await
+}
+
+/// Persist the theme choice so it survives restart (the frontend already flipped the document).
+pub async fn set_theme(theme: &str) -> Result<(), String> {
+    call(
+        "set_theme",
+        &ThemeArg {
+            theme: theme.to_owned(),
         },
     )
     .await
@@ -286,4 +339,9 @@ pub fn on_sync_progress(_cb: impl Fn(i64) + 'static) {}
 /// Dev/test seam — see `geleit-shell::ipc::dev_compose`. Always `None` in a release build.
 pub async fn dev_compose() -> Result<Option<String>, String> {
     call("dev_compose", &NoArgs {}).await
+}
+
+/// Dev/test seam — see `geleit-shell::ipc::dev_setup`. Always `false` in a release build.
+pub async fn dev_setup() -> Result<bool, String> {
+    call("dev_setup", &NoArgs {}).await
 }
