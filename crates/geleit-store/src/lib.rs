@@ -1347,6 +1347,19 @@ impl Store {
         }
     }
 
+    /// The account a message belongs to (for routing a per-account server write-back). `None` if the
+    /// message is gone.
+    pub fn account_for_message(&self, message_id: i64) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT account_id FROM message WHERE id = ?1",
+                [message_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// Remove a single message locally (optimistic archive/trash/move; body + attachments cascade).
     /// The server change is the engine's job; on failure a re-sync restores the row.
     pub fn delete_message(&self, message_id: i64) -> Result<(), StoreError> {

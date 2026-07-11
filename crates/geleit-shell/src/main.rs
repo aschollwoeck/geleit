@@ -102,6 +102,9 @@ fn main() {
         ipc::list_folders,
         ipc::list_messages,
         ipc::open_message,
+        ipc::set_star,
+        ipc::set_unread,
+        ipc::move_to_role,
         ipc::theme,
         ipc::dev_open_message,
         ipc::dev_load_images,
@@ -112,6 +115,9 @@ fn main() {
         ipc::list_folders,
         ipc::list_messages,
         ipc::open_message,
+        ipc::set_star,
+        ipc::set_unread,
+        ipc::move_to_role,
         ipc::theme,
     ]);
 

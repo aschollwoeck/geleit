@@ -34,6 +34,9 @@ pub struct MessageDto {
     pub seen: bool,
     pub flagged: bool,
     pub has_attachments: bool,
+    /// How many messages are in this message's conversation (READ-5). `1` = a singleton; the UI shows
+    /// a `conversation · N` marker only when `> 1`. Computed over the loaded page in `list_messages`.
+    pub thread_count: u32,
 }
 
 /// A message opened for reading.
@@ -84,6 +87,28 @@ impl From<MessageHeader> for MessageDto {
             seen: h.seen,
             flagged: h.flagged,
             has_attachments: h.has_attachments,
+            thread_count: 1, // set for real by `with_thread_counts` over the whole page
+        }
+    }
+}
+
+/// Fill in each message's conversation size (READ-5) by grouping the loaded page with the engine's
+/// threader (`in_reply_to` ↔ `message_id`). Done over the page, in the shell, because the frontend
+/// can't depend on the engine — it only ever sees the finished count.
+pub fn with_thread_counts(headers: &[MessageHeader], dtos: &mut [MessageDto]) {
+    let items: Vec<geleit_engine::thread::ThreadItem> = headers
+        .iter()
+        .map(|h| geleit_engine::thread::ThreadItem {
+            message_id: h.message_id.as_deref(),
+            in_reply_to: h.in_reply_to.as_deref(),
+        })
+        .collect();
+    for group in geleit_engine::thread::group(&items) {
+        let n = group.len() as u32;
+        for idx in group {
+            if let Some(d) = dtos.get_mut(idx) {
+                d.thread_count = n;
+            }
         }
     }
 }
@@ -103,6 +128,36 @@ pub fn folder_rank(name: &str) -> u8 {
         "saved" => 6,
         _ => 7,
     }
+}
+
+/// A well-known destination for a move action. Kept as a role, not a folder name, because a server
+/// may call its junk folder "Spam" or "Junk", its trash "Trash" or "Deleted", etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderRole {
+    Inbox,
+    Archive,
+    Trash,
+    Spam,
+}
+
+impl FolderRole {
+    fn matches(self, name: &str) -> bool {
+        let n = name.to_ascii_lowercase();
+        match self {
+            FolderRole::Inbox => n == "inbox",
+            FolderRole::Archive => n == "archive",
+            FolderRole::Trash => n == "trash" || n == "deleted",
+            FolderRole::Spam => n == "spam" || n == "junk",
+        }
+    }
+}
+
+/// Pick the actual folder name for a role from the account's folders. Pure — unit-tested. Returns
+/// `None` if the account has no such folder (the caller then declines the action rather than
+/// inventing a destination — inventing one risks moving mail somewhere the server won't accept).
+#[must_use]
+pub fn resolve_folder(folders: &[String], role: FolderRole) -> Option<&str> {
+    folders.iter().find(|f| role.matches(f)).map(String::as_str)
 }
 
 #[cfg(test)]
@@ -151,6 +206,76 @@ mod tests {
     fn folder_aliases_share_their_rank() {
         assert_eq!(folder_rank("Junk"), folder_rank("Spam"));
         assert_eq!(folder_rank("Deleted"), folder_rank("Trash"));
+    }
+
+    #[test]
+    fn thread_counts_group_a_reply_with_its_parent() {
+        // Two messages linked by in_reply_to ↔ message_id form one conversation of 2; a third,
+        // unlinked, stays a singleton.
+        let headers = vec![
+            MessageHeader {
+                message_id: Some("<a@x>".into()),
+                ..blank()
+            },
+            MessageHeader {
+                message_id: Some("<b@x>".into()),
+                in_reply_to: Some("<a@x>".into()),
+                ..blank()
+            },
+            MessageHeader {
+                message_id: Some("<c@x>".into()),
+                ..blank()
+            },
+        ];
+        let mut dtos: Vec<MessageDto> = headers.iter().cloned().map(MessageDto::from).collect();
+        with_thread_counts(&headers, &mut dtos);
+        assert_eq!(dtos[0].thread_count, 2);
+        assert_eq!(dtos[1].thread_count, 2);
+        assert_eq!(dtos[2].thread_count, 1);
+    }
+
+    fn blank() -> MessageHeader {
+        MessageHeader {
+            id: 0,
+            uid: None,
+            message_id: None,
+            in_reply_to: None,
+            subject: None,
+            from_name: None,
+            from_addr: None,
+            to_addrs: None,
+            cc_addrs: None,
+            date: None,
+            seen: false,
+            flagged: false,
+            has_attachments: false,
+            snippet: None,
+        }
+    }
+
+    #[test]
+    fn resolve_folder_finds_the_role_by_its_server_specific_name() {
+        let folders: Vec<String> = ["INBOX", "Archive", "Junk", "Deleted"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(resolve_folder(&folders, FolderRole::Inbox), Some("INBOX"));
+        assert_eq!(
+            resolve_folder(&folders, FolderRole::Archive),
+            Some("Archive")
+        );
+        // the account calls it "Junk" / "Deleted" — the role still resolves
+        assert_eq!(resolve_folder(&folders, FolderRole::Spam), Some("Junk"));
+        assert_eq!(resolve_folder(&folders, FolderRole::Trash), Some("Deleted"));
+    }
+
+    #[test]
+    fn resolve_folder_declines_when_the_account_has_no_such_folder() {
+        let folders = vec!["INBOX".to_string(), "Sent".to_string()];
+        // no Archive/Trash/Spam → None, so the caller declines rather than inventing a destination
+        assert_eq!(resolve_folder(&folders, FolderRole::Archive), None);
+        assert_eq!(resolve_folder(&folders, FolderRole::Trash), None);
+        assert_eq!(resolve_folder(&folders, FolderRole::Spam), None);
     }
 
     #[test]

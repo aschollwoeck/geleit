@@ -119,7 +119,9 @@ pub async fn list_messages(
         let headers = store
             .messages_in_folder(folder_id, limit.clamp(1, 5_000))
             .map_err(|_| "Couldn't read this folder.".to_owned())?;
-        Ok(headers.into_iter().map(MessageDto::from).collect())
+        let mut dtos: Vec<MessageDto> = headers.iter().cloned().map(MessageDto::from).collect();
+        crate::dto::with_thread_counts(&headers, &mut dtos);
+        Ok(dtos)
     })
     .await
 }
@@ -181,6 +183,162 @@ pub fn message_html(state: &AppState, id: i64, allow_remote: bool) -> Option<Str
         &sanitized,
         allow_remote,
     ))
+}
+
+/// Kick a server write-back on a **detached background thread** (M5 model). The local store was
+/// already updated optimistically; this reconciles the server and may outlive the command. A failure
+/// is swallowed here — the next refresh restores truth — but never lets it lose mail (the callers
+/// never expunge on the optimistic path).
+fn spawn_writeback<F>(state: &AppState, f: F)
+where
+    F: FnOnce(&str, &dyn SecretStore) -> Result<(), String> + Send + 'static,
+{
+    let (db_path, secrets) = (state.db_path.clone(), state.secrets.clone());
+    std::thread::spawn(move || {
+        let _ = f(&db_path, &*secrets);
+    });
+}
+
+/// Star / unstar a message (ORG-4). Optimistic local write + server write-back.
+#[tauri::command]
+pub async fn set_star(state: tauri::State<'_, AppState>, id: i64, on: bool) -> Result<(), String> {
+    let st = state.inner().clone();
+    let loc = with_store(st.clone(), move |store| {
+        store
+            .set_flagged(id, on)
+            .map_err(|_| "Couldn't update the star.".to_owned())?;
+        store
+            .message_location(id)
+            .map_err(|_| "Couldn't update the star.".to_owned())
+    })
+    .await?;
+    if let Some((folder, uid)) = loc {
+        spawn_writeback(&st, move |db, secrets| {
+            geleit_engine::sync_actions::run_set_flag(
+                db,
+                secrets,
+                account_of(db, secrets, id)?,
+                &folder,
+                uid as u32,
+                on,
+            )
+        });
+    }
+    Ok(())
+}
+
+/// Mark a message unread again (READ-7). Optimistic local write + server write-back.
+#[tauri::command]
+pub async fn set_unread(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let st = state.inner().clone();
+    let loc = with_store(st.clone(), move |store| {
+        store
+            .set_seen(id, false)
+            .map_err(|_| "Couldn't mark unread.".to_owned())?;
+        store
+            .message_location(id)
+            .map_err(|_| "Couldn't mark unread.".to_owned())
+    })
+    .await?;
+    if let Some((folder, uid)) = loc {
+        spawn_writeback(&st, move |db, secrets| {
+            geleit_engine::sync_actions::run_set_seen(
+                db,
+                secrets,
+                account_of(db, secrets, id)?,
+                &folder,
+                uid as u32,
+                false,
+            )
+        });
+    }
+    Ok(())
+}
+
+/// Move a message to a well-known folder by role — archive / trash / spam / un-spam (ORG-1/2/3).
+/// Removes it from the current folder locally (optimistic) and moves it on the server. Returns
+/// whether it acted (false = the account has no such folder, so nothing was done).
+#[tauri::command]
+pub async fn move_to_role(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    role: String,
+) -> Result<bool, String> {
+    use crate::dto::{resolve_folder, FolderRole};
+    let role = match role.as_str() {
+        "archive" => FolderRole::Archive,
+        "trash" => FolderRole::Trash,
+        "spam" => FolderRole::Spam,
+        "inbox" => FolderRole::Inbox,
+        _ => return Err("Unknown action.".to_owned()),
+    };
+    let st = state.inner().clone();
+
+    // Plan the move — but do NOT delete the local row yet. The safety net for an optimistic local
+    // delete ("self-heals on the next refresh") doesn't exist until S9.4, so deleting first would
+    // leave a failed move absent locally with no way back. Instead the local delete happens *after*
+    // the server confirms, below — so a failed move never removes the row from the store at all.
+    let plan = with_store(st.clone(), move |store| {
+        let Some((source, uid)) = store
+            .message_location(id)
+            .map_err(|_| "Couldn't move the message.".to_owned())?
+        else {
+            return Ok(None); // no server location (e.g. a local Saved message) — nothing to move
+        };
+        let account_id = store
+            .account_for_message(id)
+            .map_err(|_| "Couldn't move the message.".to_owned())?
+            .ok_or_else(|| "Couldn't move the message.".to_owned())?;
+        let folders: Vec<String> = store
+            .folders_for_account(account_id)
+            .map_err(|_| "Couldn't move the message.".to_owned())?
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        let Some(target) = resolve_folder(&folders, role) else {
+            return Ok(None); // account has no such folder — decline rather than invent one
+        };
+        if target == source {
+            return Ok(None); // already there
+        }
+        Ok(Some((account_id, source, uid, target.to_owned())))
+    })
+    .await?;
+
+    let Some((account_id, source, uid, target)) = plan else {
+        return Ok(false);
+    };
+
+    // Do the server move first, on a blocking thread. `uid_mv` is a single server-atomic
+    // copy-and-remove, so there is no window where the message is duplicated or lost.
+    let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+    let (src, tgt) = (source.clone(), target.clone());
+    let moved = tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_move(&db, &*secrets, account_id, &src, uid as u32, &tgt)
+    })
+    .await
+    .map_err(|_| "The mailbox task stopped unexpectedly.".to_owned())?;
+    moved?; // a server failure returns here with the row still present locally — nothing lost
+
+    // Only now remove it locally, so the store and server agree. It reappears in the target folder
+    // on the next sync; it is never expunged, so no mail is lost.
+    with_store(st, move |store| {
+        store
+            .delete_message(id)
+            .map_err(|_| "Couldn't update the local mailbox.".to_owned())
+    })
+    .await?;
+    Ok(true)
+}
+
+/// The account a message belongs to — read once inside a write-back (its own store connection).
+fn account_of(db: &str, secrets: &dyn SecretStore, id: i64) -> Result<i64, String> {
+    let store = open_store(db, secrets)?;
+    store
+        .account_for_message(id)
+        .ok()
+        .flatten()
+        .ok_or_else(|| "unknown account".to_owned())
 }
 
 /// The persisted theme (`"dark"` / `"light"`), or `None` if the user has never chosen one.

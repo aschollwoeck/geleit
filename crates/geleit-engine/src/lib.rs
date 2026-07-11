@@ -12,6 +12,7 @@ mod mime;
 pub mod safehtml;
 pub mod smtp;
 mod sync;
+pub mod sync_actions;
 pub mod thread;
 
 use geleit_core::looks_like_email;
