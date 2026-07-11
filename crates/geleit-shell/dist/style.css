@@ -1,0 +1,179 @@
+/* GeleitMail — design tokens from design.md, verbatim. The Slint Palette is the previous home of
+   these values; this is the same table expressed as CSS custom properties so the migrated UI is a
+   re-implementation of the agreed design language, not a redesign. */
+:root {
+  --bg: #F5F7F8;
+  --surface: #FFFFFF;
+  --surface-reading: #FBFAF7;
+  --surface-raised: #EEF2F3;
+  --text: #1F2A2E;
+  --text-muted: #5E7177;
+  --text-faint: #90A0A5;
+  --accent: #2E9E9B;
+  --accent-strong: #1C7E7B;
+  --accent-quiet: #E2F1F0;
+  --danger-strong: #B3472E;
+  --divider: #E3EAEC;
+  --focus: #1C7E7B;
+  --toast-surface: #263238;
+  --on-toast: #F2F5F6;
+
+  --rail-w: 240px;
+  --list-w: 380px;
+  --radius: 8px;
+}
+
+:root[data-theme="dark"] {
+  --bg: #14191B;
+  --surface: #1C2326;
+  --surface-reading: #1A2123;
+  --surface-raised: #232C2F;
+  --text: #E7EEF0;
+  --text-muted: #9FB0B5;
+  --text-faint: #6A7E84;
+  --accent: #56C4C0;
+  --accent-strong: #7FD8D4;
+  --accent-quiet: #1E3A39;
+  --danger-strong: #ECA893;
+  --divider: #2A3438;
+  --focus: #7FD8D4;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  /* The app chrome is not a document — text selection here is noise. The reading pane re-enables it
+     (S9.2), because selecting and copying mail is the whole point. */
+  user-select: none;
+}
+
+#app, .app { height: 100%; }
+
+.app {
+  display: grid;
+  grid-template-columns: var(--rail-w) var(--list-w) 1fr;
+}
+
+/* ---- folder rail ---- */
+.rail {
+  background: var(--surface-raised);
+  border-right: 1px solid var(--divider);
+  padding: 14px 10px;
+  overflow-y: auto;
+}
+.brand {
+  font-weight: 650;
+  letter-spacing: 0.2px;
+  padding: 2px 8px 14px;
+  color: var(--text);
+}
+.folder {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  margin-bottom: 2px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.folder:hover { background: var(--surface); }
+.folder.sel { background: var(--accent-quiet); color: var(--accent-strong); font-weight: 600; }
+.folder:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+/* ---- message list ---- */
+.list {
+  background: var(--surface);
+  border-right: 1px solid var(--divider);
+  overflow-y: auto;
+}
+.row {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--divider);
+  cursor: pointer;
+}
+.row:hover { background: var(--surface-raised); }
+.row.sel { background: var(--accent-quiet); box-shadow: inset 3px 0 0 var(--accent); }
+.row-top { display: flex; align-items: center; gap: 6px; }
+.dot {
+  width: 7px; height: 7px; flex: 0 0 7px;
+  border-radius: 50%;
+  background: transparent;
+}
+.row.unread .dot { background: var(--accent); }
+.row.unread .subj { font-weight: 650; }
+.from { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 12.5px; }
+.marks { display: flex; gap: 3px; font-size: 11px; }
+.star { color: var(--accent); }
+.date { color: var(--text-faint); font-size: 11.5px; white-space: nowrap; }
+.subj { margin: 1px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prev { color: var(--text-muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- reading pane ---- */
+.read {
+  background: var(--surface-reading);
+  overflow-y: auto;
+  padding: 26px 30px;
+}
+.read-head { border-bottom: 1px solid var(--divider); padding-bottom: 14px; margin-bottom: 16px; }
+.read h1 { font-size: 19px; font-weight: 650; margin: 0 0 4px; }
+.meta { color: var(--text-muted); font-size: 12.5px; }
+.body {
+  margin: 0;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text; /* mail is for reading and copying */
+}
+
+.empty {
+  color: var(--text-muted);
+  padding: 28px 20px;
+  text-align: center;
+}
+
+/* ---- toast ---- */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--toast-surface);
+  color: var(--on-toast);
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 25%);
+}
+.toast button {
+  border: 0; background: transparent; color: var(--on-toast);
+  font: inherit; text-decoration: underline; cursor: pointer;
+}
+
+/* ---- skeleton (painted before WASM loads) ---- */
+.sk {
+  background: var(--surface);
+  border-radius: 6px;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.rail .sk { background: var(--surface); }
+.sk-folder { height: 32px; margin-bottom: 4px; }
+.sk-row { height: 58px; margin: 0; border-radius: 0; border-bottom: 1px solid var(--divider); background: var(--surface-raised); }
+@keyframes pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 0.9; } }
+
+/* Respect the user's motion preference (accessibility floor). */
+@media (prefers-reduced-motion: reduce) {
+  .sk { animation: none; }
+}

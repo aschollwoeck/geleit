@@ -10,6 +10,7 @@ publish = false
 ammonia = "4"
 async-imap = { version = "0.11.2", default-features = false, features = ["runtime-tokio"] }
 futures = "0.3.32"
+getrandom = "0.4.3"
 geleit-core = { path = "../geleit-core" }
 geleit-platform = { path = "../geleit-platform" }
 geleit-store = { path = "../geleit-store" }

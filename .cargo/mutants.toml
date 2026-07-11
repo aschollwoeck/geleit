@@ -22,4 +22,20 @@ exclude_globs = [
     # os_secret.rs is external keychain glue (Secret Service); verified by a live #[ignore] test,
     # which mutants doesn't run — survivors would be spurious. InMemorySecretStore stays covered.
     "**/geleit-platform/src/os_secret.rs",
+
+    # --- M9 (ADR-0012): the Tauri shell + Leptos frontend. Same split as geleit-app: exclude the
+    # --- rendering/wiring/glue, keep the PURE logic mutation-tested.
+    #
+    # app.rs is the Leptos view declaration + event wiring (rendering, not logic) — the counterpart of
+    # geleit-app/src/main.rs. The pure display mapping lives in geleit-ui/src/view.rs and STAYS covered.
+    "**/geleit-ui/src/app.rs",
+    # api.rs is IPC glue across the wasm boundary; it cannot run under `cargo mutants` at all (there
+    # is no webview), so its mutants would survive spuriously — cf. refresh.rs.
+    "**/geleit-ui/src/api.rs",
+    "**/geleit-ui/src/lib.rs", # wasm entrypoint only
+    # ipc.rs is blocking-store glue (open the DB, run a query). Its pure half — the DTO mapping,
+    # sender/subject fallbacks, and folder ordering — was split into geleit-shell/src/dto.rs, which
+    # STAYS mutation-tested.
+    "**/geleit-shell/src/ipc.rs",
+    "**/geleit-shell/src/main.rs",
 ]
