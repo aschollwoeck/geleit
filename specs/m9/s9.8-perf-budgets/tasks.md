@@ -15,4 +15,19 @@ binary **18 MB** ≤ 30 · cold start **918 ms** ≤ 1200 · idle RSS **147 MB**
 
 ## Gates
 - [x] fmt · clippy `-D warnings` · tests · deny · the perf harness itself runs green
-- [ ] Code review agent → then merge
+- [x] Code review agent + a real CI run — 5 findings, all fixed (below)
+
+## Code review + CI — findings acted on
+The first CI run **failed** (cold start 18589 ms) — the webview never painted under xvfb, and the
+review found a HIGH false-pass in the RSS check. Both fixed:
+
+| # | Finding | Fix |
+|---|---|---|
+| CI | **Webview didn't render headless** — WebKitGTK's default DMABUF/GPU path hangs under xvfb, so first paint never happened → false *fail*. | Export `WEBKIT_DISABLE_DMABUF_RENDERER=1` (+ compositing/software-GL) in the harness — the documented headless fix. Cold start now 849 ms locally. |
+| 1 | **False pass (high):** RSS read only the parent (WebKit is multi-process — the web-content process, the likely regression site, was invisible), and a dead pid → `0 MB` → ✓. | Sum across the whole process tree, and use **PSS** not RSS (summing RSS triple-counts WebKit's shared libs: 349 MB vs the true 135 MB PSS). A vanished process is a hard **failure**, never 0. |
+| 2 | **Binary ceiling ~1 MiB loose** (integer-MB truncation). | Compare raw bytes against `30*1048576`. |
+| 3 | **RSS was a single 3rd-run sample.** | Median of 3, like cold start. |
+| 4 | **Median masked a 1-in-3 boot hang.** | Any run that never paints (or whose process vanishes) is a hard failure, regardless of the median. |
+| 5 | **Constitution overclaim** ("CI fails on any ceiling"; "no network → cannot exceed 100 ms" non-sequitur). | Reworded: CI hard-gates the 3 *timed* budgets; message-open is **not CI-timed**, bounded by design (local read + local render, no network/I/O). |
+
+Measured after the fixes (real display): binary **18.5 MB**, cold start **849 ms**, idle RSS(PSS) **135 MB**.

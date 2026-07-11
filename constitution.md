@@ -57,15 +57,16 @@ anything remote unless the reader asks.
 *This principle was amended in M9. The original — "Native, not a webview shell" — rested on the
 premise that a contained native/webview split was achievable. It was not; see ADR-0012.*
 
-**Leanness is measured, not asserted.** CI fails the build if any ceiling is breached
-(`scripts/perf-budget.sh`, run headless under xvfb — S9.8):
+**Leanness is measured, not asserted.** CI runs `scripts/perf-budget.sh` (headless under xvfb, S9.8)
+and **fails the build if a *timed* ceiling is breached** — binary size, cold start, and idle RSS.
+Message-open is bounded by design rather than timed (see the table):
 
 | Budget | Ceiling | Enforcement |
 |---|---|---|
 | Binary size (stripped) | **30 MB** | CI, every PR |
 | Cold start (release, warm cache, to first paint) | **1200 ms** | CI, every PR (timed exec→first paint) |
 | Idle RSS (window open) | **280 MB** | CI, every PR |
-| Message-open latency (click → rendered) | **100 ms** | Architecturally bounded: the open path is a local SQLite read + a local iframe render — **no network** — so it cannot exceed this in practice. Not separately timed (no precise headless render-complete signal); revisit if the open path ever gains I/O. |
+| Message-open latency (click → rendered) | **100 ms** | **Not CI-timed** (no precise headless render-complete signal). Bounded by design: the open path does one indexed local SQLite read and a local iframe render — **no network, no I/O beyond the local DB** — so it stays well under this in practice. Add a timed check if the open path ever grows heavier. |
 
 These are **ceilings, not targets**. A change that moves any of them toward its ceiling is a
 defect to be justified, not a cost to be absorbed. Tightening a ceiling is always in scope;
