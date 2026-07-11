@@ -143,16 +143,44 @@ pub async fn open_message(
         // write-back of \Seen is S9.4; the *local* write belongs here and nowhere else.) A failure
         // to record it must not stop the user reading their mail, so it is best-effort.
         let _ = store.set_seen(id, true);
+        // The HTML body is NOT returned to the frontend. It is served straight to the sandboxed
+        // iframe from the `mail://` origin (see `mailproto`), so hostile markup never enters the
+        // app's own document — not even as a string in a signal.
+        let is_html = body.html.is_some();
+        let has_remote = body
+            .html
+            .as_deref()
+            .is_some_and(geleit_engine::safehtml::has_remote_content);
         Ok(MessageBodyDto {
             id: header.id,
             subject: display_subject(header.subject.as_deref()),
             from: display_sender(header.from_name.as_deref(), header.from_addr.as_deref()),
             date: header.date,
             plain: body.plain,
-            html: body.html,
+            is_html,
+            has_remote,
         })
     })
     .await
+}
+
+/// Fetch a message's sanitized HTML body for the `mail://` protocol handler. Blocking (SQLite), so
+/// the handler runs it on a worker thread.
+pub fn message_html(state: &AppState, id: i64, allow_remote: bool) -> Option<String> {
+    let mut guard = state.store.lock().ok()?;
+    if guard.is_none() {
+        *guard = Some(open_store(&state.db_path, &*state.secrets).ok()?);
+    }
+    let html = guard.as_ref()?.body_for(id).ok()??.html?;
+    let sanitized = if allow_remote {
+        geleit_engine::safehtml::sanitize_html_allowing_remote(&html)
+    } else {
+        geleit_engine::safehtml::sanitize_html(&html)
+    };
+    Some(geleit_engine::safehtml::webview_document(
+        &sanitized,
+        allow_remote,
+    ))
 }
 
 /// The persisted theme (`"dark"` / `"light"`), or `None` if the user has never chosen one.
@@ -185,4 +213,12 @@ pub async fn theme(state: tauri::State<'_, AppState>) -> Result<Option<String>, 
 #[tauri::command]
 pub async fn dev_open_message() -> Option<i64> {
     std::env::var("GELEIT_OPEN").ok()?.parse().ok()
+}
+
+/// Dev/test seam, debug builds only: `GELEIT_IMAGES=1` opts the auto-opened message in to remote
+/// images, so the PRIV-2 path can be screenshot-verified without a click. Never in release.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_load_images() -> bool {
+    std::env::var("GELEIT_IMAGES").is_ok_and(|v| v == "1")
 }

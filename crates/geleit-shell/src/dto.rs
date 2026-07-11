@@ -36,8 +36,11 @@ pub struct MessageDto {
     pub has_attachments: bool,
 }
 
-/// A message opened for reading. `html` is carried **unrendered** — S9.1 shows only `plain`; S9.2
-/// adds the sandboxed iframe. Shipping the field now means the seam does not change in S9.2.
+/// A message opened for reading.
+///
+/// `is_html` says whether to show the sandboxed `mail://` iframe (S9.2) or the plain-text view. The
+/// message body itself is **deliberately not sent to the frontend**: it is served straight to the
+/// iframe from its own origin, so hostile HTML never enters the app's document even as a string.
 #[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
 pub struct MessageBodyDto {
     pub id: i64,
@@ -45,7 +48,10 @@ pub struct MessageBodyDto {
     pub from: String,
     pub date: Option<i64>,
     pub plain: Option<String>,
-    pub html: Option<String>,
+    /// The message has a formatted (HTML) body → render the sandboxed iframe.
+    pub is_html: bool,
+    /// Remote content was blocked (PRIV-3) → show the cue + "Load images" (PRIV-2).
+    pub has_remote: bool,
 }
 
 /// Sender as the list should show it: display name, else the address, else a calm placeholder.

@@ -111,6 +111,42 @@ app reconciles against the store on mount, refreshing `localStorage` for next la
 > `safehtml::document()` already emits (`default-src 'none'; img-src data: cid:;
 > style-src 'unsafe-inline'; …`) and inherits nothing from the shell. That also keeps the
 > opt-in remote-image path (PRIV-2) a per-message CSP decision, exactly as ADR-0012 describes.
+>
+> **This is what S9.2 did** — see "The reading pane" below.
+
+## The reading pane (S9.2)
+
+A formatted message is **served from its own `mail://` origin**, never `srcdoc` (for the reason
+above). The frontend only ever points an `<iframe>` at `mail://localhost/<id>`; the message body
+**never enters the app's document, not even as a string** — `open_message` returns `is_html`/
+`has_remote` flags, not the HTML.
+
+Three independent layers, each proven to hold alone with the sanitizer switched *off*
+(`tauri-webkit-spike.md`), and re-verified in-app here against a hostile `.eml`:
+
+1. **Sanitizer** — `ammonia` (`safehtml::sanitize_html`), run in `mailproto::message_html`.
+2. **Sandbox** — the iframe is `sandbox="allow-popups allow-popups-to-escape-sandbox"`: **no
+   `allow-scripts`, no `allow-same-origin`**. Mail can't run code, reach the shell's DOM, touch the
+   IPC bridge, or read files.
+3. **CSP** — `safehtml::webview_document` emits `default-src 'none'; img-src data: cid:; …`, and
+   `mailproto` sends the *identical* policy as a response header too (they must never diverge — a
+   test enforces it). `img-src` is the only directive ever relaxed, on explicit opt-in.
+
+**"Load images" (PRIV-2) is a CSP relaxation, not a fetch.** Opting in re-points the iframe at
+`mail://localhost/<id>?images=1`; the handler re-serves that one message with `img-src` widened to
+**`https:` only** (never cleartext `http:`) and WebKit fetches. It is strictly **per message** — the frontend resets the opt-in on every
+`open`, so one click never turns remote loading on for the next message. There is **no HTTP client**.
+
+**Links** never navigate the app. `<base target="_blank">` turns a click into a new-window request;
+`main::allow_navigation` refuses everything but our own origins and hands `http(s)`/`mailto` to the
+system browser via `xdg-open` (a subprocess — no capability, no HTTP client). The window is built in
+`setup()` rather than `tauri.conf.json` precisely because the navigation guard can only be attached
+at build time.
+
+**`webview_document` is separate from `document` on purpose.** The old `document()` carries two Blitz
+workarounds — `border-collapse:separate!important` (which is *actively wrong* for a real engine) and
+`add_font_fallbacks`. The Slint app still needs them until S9.7, so S9.2 added a clean
+`webview_document` beside it rather than touching `document`. S9.7 deletes both together.
 - Webview network context is **`incognito: true`** — no cookie jar, no persistent cache — so image
   loads (once S9.2 allows them on request) cannot be correlated across sessions.
 - No Tauri plugins are enabled. There is no filesystem, shell, or HTTP capability to grant.

@@ -5,6 +5,7 @@
 //! mail in the app's own document is exactly the thing ADR-0012's sandbox exists to prevent.
 use crate::api::{self, Folder, Message, MessageBody};
 use crate::view::{elide, format_date};
+use leptos::either::Either;
 use leptos::prelude::*;
 use std::collections::HashSet;
 
@@ -87,6 +88,9 @@ pub fn App() -> impl IntoView {
     // messages on screen under B's highlight — click a row and you'd open mail from a folder you
     // are not in. Only the newest request may write.
     let request = RwSignal::new(0u64);
+    // PRIV-2 is strictly PER MESSAGE: opting one message in must never carry over to the next, or a
+    // single click would quietly turn remote loading on for everything you read afterwards.
+    let load_images = RwSignal::new(false);
 
     // Boot: first account → its folders → the first folder's messages.
     Effect::new(move |_| {
@@ -127,6 +131,7 @@ pub fn App() -> impl IntoView {
     };
 
     let open_by_id = move |id: i64| {
+        load_images.set(false); // a new message starts blocked, always
         leptos::task::spawn_local(async move {
             match api::open_message(id).await {
                 Ok(body) => {
@@ -161,6 +166,9 @@ pub fn App() -> impl IntoView {
         leptos::task::spawn_local(async move {
             if let Ok(Some(id)) = api::dev_open_message().await {
                 open_by_id(id);
+                if api::dev_load_images().await.unwrap_or(false) {
+                    load_images.set(true);
+                }
             }
         });
     });
@@ -237,29 +245,57 @@ pub fn App() -> impl IntoView {
                     when=move || open.get().is_some()
                     fallback=|| view! { <p class="empty">"Select a message to read it."</p> }
                 >
-                    {move || open.get().map(|body| view! {
-                        <>
-                            <header class="read-head">
-                                <h1>{body.subject.clone()}</h1>
-                                <div class="meta">
-                                    {body.from.clone()}
-                                    {body.date.map(|_| " · ".to_owned())}
-                                    {local_date(body.date)}
-                                </div>
-                            </header>
-                            // S9.1 shows plaintext only. S9.2 replaces this with the sandboxed iframe.
-                            <pre class="body">
-                                {body.plain.clone().unwrap_or_else(|| {
-                                    if body.html.is_some() {
-                                        "This message is formatted (HTML). Formatted rendering arrives \
-                                         in the next slice."
-                                            .to_owned()
-                                    } else {
-                                        "This message has no text.".to_owned()
-                                    }
-                                })}
-                            </pre>
-                        </>
+                    {move || open.get().map(|body| {
+                        let id = body.id;
+                        view! {
+                            <>
+                                <header class="read-head">
+                                    <h1>{body.subject.clone()}</h1>
+                                    <div class="meta">
+                                        {body.from.clone()}
+                                        {body.date.map(|_| " · ".to_owned())}
+                                        {local_date(body.date)}
+                                    </div>
+                                </header>
+
+                                // PRIV-3: say plainly that something was withheld, and let the reader
+                                // decide (PRIV-2). Nothing remote loads until this button is pressed.
+                                <Show when=move || body.has_remote && !load_images.get()>
+                                    <div class="cue">
+                                        <span>"Remote content was blocked to protect your privacy."</span>
+                                        <button on:click=move |_| load_images.set(true)>
+                                            "Load images"
+                                        </button>
+                                    </div>
+                                </Show>
+
+                                {if body.is_html {
+                                    // The message is served on its OWN origin (mail://) and confined:
+                                    // no allow-scripts, no allow-same-origin -> it cannot run code,
+                                    // reach this document, touch the IPC bridge, or read files.
+                                    // allow-popups(+escape) lets a link click surface as a new-window
+                                    // request, which the shell hands to the system browser.
+                                    Either::Left(view! {
+                                        <iframe
+                                            class="mail"
+                                            sandbox="allow-popups allow-popups-to-escape-sandbox"
+                                            src=move || if load_images.get() {
+                                                format!("mail://localhost/{id}?images=1")
+                                            } else {
+                                                format!("mail://localhost/{id}")
+                                            }
+                                        ></iframe>
+                                    })
+                                } else {
+                                    Either::Right(view! {
+                                        <pre class="body">
+                                            {body.plain.clone()
+                                                .unwrap_or_else(|| "This message has no text.".to_owned())}
+                                        </pre>
+                                    })
+                                }}
+                            </>
+                        }
                     })}
                 </Show>
             </main>
