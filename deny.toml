@@ -15,6 +15,10 @@ targets = [
     "x86_64-pc-windows-msvc",
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
+    # The Leptos frontend compiles to wasm. Nothing is wasm-ONLY in the tree today, so this changes
+    # no result — it is cheap insurance for the day a `cfg(target_arch = "wasm32")` dependency lands
+    # and would otherwise slip past the gate entirely.
+    "wasm32-unknown-unknown",
 ]
 
 [advisories]

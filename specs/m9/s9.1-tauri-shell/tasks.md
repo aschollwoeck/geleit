@@ -54,6 +54,22 @@ hand-off surface, per constitution P8.)
 - [x] Code review agent on the diff
 - [x] Manual + technical docs updated (`docs/technical/tauri-shell.md`)
 
+## Code review — findings acted on (all warranted ones fixed before merge)
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | **Every IPC command re-opened the store** — a Secret Service (DBus) round-trip for the at-rest key, plus `migrate()` and an FTS-backfill check. Boot fired 5 commands; every folder click paid it again; against a *locked* keyring each could block or prompt. A per-interaction cost — P3 says that's a defect. | Store is opened **once** and kept behind a `Mutex` in `AppState` (lazily, so a locked keychain is still a calm in-app message rather than a window that never appears). |
+| 2 | **Marking one message read cloned the whole list ~300×.** Each row's `class:unread` closure called `messages.get()` — which *clones* `Vec<Message>` — and subscribed to it, so one click meant ~90,000 struct clones on the UI thread. | Read-this-session tracked in a separate small `HashSet` signal, read with `.with()` (no clone). Rows no longer subscribe to the message list at all. |
+| 3 | **Opening a message never persisted `seen`.** Only the in-memory signal changed, so the unread dot came back on the next folder switch. | `open_message` now writes `set_seen` (best-effort). **Verified by quitting and relaunching:** the dot stays gone. |
+| 4 | **A store failure was reported as "No account yet."** — the user was calmly invited to re-add an account that exists, while a toast said otherwise. | The empty state only shows when there's no error; the error path no longer marks the boot "loaded". |
+| 5 | **Stale-folder race.** Click A then B; if A's reply lands last, A's messages sit under B's highlight — click a row and you open mail from a folder you aren't in. | Request epoch: only the newest request may write. The list is also cleared on switch. |
+| 6 | **Dates rendered in UTC.** A Berlin reader saw 09:30 mail as "07:30", and early-morning mail fell on the previous UTC day and showed a date instead of a time. | Per-timestamp local offset (so DST is right), applied before the pure formatter. |
+| 7 | **`dev_open_message` was guarded by runtime `cfg!(debug_assertions)`** — a *profile flag*, not "debug build". Enabling `debug-assertions` under `[profile.release]` (routine when profiling) would re-arm the seam in a shipped binary. | `#[cfg(debug_assertions)]` on the function **and** its handler registration — the command doesn't exist in release. |
+| 8 | `style-src 'unsafe-inline'` in the app CSP with **no consumer** — a standing weakening bought for nothing, right before S9.2 renders hostile mail. | Dropped. **This has a consequence for S9.2, now recorded in the roadmap and `docs/technical/tauri-shell.md`: a `srcdoc` iframe *inherits* the app CSP, so mail must be served from its own origin (custom protocol) or every message renders unstyled.** |
+
+Also taken: `wasm32-unknown-unknown` added to `deny.toml`'s `[graph] targets` (no-op today, insurance
+for the first wasm-only dependency).
+
 ## Found and fixed while building this slice
 - **`deny.toml` was scanning every platform**, including Android/iOS, where `tauri` declares
   `reqwest` under a mobile-only `cfg`. That tripped the no-egress ban over a crate that can never be

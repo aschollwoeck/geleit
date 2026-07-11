@@ -21,22 +21,31 @@ use std::sync::Arc;
 fn main() {
     // Same dev bridge as the Slint app: `GELEIT_DB` overrides the mailbox path.
     let db_path = std::env::var("GELEIT_DB").unwrap_or_else(|_| "geleit.db".to_owned());
-    let state = AppState {
-        db_path,
-        // The at-rest key + credentials live in the OS keychain (SEC-2/SEC-1, ADR-0008).
-        secrets: Arc::new(OsSecretStore::new()),
-    };
+    // The at-rest key + credentials live in the OS keychain (SEC-2/SEC-1, ADR-0008).
+    let state = AppState::new(db_path, Arc::new(OsSecretStore::new()));
 
-    tauri::Builder::default()
-        .manage(state)
-        .invoke_handler(tauri::generate_handler![
-            ipc::list_accounts,
-            ipc::list_folders,
-            ipc::list_messages,
-            ipc::open_message,
-            ipc::theme,
-            ipc::dev_open_message,
-        ])
+    let builder = tauri::Builder::default().manage(state);
+
+    // The dev-only screenshot seam exists only in debug builds — see `ipc::dev_open_message`.
+    #[cfg(debug_assertions)]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        ipc::list_accounts,
+        ipc::list_folders,
+        ipc::list_messages,
+        ipc::open_message,
+        ipc::theme,
+        ipc::dev_open_message,
+    ]);
+    #[cfg(not(debug_assertions))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        ipc::list_accounts,
+        ipc::list_folders,
+        ipc::list_messages,
+        ipc::open_message,
+        ipc::theme,
+    ]);
+
+    builder
         .run(tauri::generate_context!())
         .expect("GeleitMail could not start its window.");
 }

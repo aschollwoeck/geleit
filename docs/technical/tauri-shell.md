@@ -96,6 +96,21 @@ app reconciles against the store on mount, refreshing `localStorage` for next la
 - CSP forbids every remote origin: `default-src 'self'; … img-src 'self' data:; frame-src 'none'`.
 - `'wasm-unsafe-eval'` is needed to instantiate *our own* wasm. It does not permit `eval` of remote
   script, and mail never runs in this document.
+- `style-src` is `'self'` — **no `'unsafe-inline'`**. Nothing in the app uses inline styles, and
+  leaving the directive open would have been a standing weakening bought for nothing.
+
+> ### ⚠️ Read this before writing S9.2
+>
+> A `srcdoc` iframe **inherits the embedding document's CSP.** So mail rendered via `srcdoc` would
+> inherit the strict app CSP above — and since it has no `style-src 'unsafe-inline'`, **every
+> message's own inline styles would be silently blocked and all mail would render unstyled.** The
+> webview spike didn't hit this because it ran the mail as a standalone page with its own CSP.
+>
+> The fix is *not* to loosen the app's CSP. Serve the message from its **own origin** — a custom
+> protocol (e.g. `mail://…`) registered on the webview — so it carries the CSP that
+> `safehtml::document()` already emits (`default-src 'none'; img-src data: cid:;
+> style-src 'unsafe-inline'; …`) and inherits nothing from the shell. That also keeps the
+> opt-in remote-image path (PRIV-2) a per-message CSP decision, exactly as ADR-0012 describes.
 - Webview network context is **`incognito: true`** — no cookie jar, no persistent cache — so image
   loads (once S9.2 allows them on request) cannot be correlated across sessions.
 - No Tauri plugins are enabled. There is no filesystem, shell, or HTTP capability to grant.

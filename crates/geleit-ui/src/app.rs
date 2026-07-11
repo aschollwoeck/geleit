@@ -6,9 +6,9 @@
 use crate::api::{self, Folder, Message, MessageBody};
 use crate::view::{elide, format_date};
 use leptos::prelude::*;
+use std::collections::HashSet;
 
-/// Wall-clock seconds, for relative date formatting. Reading the clock is the one impure thing the
-/// view needs; [`format_date`] takes it as an argument so it stays testable.
+/// Wall-clock seconds (UTC).
 fn now_secs() -> i64 {
     #[cfg(target_arch = "wasm32")]
     {
@@ -17,6 +17,33 @@ fn now_secs() -> i64 {
     #[cfg(not(target_arch = "wasm32"))]
     {
         0
+    }
+}
+
+/// Seconds to add to a UTC timestamp to get **local** wall-clock time, for the instant `ts`.
+///
+/// Mail dates are UTC, but "09:30" has to mean 09:30 *where the reader is*. Computed per timestamp
+/// rather than once, so a message from before a daylight-saving change still shows the time it
+/// actually arrived. (`getTimezoneOffset` returns minutes *behind* UTC, hence the negation.)
+fn local_offset(ts: i64) -> i64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64((ts * 1000) as f64));
+        -(d.get_timezone_offset() as i64) * 60
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = ts;
+        0
+    }
+}
+
+/// A message's date, formatted in the reader's local time.
+fn local_date(ts: Option<i64>) -> String {
+    let now = now_secs();
+    match ts {
+        Some(t) => format_date(Some(t + local_offset(t)), now + local_offset(now)),
+        None => String::new(),
     }
 }
 
@@ -52,6 +79,14 @@ pub fn App() -> impl IntoView {
     // Distinguishes "still loading" from "genuinely empty" — an empty mailbox and a mailbox that
     // hasn't answered yet must not look the same (P3: calm, never ambiguous).
     let loaded = RwSignal::new(false);
+    // Messages read *this session*. Kept apart from `messages` so that marking one read doesn't
+    // touch the list signal: every row subscribes to what it reads, and a row reading `messages`
+    // would clone the whole 300-row Vec on each notification — 300 rows × 300 clones per click.
+    let read_now = RwSignal::new(HashSet::<i64>::new());
+    // Discards a stale folder's reply. Click A then B quickly and A can land last, leaving A's
+    // messages on screen under B's highlight — click a row and you'd open mail from a folder you
+    // are not in. Only the newest request may write.
+    let request = RwSignal::new(0u64);
 
     // Boot: first account → its folders → the first folder's messages.
     Effect::new(move |_| {
@@ -60,22 +95,32 @@ pub fn App() -> impl IntoView {
                 Ok(accounts) => match accounts.first() {
                     Some(a) => {
                         account.set(Some(a.id));
-                        load_folders(a.id, folders, selected_folder, messages, error).await;
+                        load_folders(a.id, folders, selected_folder, messages, error, request)
+                            .await;
+                        loaded.set(true);
                     }
                     None => loaded.set(true), // no account yet → calm empty state
                 },
+                // NOT `loaded` — a store failure must not be dressed up as "you have no account".
+                // The user would be calmly invited to re-add an account that exists perfectly well.
                 Err(e) => error.set(Some(e)),
             }
-            loaded.set(true);
         });
     });
 
     let choose_folder = move |id: i64| {
         selected_folder.set(Some(id));
         open.set(None);
+        messages.set(Vec::new()); // don't show the previous folder's mail under the new folder's name
+        let epoch = request.get_untracked() + 1;
+        request.set(epoch);
         leptos::task::spawn_local(async move {
             match api::list_messages(id, PAGE).await {
-                Ok(m) => messages.set(m),
+                Ok(m) => {
+                    if request.get_untracked() == epoch {
+                        messages.set(m);
+                    }
+                }
                 Err(e) => error.set(Some(e)),
             }
         });
@@ -86,12 +131,10 @@ pub fn App() -> impl IntoView {
             match api::open_message(id).await {
                 Ok(body) => {
                     open.set(Some(body));
-                    // Opening a message marks it read (READ-7). Server write-back is S9.4's job;
-                    // reflect it locally now so the dot clears instantly (P1 — never wait).
-                    messages.update(|list| {
-                        if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                            m.seen = true;
-                        }
+                    // The shell persisted `seen`; reflect it immediately so the dot clears without
+                    // waiting for a re-list (P1 — the UI never waits on a round-trip it can predict).
+                    read_now.update(|s| {
+                        s.insert(id);
                     });
                 }
                 Err(e) => error.set(Some(e)),
@@ -102,8 +145,7 @@ pub fn App() -> impl IntoView {
 
     // Reconcile the theme against the store. index.html already painted an optimistic theme from
     // localStorage (it can't await IPC and still paint instantly), but the *store* is the source of
-    // truth — that's the same row the Slint app writes, so a user's choice survives the migration.
-    // We also refresh localStorage, so the next launch paints the right theme before first paint.
+    // truth — the same row the Slint app writes — so a user's choice survives the migration.
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
             if let Ok(Some(t)) = api::theme().await {
@@ -113,7 +155,8 @@ pub fn App() -> impl IntoView {
     });
 
     // Dev/test seam (debug builds only): open a message on boot so the reading pane can be
-    // screenshot-verified — the build environment can't inject clicks. No-op in release.
+    // screenshot-verified — the build environment can't inject clicks. In release the command
+    // doesn't exist, and the resulting error is ignored here.
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
             if let Ok(Some(id)) = api::dev_open_message().await {
@@ -143,7 +186,7 @@ pub fn App() -> impl IntoView {
             </nav>
 
             <section class="list">
-                <Show when=move || loaded.get() && messages.get().is_empty()>
+                <Show when=move || loaded.get() && messages.get().is_empty() && error.get().is_none()>
                     <p class="empty">
                         {move || if account.get().is_none() {
                             "No account yet. Add one to start reading your mail."
@@ -155,16 +198,16 @@ pub fn App() -> impl IntoView {
                 <For each=move || messages.get() key=|m| m.id let:msg>
                     {
                         let id = msg.id;
-                        let date = format_date(msg.date, now_secs());
+                        let was_seen = msg.seen;
+                        let date = local_date(msg.date);
                         let snippet = elide(&msg.snippet, 90);
                         let (from, subject) = (msg.from.clone(), msg.subject.clone());
                         let (flagged, attach) = (msg.flagged, msg.has_attachments);
                         view! {
                             <article
                                 class="row"
-                                class:unread=move || {
-                                    messages.get().iter().find(|m| m.id == id).is_none_or(|m| !m.seen)
-                                }
+                                // reads only the small read-this-session set, never the message list
+                                class:unread=move || !was_seen && !read_now.with(|s| s.contains(&id))
                                 class:sel=move || open.get().is_some_and(|b| b.id == id)
                                 on:click=move |_| choose_message(id)
                             >
@@ -200,9 +243,8 @@ pub fn App() -> impl IntoView {
                                 <h1>{body.subject.clone()}</h1>
                                 <div class="meta">
                                     {body.from.clone()}
-                                    <Show when={let d = body.date; move || d.is_some()}>
-                                        " · " {format_date(body.date, now_secs())}
-                                    </Show>
+                                    {body.date.map(|_| " · ".to_owned())}
+                                    {local_date(body.date)}
                                 </div>
                             </header>
                             // S9.1 shows plaintext only. S9.2 replaces this with the sandboxed iframe.
@@ -239,6 +281,7 @@ async fn load_folders(
     selected: RwSignal<Option<i64>>,
     messages: RwSignal<Vec<Message>>,
     error: RwSignal<Option<String>>,
+    request: RwSignal<u64>,
 ) {
     match api::list_folders(account_id).await {
         Ok(list) => {
@@ -246,8 +289,12 @@ async fn load_folders(
             folders.set(list);
             if let Some(id) = first {
                 selected.set(Some(id));
+                let epoch = request.get_untracked() + 1;
+                request.set(epoch);
                 match api::list_messages(id, PAGE).await {
-                    Ok(m) => messages.set(m),
+                    // a folder click during boot must win over the boot load, not be overwritten
+                    Ok(m) if request.get_untracked() == epoch => messages.set(m),
+                    Ok(_) => {}
                     Err(e) => error.set(Some(e)),
                 }
             }

@@ -223,6 +223,10 @@ before our code runs), idle RSS ~60 MB → ~150–250 MB.
   the store.
 - **S9.2** — **Reading pane**: sandboxed iframe, CSP, plain text + HTML, remote-image gate (PRIV-2 as
   a CSP relaxation), links to the system browser. *The slice this whole milestone exists for.*
+  > **Trap:** a `srcdoc` iframe **inherits the app's CSP**, which has no `style-src 'unsafe-inline'` —
+  > so `srcdoc` would silently strip every message's inline styles and render all mail unstyled.
+  > Serve the message from its **own origin** (custom protocol) so it carries the CSP
+  > `safehtml::document()` already emits. See `docs/technical/tauri-shell.md`.
 - **S9.3** — Message list + folders: selection, threading, unread/star/flags, virtualized list.
 - **S9.4** — Refresh/sync wiring + progressive feedback.
 - **S9.5** — Compose / reply / forward / drafts / attachments.

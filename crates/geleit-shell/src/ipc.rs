@@ -5,13 +5,21 @@
 //! 1. **DTOs, not store types.** The frontend never sees `geleit_store` types, so the schema can
 //!    evolve without breaking the UI, and the UI cannot reach into the store even by accident.
 //! 2. **Never block the webview.** SQLite calls are blocking, so every command hops to a blocking
-//!    thread (constitution P1: the UI never waits). `Store` is not `Sync`, so we hold only the
-//!    `db_path` + secrets in app state and open it per call — SQLCipher open is cheap next to the
-//!    ~630 ms the webview already spent booting.
+//!    thread (constitution P1: the UI never waits).
+//!
+//! The store is opened **once** and kept. An earlier version of this file opened it per command,
+//! which was quietly awful: each `open_store` does a Secret Service (DBus) round-trip for the
+//! at-rest key, then `migrate()` and an FTS-backfill check. Boot alone fires five commands, and
+//! every folder click paid it again — and against a *locked* keyring each one can block or prompt.
+//! That is a per-interaction cost, and P3 says a latency regression is a defect.
+//!
+//! `Store` isn't `Sync` (it owns a rusqlite `Connection`), so it lives behind a `Mutex`. Queries here
+//! are sub-millisecond local reads, so the lock is never meaningfully contended; if that ever changes,
+//! reach for a connection pool — not for re-opening the database.
 use geleit_engine::localstore::open_store;
 use geleit_platform::secret::SecretStore;
 use geleit_store::Store;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::dto::{
     display_sender, display_subject, folder_rank, AccountDto, FolderDto, MessageBodyDto, MessageDto,
@@ -22,17 +30,37 @@ use crate::dto::{
 pub struct AppState {
     pub db_path: String,
     pub secrets: Arc<dyn SecretStore>,
+    /// Opened lazily on the first command, then reused. Lazy (rather than opened in `main`) so a
+    /// locked keychain surfaces as a calm in-app message instead of the window failing to appear.
+    store: Arc<Mutex<Option<Store>>>,
 }
 
-/// Run a blocking store operation off the webview's event loop (P1).
+impl AppState {
+    pub fn new(db_path: String, secrets: Arc<dyn SecretStore>) -> Self {
+        Self {
+            db_path,
+            secrets,
+            store: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+/// Run a blocking store operation off the webview's event loop (P1), against the one open store.
 async fn with_store<T, F>(state: AppState, f: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&Store) -> Result<T, String> + Send + 'static,
 {
     tauri::async_runtime::spawn_blocking(move || {
-        let store = open_store(&state.db_path, &*state.secrets)?;
-        f(&store)
+        let mut guard = state
+            .store
+            .lock()
+            .map_err(|_| "The mailbox is unavailable.".to_owned())?;
+        if guard.is_none() {
+            *guard = Some(open_store(&state.db_path, &*state.secrets)?);
+        }
+        let store = guard.as_ref().expect("just opened");
+        f(store)
     })
     .await
     .map_err(|_| "The mailbox task stopped unexpectedly.".to_owned())?
@@ -110,6 +138,11 @@ pub async fn open_message(
             .body_for(id)
             .map_err(|_| "Couldn't read this message.".to_owned())?
             .unwrap_or_default();
+        // Opening a message marks it read (READ-7) — persisted here, not just in the UI's signal,
+        // or the unread dot reappears the moment the folder is re-listed from SQLite. (Server
+        // write-back of \Seen is S9.4; the *local* write belongs here and nowhere else.) A failure
+        // to record it must not stop the user reading their mail, so it is best-effort.
+        let _ = store.set_seen(id, true);
         Ok(MessageBodyDto {
             id: header.id,
             subject: display_subject(header.subject.as_deref()),
@@ -143,12 +176,13 @@ pub async fn theme(state: tauri::State<'_, AppState>) -> Result<Option<String>, 
 /// (no `xdotool`), so it is the only way to screenshot-verify the reading pane — and S9.2's whole
 /// job is rendered mail, which *must* be verified visually.
 ///
-/// Returns `None` in a release build: the env var is not even read, so it cannot influence a
-/// shipped app.
+/// **Compiled out of release builds entirely** — the command is not even registered, so the env var
+/// cannot influence a shipped app. (It was previously gated with a runtime `cfg!(debug_assertions)`,
+/// which is a *profile flag*, not a synonym for "debug build": turning on `debug-assertions` under
+/// `[profile.release]` — routine when profiling — would have re-armed the seam in a real artifact.)
+/// The frontend ignores the resulting "unknown command" error in release.
+#[cfg(debug_assertions)]
 #[tauri::command]
 pub async fn dev_open_message() -> Option<i64> {
-    if !cfg!(debug_assertions) {
-        return None;
-    }
     std::env::var("GELEIT_OPEN").ok()?.parse().ok()
 }
