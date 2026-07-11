@@ -57,6 +57,90 @@ pub struct MessageBodyDto {
     pub has_remote: bool,
 }
 
+/// A compose form, prefilled for a reply/forward or blank for a new message. Plain strings — the
+/// compose window is the app's own document, never a webview; untrusted content never enters it.
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct ComposeDraft {
+    pub to: String,
+    pub cc: String,
+    pub subject: String,
+    pub body: String,
+    /// Threading headers, carried opaquely and passed straight back to `send_message`.
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+}
+
+/// Format a unix timestamp as a short human date (e.g. `12 Jul 2026`) for a reply's attribution line
+/// and a forward's `Date:` header. Pure — Howard Hinnant's civil-from-days (the same exact algorithm
+/// the frontend's `view::format_date` uses; the two crates can't share it, as the frontend depends on
+/// none of ours). Out-of-range timestamps fall back to the raw value rather than fabricate a date.
+fn format_email_date(ts: i64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let day = ts.div_euclid(86_400);
+    if !(-25_567..=47_481).contains(&day) {
+        return ts.to_string(); // 1900–2099; anything absurd, don't invent a date
+    }
+    let z = day + 719_468;
+    let era = z / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as usize;
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{d} {} {y}", MONTHS[m - 1])
+}
+
+/// Build a prefilled compose draft from a stored message, for `kind` ("reply" | "reply_all" |
+/// "forward"). Pure — maps the header/body into the engine's `Original`, calls the matching engine
+/// builder, and flattens the result into the form DTO. Unit-tested; the engine builders themselves
+/// (Re:/Fwd: subjects, quoting, threading) are tested in `geleit-engine`.
+pub fn compose_draft_from(
+    header: &MessageHeader,
+    body_plain: &str,
+    my_name: Option<String>,
+    my_addr: String,
+    kind: &str,
+) -> Result<ComposeDraft, String> {
+    use geleit_engine::message::{self, Original};
+    // Format the date for the quoted attribution / forward header. Passing the raw epoch (`date
+    // .to_string()`) would render "On 1752307200, … wrote:".
+    let date = header.date.map(format_email_date);
+    let orig = Original {
+        from_name: header.from_name.as_deref(),
+        from_addr: header.from_addr.as_deref().unwrap_or_default(),
+        subject: header.subject.as_deref().unwrap_or_default(),
+        date: date.as_deref(),
+        message_id: header.message_id.as_deref(),
+        in_reply_to: header.in_reply_to.as_deref(),
+        to: header.to_addrs.as_deref().unwrap_or_default(),
+        cc: header.cc_addrs.as_deref().unwrap_or_default(),
+        body_text: body_plain,
+    };
+    let draft = match kind {
+        "reply" => message::reply(&orig, my_name, my_addr),
+        // reply_all excludes *my* addresses from the recipients, so it must know them.
+        "reply_all" => {
+            let mine = [my_addr.clone()];
+            message::reply_all(&orig, &mine, my_name, my_addr)
+        }
+        "forward" => message::forward(&orig, my_name, my_addr),
+        _ => return Err("Unknown compose action.".to_owned()),
+    };
+    Ok(ComposeDraft {
+        to: draft.to.join(", "),
+        cc: draft.cc.join(", "),
+        subject: draft.subject,
+        body: draft.body_text,
+        in_reply_to: draft.in_reply_to,
+        references: draft.references,
+    })
+}
+
 /// Sender as the list should show it: display name, else the address, else a calm placeholder.
 /// Pure — unit-tested.
 #[must_use]
@@ -206,6 +290,91 @@ mod tests {
     fn folder_aliases_share_their_rank() {
         assert_eq!(folder_rank("Junk"), folder_rank("Spam"));
         assert_eq!(folder_rank("Deleted"), folder_rank("Trash"));
+    }
+
+    #[test]
+    fn compose_reply_prefills_sender_and_re_subject() {
+        let mut h = blank();
+        h.from_addr = Some("alice@example.com".into());
+        h.subject = Some("Lunch?".into());
+        h.message_id = Some("<m1@x>".into());
+        let d =
+            compose_draft_from(&h, "See you then", None, "me@example.com".into(), "reply").unwrap();
+        assert_eq!(d.to, "alice@example.com");
+        assert!(d.subject.starts_with("Re:"), "subject={}", d.subject);
+        assert_eq!(d.in_reply_to.as_deref(), Some("<m1@x>")); // threading carried
+        assert!(d.body.contains("See you then"), "original quoted");
+    }
+
+    #[test]
+    fn compose_reply_all_keeps_the_others_but_drops_me() {
+        let mut h = blank();
+        h.from_addr = Some("alice@example.com".into());
+        h.to_addrs = Some("me@example.com, bob@example.com".into());
+        h.subject = Some("Plan".into());
+        let d = compose_draft_from(&h, "", None, "me@example.com".into(), "reply_all").unwrap();
+        assert!(d.to.contains("alice@example.com"));
+        assert!(d.to.contains("bob@example.com"));
+        assert!(
+            !d.to.contains("me@example.com"),
+            "my own address is excluded"
+        );
+    }
+
+    #[test]
+    fn email_date_is_human_readable_not_a_raw_epoch() {
+        // A table of exact epoch-seconds → date, spanning leap days, century and year boundaries, so
+        // the civil-from-days arithmetic is pinned (not just a couple of happy cases).
+        let cases = [
+            (0_i64, "1 Jan 1970"),         // the epoch
+            (5_097_600, "1 Mar 1970"),     // just past a non-leap February
+            (951_782_400, "29 Feb 2000"),  // a leap day in a century that IS a leap year
+            (951_868_800, "1 Mar 2000"),   // ...and the day after
+            (1_704_067_200, "1 Jan 2024"), // a year boundary
+            (1_783_771_200, "11 Jul 2026"),
+            (-2_208_988_800, "1 Jan 1900"), // the earliest we format
+            (4_102_358_400, "31 Dec 2099"), // the latest
+        ];
+        for (ts, expected) in cases {
+            assert_eq!(format_email_date(ts), expected, "ts={ts}");
+        }
+        // an absurd timestamp falls back to the raw value rather than inventing a date
+        assert_eq!(format_email_date(i64::MAX), i64::MAX.to_string());
+    }
+
+    #[test]
+    fn a_reply_quotes_a_readable_date_not_an_epoch() {
+        let mut h = blank();
+        h.from_addr = Some("alice@example.com".into());
+        h.subject = Some("Hi".into());
+        h.date = Some(1_783_771_200);
+        let d = compose_draft_from(&h, "hello", None, "me@x".into(), "reply").unwrap();
+        assert!(d.body.contains("11 Jul 2026"), "body={}", d.body);
+        assert!(
+            !d.body.contains("1783771200"),
+            "raw epoch leaked: {}",
+            d.body
+        );
+    }
+
+    #[test]
+    fn compose_forward_uses_fwd_and_no_recipient() {
+        let mut h = blank();
+        h.from_addr = Some("alice@example.com".into());
+        h.subject = Some("Report".into());
+        let d = compose_draft_from(&h, "body", None, "me@example.com".into(), "forward").unwrap();
+        assert!(
+            d.subject.to_lowercase().starts_with("fwd:"),
+            "subject={}",
+            d.subject
+        );
+        assert_eq!(d.to, "", "forward leaves the recipient blank");
+    }
+
+    #[test]
+    fn compose_rejects_an_unknown_kind() {
+        let h = blank();
+        assert!(compose_draft_from(&h, "", None, "me@x".into(), "bogus").is_err());
     }
 
     #[test]

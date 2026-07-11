@@ -8,8 +8,6 @@
 //! across restarts.
 
 use geleit_engine::imap;
-use geleit_engine::message::{self, Draft};
-use geleit_engine::smtp::{self, SmtpSecurity, SmtpSettings};
 use geleit_platform::secret::SecretStore;
 use geleit_store::{ImapSettings, SmtpConfig, SmtpSecurityKind, StoreError};
 
@@ -89,7 +87,7 @@ pub use geleit_engine::localstore::open_store;
 use geleit_engine::sync_actions::{account_imap, runtime, to_config};
 pub use geleit_engine::sync_actions::{
     run_backfill, run_delete_permanently, run_empty_folder, run_move, run_refresh,
-    run_remove_account, run_set_flag, run_set_seen,
+    run_remove_account, run_send, run_set_flag, run_set_seen,
 };
 
 /// Add (or reconnect) an account: persist its settings, store the password in the shared secrets,
@@ -162,102 +160,6 @@ pub fn run_setup(
         return Err("Couldn't connect — check your details and try again.".to_owned());
     }
     Ok(account_id)
-}
-
-/// Split a comma/semicolon-separated address field into trimmed, non-empty addresses. Pure.
-fn parse_addrs(field: &str) -> Vec<String> {
-    field
-        .split([',', ';'])
-        .map(|a| a.trim().to_owned())
-        .filter(|a| !a.is_empty())
-        .collect()
-}
-
-/// Send a composed message via the first account's SMTP server (M4). Reads SMTP settings from the
-/// store and reuses the IMAP username/password from the keychain. Blocking + network: **run on a
-/// worker thread.** Calm, PII-free errors.
-#[allow(clippy::too_many_arguments)]
-pub fn run_send(
-    db_path: &str,
-    secrets: &dyn SecretStore,
-    account_id: i64,
-    to: &str,
-    cc: &str,
-    subject: &str,
-    body: &str,
-    in_reply_to: Option<String>,
-    references: Vec<String>,
-    attachments: Vec<message::Attachment>,
-    markdown: bool,
-    draft_id: Option<i64>,
-) -> Result<(), String> {
-    let store = open_store(db_path, secrets)?;
-    let account = store
-        .account_by_id(account_id)
-        .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
-        .ok_or_else(|| "No account is set up yet.".to_owned())?;
-    let imap = store
-        .imap_settings(account.id)
-        .ok()
-        .flatten()
-        .ok_or_else(|| "This account isn't set up.".to_owned())?;
-    let smtp = store
-        .smtp_settings(account.id)
-        .ok()
-        .flatten()
-        .ok_or_else(|| "No outgoing (SMTP) server is configured for this account.".to_owned())?;
-
-    let password = imap::password(secrets, &imap.username)
-        .map_err(|_| "Couldn't read your saved password.".to_owned())?
-        .ok_or_else(|| "Enter your password (Refresh to reconnect) before sending.".to_owned())?;
-    let password =
-        String::from_utf8(password).map_err(|_| "The saved password looks corrupt.".to_owned())?;
-
-    let draft = Draft {
-        from_name: account.display_name.clone(),
-        from_addr: account.email.clone(),
-        to: parse_addrs(to),
-        cc: parse_addrs(cc),
-        subject: subject.to_owned(),
-        body_text: body.to_owned(),
-        in_reply_to,
-        references,
-        attachments,
-        html_body: markdown.then(|| message::render_markdown(body)),
-    };
-    let bytes = message::build(&draft)?;
-    let envelope = smtp::envelope(&draft.from_addr, &message::recipients(&draft))?;
-    let settings = SmtpSettings {
-        host: smtp.host,
-        port: smtp.port,
-        username: imap.username.clone(),
-        security: match smtp.security {
-            SmtpSecurityKind::Implicit => SmtpSecurity::Implicit,
-            SmtpSecurityKind::StartTls => SmtpSecurity::StartTls,
-        },
-        allow_invalid_certs: imap.allow_invalid_certs,
-    };
-    // A Sent folder to save a copy in (SEND-8), by name (SPECIAL-USE detection is a follow-up).
-    let sent_folder = store.folders_for_account(account.id).ok().and_then(|fs| {
-        fs.into_iter()
-            .map(|f| f.name)
-            .find(|n| n.eq_ignore_ascii_case("sent") || n.to_ascii_lowercase().contains("sent"))
-    });
-    let imap_config = to_config(&imap);
-    runtime()?.block_on(async {
-        smtp::send(&settings, &password, &envelope, &bytes).await?;
-        // Best-effort: the message is already sent; failing to save a Sent copy must not report
-        // failure (it would mislead the person into resending).
-        if let Some(folder) = sent_folder {
-            let _ = imap::append_message(&imap_config, secrets, &folder, &bytes).await;
-        }
-        Ok::<(), String>(())
-    })?;
-    // The message went out — drop the draft it came from (best-effort).
-    if let Some(id) = draft_id {
-        let _ = store.delete_draft(id);
-    }
-    Ok(())
 }
 
 /// Create / rename / delete a server folder (ORG-6), then re-sync that account's folder list so the
@@ -361,17 +263,6 @@ mod tests {
         assert!(build_smtp_settings("  ", "587", true).is_err());
         assert!(build_smtp_settings("h", "0", false).is_err());
         assert!(build_smtp_settings("h", "abc", false).is_err());
-    }
-
-    #[test]
-    fn parse_addrs_splits_trims_and_drops_empties() {
-        use super::parse_addrs;
-        assert_eq!(
-            parse_addrs(" a@x.com , b@y.com ;c@z.com,"),
-            vec!["a@x.com", "b@y.com", "c@z.com"]
-        );
-        assert!(parse_addrs("   ").is_empty());
-        assert!(parse_addrs("").is_empty());
     }
 
     #[test]

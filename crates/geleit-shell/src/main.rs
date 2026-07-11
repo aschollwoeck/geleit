@@ -106,9 +106,12 @@ fn main() {
         ipc::set_unread,
         ipc::move_to_role,
         ipc::refresh,
+        ipc::compose_draft,
+        ipc::send_message,
         ipc::theme,
         ipc::dev_open_message,
         ipc::dev_load_images,
+        ipc::dev_compose,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -120,6 +123,8 @@ fn main() {
         ipc::set_unread,
         ipc::move_to_role,
         ipc::refresh,
+        ipc::compose_draft,
+        ipc::send_message,
         ipc::theme,
     ]);
 

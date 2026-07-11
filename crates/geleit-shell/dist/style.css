@@ -76,6 +76,20 @@ html, body {
   padding: 2px 8px 14px;
   color: var(--text);
 }
+.compose-new {
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--accent-strong);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.compose-new:hover { filter: brightness(1.06); }
+:root[data-theme="dark"] .compose-new { color: #14191B; }
 .folder {
   display: block;
   width: 100%;
@@ -238,6 +252,77 @@ iframe.mail {
   color: var(--text-muted);
   padding: 28px 20px;
   text-align: center;
+}
+
+/* ---- compose overlay ---- */
+.compose-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 32%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+.compose {
+  width: min(680px, 92vw);
+  height: min(560px, 88vh);
+  background: var(--surface);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgb(0 0 0 / 35%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.compose-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--divider);
+  font-weight: 650;
+}
+.compose-head .close {
+  border: 0; background: transparent; color: var(--text-muted);
+  font-size: 15px; cursor: pointer;
+}
+.compose .field {
+  border: 0;
+  border-bottom: 1px solid var(--divider);
+  padding: 11px 16px;
+  font: inherit;
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+}
+.compose .field:focus { background: var(--surface-raised); }
+.compose .body { flex: 1; resize: none; line-height: 1.5; }
+.compose-foot {
+  display: flex;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--divider);
+}
+.compose .send {
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent-strong);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  padding: 8px 18px;
+  cursor: pointer;
+}
+:root[data-theme="dark"] .compose .send { color: #14191B; }
+.compose .send:disabled { opacity: 0.6; cursor: default; }
+.compose .cancel {
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  padding: 8px 16px;
+  cursor: pointer;
 }
 
 /* ---- toast ---- */

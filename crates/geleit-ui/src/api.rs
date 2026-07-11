@@ -33,6 +33,17 @@ pub struct Message {
     pub thread_count: u32,
 }
 
+/// A compose form, prefilled for reply/forward or blank for a new message.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ComposeDraft {
+    pub to: String,
+    pub cc: String,
+    pub subject: String,
+    pub body: String,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+}
+
 /// A message opened for reading.
 ///
 /// The HTML body is deliberately **absent**: hostile markup never enters the app's document, not even
@@ -86,6 +97,23 @@ struct MoveArgs {
 struct RefreshArgs {
     account_id: i64,
     folder: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComposeDraftArgs {
+    id: i64,
+    kind: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SendArgs {
+    account_id: i64,
+    to: String,
+    cc: String,
+    subject: String,
+    body: String,
+    in_reply_to: Option<String>,
+    references: Vec<String>,
 }
 #[derive(Serialize)]
 struct NoArgs {}
@@ -176,6 +204,45 @@ pub async fn theme() -> Result<Option<String>, String> {
     call("theme", &NoArgs {}).await
 }
 
+/// Build a reply/reply-all/forward draft prefilled from a stored message. `kind` = "reply" |
+/// "reply_all" | "forward".
+pub async fn compose_draft(id: i64, kind: &str) -> Result<ComposeDraft, String> {
+    call(
+        "compose_draft",
+        &ComposeDraftArgs {
+            id,
+            kind: kind.to_owned(),
+        },
+    )
+    .await
+}
+
+/// Send a composed message. Threading headers are passed straight back from a `ComposeDraft`.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_message(
+    account_id: i64,
+    to: String,
+    cc: String,
+    subject: String,
+    body: String,
+    in_reply_to: Option<String>,
+    references: Vec<String>,
+) -> Result<(), String> {
+    call(
+        "send_message",
+        &SendArgs {
+            account_id,
+            to,
+            cc,
+            subject,
+            body,
+            in_reply_to,
+            references,
+        },
+    )
+    .await
+}
+
 /// Kick a refresh of `folder`: recent mail syncs first (this resolves when it's in), then older mail
 /// backfills in the background, streaming `sync-progress` events (see [`on_sync_progress`]).
 pub async fn refresh(account_id: i64, folder: &str) -> Result<(), String> {
@@ -215,3 +282,8 @@ pub fn on_sync_progress(cb: impl Fn(i64) + 'static) {
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub fn on_sync_progress(_cb: impl Fn(i64) + 'static) {}
+
+/// Dev/test seam — see `geleit-shell::ipc::dev_compose`. Always `None` in a release build.
+pub async fn dev_compose() -> Result<Option<String>, String> {
+    call("dev_compose", &NoArgs {}).await
+}
