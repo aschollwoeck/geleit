@@ -1176,6 +1176,14 @@ pub async fn dev_drafts() -> bool {
     std::env::var("GELEIT_DRAFTS").is_ok_and(|v| v == "1")
 }
 
+/// Dev/test seam, debug builds only: `GELEIT_SELECT=<id,id,…>` pre-selects those message rows on boot
+/// so the multi-select bulk bar can be screenshotted. Never in release.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_select() -> Option<String> {
+    std::env::var("GELEIT_SELECT").ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::read_attachments;

@@ -5,7 +5,7 @@ use crate::api::{
     self, Account, AccountForm, ComposeDraft, DraftSummary, Folder, Message, MessageBody,
 };
 use crate::icons::{self, icon};
-use crate::view::{elide, format_date, merge_addrs, rank_suggestions, split_addrs};
+use crate::view::{all_selected, elide, format_date, merge_addrs, rank_suggestions, split_addrs};
 use leptos::either::Either;
 use leptos::prelude::*;
 use std::collections::HashSet;
@@ -28,11 +28,12 @@ enum TrashAsk {
 }
 
 /// A move (archive / delete / spam) that has been requested but not yet committed to the server —
-/// the message is hidden from the list and an "Undo" toast is shown; the server move only happens
-/// when the toast's window elapses, so Undo is a pure local cancel that can never lose mail.
-#[derive(Clone, Copy)]
+/// the message(s) are hidden from the list and an "Undo" toast is shown; the server move only happens
+/// when the toast's window elapses, so Undo is a pure local cancel that can never lose mail. Holds a
+/// set of ids so one bulk-select action archives/deletes them all under a single Undo window.
+#[derive(Clone)]
 struct PendingMove {
-    id: i64,
+    ids: Vec<i64>,
     role: &'static str,
 }
 
@@ -186,7 +187,8 @@ pub fn App() -> impl IntoView {
     // set unread (works even for a message that arrived already-read).
     let read_now = RwSignal::new(HashSet::<i64>::new());
     let marked_unread = RwSignal::new(HashSet::<i64>::new());
-    // Only the newest request may write the list (guards against a stale folder/search reply clobbering).
+    let selected = RwSignal::new(HashSet::<i64>::new()); // messages picked for a bulk action
+                                                         // Only the newest request may write the list (guards against a stale folder/search reply clobbering).
     let request = RwSignal::new(0u64);
     // ---- reading ----
     let load_images = RwSignal::new(false); // PRIV-2: per message
@@ -335,6 +337,7 @@ pub fn App() -> impl IntoView {
     let choose_folder = move |id: i64| {
         unified.set(false);
         drafts_open.set(false);
+        selected.set(HashSet::new());
         selected_folder.set(Some(id));
         open.set(None);
         query.set(String::new());
@@ -355,6 +358,7 @@ pub fn App() -> impl IntoView {
     let choose_unified = move || {
         unified.set(true);
         drafts_open.set(false);
+        selected.set(HashSet::new());
         acct_menu.set(false);
         selected_folder.set(None);
         open.set(None);
@@ -468,30 +472,38 @@ pub fn App() -> impl IntoView {
                 w.clear_timeout_with_handle(h);
             }
         }
-        let id = pm.id;
-        // Keep only the one row so a failed move re-inserts *it* — not a whole stale snapshot that
-        // could resurrect a message a concurrent (overlapping) commit has since removed.
-        let row = messages.get_untracked().into_iter().find(|m| m.id == id);
-        messages.update(|list| list.retain(|m| m.id != id));
+        let role = pm.role;
+        // Keep only the affected rows so a failed move re-inserts *those* — not a whole stale snapshot
+        // that could resurrect a message a concurrent (overlapping) commit has since removed.
+        let saved: Vec<Message> = messages
+            .get_untracked()
+            .into_iter()
+            .filter(|m| pm.ids.contains(&m.id))
+            .collect();
+        messages.update(|list| list.retain(|m| !pm.ids.contains(&m.id)));
         pending.set(None);
         toast.set(None);
-        leptos::task::spawn_local(async move {
-            let restore = move |msg: String| {
-                if let Some(m) = row {
-                    messages.update(|list| {
-                        if !list.iter().any(|x| x.id == id) {
-                            list.push(m);
-                        }
-                    });
+        for id in pm.ids {
+            // Each id keeps its own row for a precise re-insert on failure.
+            let row = saved.iter().find(|m| m.id == id).cloned();
+            leptos::task::spawn_local(async move {
+                let restore = move |msg: String| {
+                    if let Some(m) = row {
+                        messages.update(|list| {
+                            if !list.iter().any(|x| x.id == id) {
+                                list.push(m);
+                            }
+                        });
+                    }
+                    error.set(Some(msg));
+                };
+                match api::move_to_role(id, role).await {
+                    Ok(true) => {}
+                    Ok(false) => restore("This account has no folder for that.".to_owned()),
+                    Err(e) => restore(e),
                 }
-                error.set(Some(msg));
-            };
-            match api::move_to_role(id, pm.role).await {
-                Ok(true) => {}
-                Ok(false) => restore("This account has no folder for that.".to_owned()),
-                Err(e) => restore(e),
-            }
-        });
+            });
+        }
     };
 
     // Cancel a pending move within its window: the row simply reappears (it was only hidden, never
@@ -517,20 +529,74 @@ pub fn App() -> impl IntoView {
         commit_pending(); // only one move can be pending at a time
         open.set(None);
         move_menu.set(false);
-        pending.set(Some(PendingMove { id, role }));
+        pending.set(Some(PendingMove {
+            ids: vec![id],
+            role,
+        }));
         toast.set(Some(verb.to_owned()));
+    };
+
+    // Archive / delete every selected message under one deferred Undo window (reuses the move machinery
+    // above). Clears the selection immediately; the server moves run only when the toast elapses.
+    let bulk_move = move |role: &'static str, verb: &'static str| {
+        let ids: Vec<i64> = selected.get_untracked().into_iter().collect();
+        if ids.is_empty() {
+            return;
+        }
+        commit_pending(); // flush any earlier pending move before starting this one
+        open.set(None);
+        selected.set(HashSet::new());
+        let toast_text = format!("{} {verb}", ids.len());
+        pending.set(Some(PendingMove { ids, role }));
+        toast.set(Some(toast_text));
+    };
+
+    // Mark every selected message unread — an immediate per-message write-back (like the single-row
+    // action; there's no deferred Undo for read-state, matching the reading-pane "Unread").
+    let bulk_mark_unread = move || {
+        let ids: Vec<i64> = selected.get_untracked().into_iter().collect();
+        if ids.is_empty() {
+            return;
+        }
+        selected.set(HashSet::new());
+        for id in &ids {
+            marked_unread.update(|s| {
+                s.insert(*id);
+            });
+            read_now.update(|s| {
+                s.remove(id);
+            });
+        }
+        let toast_text = format!("{} marked unread", ids.len());
+        for id in ids {
+            leptos::task::spawn_local(async move {
+                if let Err(e) = api::set_unread(id).await {
+                    error.set(Some(e));
+                }
+            });
+        }
+        toast.set(Some(toast_text));
+    };
+
+    // Toggle one message's membership in the multi-select set.
+    let toggle_select = move |id: i64| {
+        selected.update(|s| {
+            if !s.remove(&id) {
+                s.insert(id);
+            }
+        });
     };
 
     // Keyboard list navigation (j/k / arrows): open the message `delta` steps from the current one,
     // skipping the day headers. Hidden (pending-move) rows are excluded. Scrolls the row into view.
     #[cfg(target_arch = "wasm32")]
     let nav = move |delta: i32| {
-        let hidden = pending.get_untracked().map(|p| p.id);
+        let hidden = pending.get_untracked().map(|p| p.ids).unwrap_or_default();
         let ids: Vec<i64> = messages
             .get_untracked()
             .iter()
             .map(|m| m.id)
-            .filter(|id| Some(*id) != hidden)
+            .filter(|id| !hidden.contains(id))
             .collect();
         if ids.is_empty() {
             return;
@@ -552,6 +618,7 @@ pub fn App() -> impl IntoView {
 
     let run_search = move |q: String| {
         query.set(q.clone());
+        selected.set(HashSet::new()); // the visible set changes under search — drop the selection
         let is_unified = unified.get();
         // Per-account search needs a selected account; the merged view searches across all.
         if !is_unified && account.get().is_none() {
@@ -598,6 +665,7 @@ pub fn App() -> impl IntoView {
     let switch_account = move |aid: i64| {
         unified.set(false); // picking a specific account leaves the merged view
         drafts_open.set(false); // and leaves the drafts view (drafts are per-account)
+        selected.set(HashSet::new());
         acct_menu.set(false);
         account.set(Some(aid));
         leptos::task::spawn_local(async move {
@@ -873,6 +941,7 @@ pub fn App() -> impl IntoView {
     let open_drafts = move || {
         unified.set(false);
         drafts_open.set(true);
+        selected.set(HashSet::new()); // leaving the message list drops any bulk selection
         selected_folder.set(None);
         open.set(None);
         search_open.set(false);
@@ -1156,6 +1225,13 @@ pub fn App() -> impl IntoView {
             if api::dev_drafts().await.unwrap_or(false) {
                 open_drafts();
             }
+            if let Ok(Some(ids)) = api::dev_select().await {
+                let set: HashSet<i64> = ids
+                    .split(',')
+                    .filter_map(|s| s.trim().parse().ok())
+                    .collect();
+                selected.set(set);
+            }
         });
         true
     });
@@ -1306,14 +1382,14 @@ pub fn App() -> impl IntoView {
         if drafts_open.get() {
             return Vec::new(); // the drafts pane renders its own rows
         }
-        let hidden = pending.get().map(|p| p.id);
+        let hidden = pending.get().map(|p| p.ids).unwrap_or_default();
         let mut buckets: [(&'static str, Vec<Message>); 3] = [
             ("Today", Vec::new()),
             ("Yesterday", Vec::new()),
             ("Earlier", Vec::new()),
         ];
         for m in messages.get() {
-            if Some(m.id) == hidden {
+            if hidden.contains(&m.id) {
                 continue; // hidden during its Undo window
             }
             let slot = match day_bucket(m.date) {
@@ -1473,6 +1549,27 @@ pub fn App() -> impl IntoView {
                         </Show>
                     </div>
                 </div>
+                <Show when=move || !drafts_open.get() && !selected.get().is_empty()>
+                    <div class="bulk-bar">
+                        <span class="rowcheck" title="Select all"
+                            class:on=move || all_selected(&messages.get().iter().map(|m| m.id).collect::<Vec<_>>(), &selected.get())
+                            on:click=move |_| {
+                                let ids: Vec<i64> = messages.get_untracked().iter().map(|m| m.id).collect();
+                                if all_selected(&ids, &selected.get_untracked()) {
+                                    selected.set(HashSet::new());
+                                } else {
+                                    selected.set(ids.into_iter().collect());
+                                }
+                            }>
+                            {icon(icons::CHECK)}
+                        </span>
+                        <span class="bulk-count">{move || format!("{} selected", selected.get().len())}</span>
+                        <span class="icon-btn" title="Archive" on:click=move |_| bulk_move("archive", "archived")>{icon(icons::ARCHIVE)}</span>
+                        <span class="icon-btn danger" title="Delete" on:click=move |_| bulk_move("trash", "deleted")>{icon(icons::TRASH)}</span>
+                        <span class="icon-btn" title="Mark unread" on:click=move |_| bulk_mark_unread()>{icon(icons::UNREAD)}</span>
+                        <span class="icon-btn" title="Clear selection" on:click=move |_| selected.set(HashSet::new())>{icon(icons::CLOSE)}</span>
+                    </div>
+                </Show>
                 <Show when=move || refreshing.get() || catchup.get().is_some()>
                     <div style="padding:0 20px 8px;font-size:12px;color:var(--text-muted)">
                         {move || match catchup.get() {
@@ -1488,7 +1585,7 @@ pub fn App() -> impl IntoView {
                             on:input=move |e| run_search(event_target_value(&e))/>
                     </div>
                 </Show>
-                <div class="list-scroll">
+                <div class="list-scroll" class:selecting=move || !selected.get().is_empty()>
                     <Show when=move || !drafts_open.get() && loaded.get() && messages.get().is_empty() && error.get().is_none()>
                         <div class="list-empty">
                             <Show when=move || account.get().is_none() fallback=|| view! { <div class="big">"✓"</div><div class="msg">"Nothing here."</div> }>
@@ -1554,8 +1651,14 @@ pub fn App() -> impl IntoView {
                                         id=format!("row-{id}")
                                         class:unread=move || is_unread(id, was_seen, read_now, marked_unread)
                                         class:sel=move || open.get().is_some_and(|b| b.id == id)
+                                        class:picked=move || selected.with(|s| s.contains(&id))
                                         on:click=move |_| choose_message(id)>
                                         <span class="guide"></span>
+                                        <span class="rowcheck" class:on=move || selected.with(|s| s.contains(&id))
+                                            title="Select"
+                                            on:click=move |e| { e.stop_propagation(); toggle_select(id); }>
+                                            <Show when=move || selected.with(|s| s.contains(&id))>{icon(icons::CHECK)}</Show>
+                                        </span>
                                         <div class="row-top">
                                             <span class="udot"></span>
                                             <span class="sender">{from}</span>

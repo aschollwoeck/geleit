@@ -201,8 +201,20 @@ a:hover { color: var(--accent); }
 }
 .row:hover { background: var(--surface-raised); }
 .row.sel { background: var(--accent-quiet); }
+.row.picked { background: var(--accent-quiet); }
 .row .guide { position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 3px; background: var(--accent); display: none; }
 .row.sel .guide { display: block; }
+
+/* Multi-select checkbox: a hover-revealed box in a left gutter that stays visible while selecting. */
+.rowcheck { width: 18px; height: 18px; flex: none; border: 1.5px solid var(--text-faint); border-radius: 5px; display: grid; place-items: center; cursor: pointer; background: var(--surface); color: transparent; }
+.rowcheck.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.rowcheck .ic svg { width: 12px; height: 12px; }
+.row .rowcheck { position: absolute; left: 12px; top: 13px; opacity: 0; z-index: 2; }
+.row:hover .rowcheck, .list-scroll.selecting .rowcheck, .row .rowcheck.on { opacity: 1; }
+.list-scroll.selecting .row { padding-left: 42px; }
+.bulk-bar { display: flex; align-items: center; gap: 8px; padding: 2px 16px 10px; }
+.bulk-bar .rowcheck { position: static; opacity: 1; }
+.bulk-count { font-size: 13px; color: var(--text-muted); margin-right: auto; }
 .row-top { display: flex; align-items: center; gap: 8px; }
 .row .udot { width: 8px; height: 8px; flex: none; border-radius: 999px; background: transparent; }
 .row.unread .udot { background: var(--accent); }

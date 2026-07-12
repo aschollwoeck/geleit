@@ -139,6 +139,7 @@ fn main() {
         ipc::dev_trash,
         ipc::dev_compose_to,
         ipc::dev_drafts,
+        ipc::dev_select,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![

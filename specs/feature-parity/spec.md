@@ -99,3 +99,34 @@ server-copy lifecycle) — a later slice. **Attachments on a saved draft** — t
 table exists, but the composer's attachments are file *paths* while the table stores *bytes*, and the
 send path reads attachments from paths; bridging that is its own slice. A saved draft keeps text and
 recipients; re-attach files when you resume.
+
+## Slice 5 — Save/open .eml
+
+Restores exporting a message as `.eml` and opening a `.eml` file. Engine core (`export_eml`,
+`parse_eml`) + store scaffolding (`SAVED_FOLDER`, prune keeps it) survived M9; only UI + IPC were
+dropped. No network. **Save** (reading-pane action) → `save_eml(id)`: `export_eml` bytes + a native
+save dialog named `<safe_filename_stem(subject)>.eml`. **Open mail file…** (rail entry) →
+`open_eml_file(account)`: `parse_eml` into a local `Saved` folder row, then switch + open.
+`safe_filename_stem` is pure/tested in `dto.rs`.
+
+## Slice 6 — Multi-select bulk actions
+
+Restores selecting several messages and acting on all at once (ORG-7, dropped from Slint's
+`d387558`). **Pure UI** reusing the per-message commands — no new IPC/engine/store.
+
+- **Select** — a hover-revealed checkbox on each list row toggles its id in a `selected:
+  HashSet<i64>` (mirrors the existing `read_now`/`marked_unread` pattern); clicking the rest of the
+  row still opens it. A **select-all** box in the bulk bar toggles every listed message (pure
+  `all_selected(ids, set)` helper in `view.rs`). Selection clears on folder / account / view / search
+  change.
+- **Bulk bar** — shown while ≥1 row is selected: "N selected" + **Archive**, **Delete**, **Mark
+  unread**, **Clear**.
+- **Undo** — Archive/Delete reuse the deferred-commit machinery, generalized from a single
+  `PendingMove{id}` to `PendingMove{ids}`: the rows hide, one **"N archived · Undo"** toast shows, and
+  the server moves (looping `move_to_role`) run only when the window elapses — so Undo stays a pure
+  local cancel, and a failed move re-inserts just the rows that failed. Mark-unread is an immediate
+  per-message `set_unread` loop (like the single-message action).
+
+### Out of scope
+Shift-click range select and Ctrl/Cmd-click (the old slice shipped without them too); a bulk
+**mark-read** (there's no `set_read` command yet — marking read happens on open).
