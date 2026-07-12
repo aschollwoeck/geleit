@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8">
   <title>GeleitMail</title>
+  <!-- Fonts bundled locally (Hanken Grotesk + IBM Plex Mono) — never fetched at runtime, so the app
+       stays local-first and within its CSP (font-src 'self'). See design-overhaul slice. -->
+  <link rel="stylesheet" href="/fonts.css">
   <link rel="stylesheet" href="/style.css">
   <!-- No inline scripts anywhere in this app: the CSP stays a strict `script-src 'self'`. -->
   <script src="/early.js"></script>

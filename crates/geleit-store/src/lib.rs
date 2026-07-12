@@ -895,6 +895,17 @@ impl Store {
         Ok(folders)
     }
 
+    /// Unread (`seen = 0`) message count per folder for an account — for the rail's folder counts.
+    /// Only folders with a non-zero count appear in the result.
+    pub fn folder_unread_counts(&self, account_id: i64) -> Result<Vec<(i64, i64)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT folder_id, COUNT(*) FROM message \
+             WHERE account_id = ?1 AND seen = 0 GROUP BY folder_id",
+        )?;
+        let rows = stmt.query_map([account_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Insert or update a message envelope, keyed by `(account_id, folder_id, uid)`. On re-sync the
     /// envelope fields and seen flag are refreshed. `flagged`, `has_attachments`, and `snippet` are
     /// **not** overwritten on conflict: `flagged` is local state and the other two are body-derived
@@ -1608,6 +1619,55 @@ mod tests {
             .collect();
         assert_eq!(subs, ["new", "mid", "old"]); // date DESC
         assert_eq!(s.messages_in_folder(sent, 50).unwrap().len(), 1); // folder-scoped
+    }
+
+    #[test]
+    fn folder_unread_counts_tallies_unseen_per_folder_and_omits_zero() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let other = s.add_account("b@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let archive = s.upsert_folder(acc, "Archive").unwrap();
+        let sent = s.upsert_folder(acc, "Sent").unwrap();
+        let mut uid = 0;
+        let mut add = |folder: i64, seen: bool| {
+            uid += 1;
+            s.upsert_message(
+                acc,
+                folder,
+                &NewMessage {
+                    uid: Some(uid),
+                    seen,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        add(inbox, false); // inbox: 2 unread + 1 read
+        add(inbox, false);
+        add(inbox, true);
+        add(archive, false); // archive: 1 unread
+        add(sent, true); // sent: only read → must NOT appear
+
+        // a message for the OTHER account must not leak into this account's tally
+        s.upsert_folder(other, "INBOX").unwrap();
+        let other_inbox = s.folders_for_account(other).unwrap()[0].id;
+        s.upsert_message(
+            other,
+            other_inbox,
+            &NewMessage {
+                uid: Some(1),
+                seen: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mut got = s.folder_unread_counts(acc).unwrap();
+        got.sort();
+        let mut want = vec![(inbox, 2), (archive, 1)];
+        want.sort();
+        assert_eq!(got, want);
     }
 
     #[test]

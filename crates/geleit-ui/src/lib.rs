@@ -5,6 +5,7 @@
 //! [`view`] so it is testable on the host target rather than only in a browser.
 pub mod api;
 pub mod app;
+pub mod icons;
 pub mod view;
 
 /// WASM entrypoint. Mounts the app into `#app`, replacing the static skeleton that `index.html`

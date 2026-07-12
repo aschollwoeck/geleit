@@ -98,13 +98,94 @@ pub async fn list_folders(
                 .cmp(&folder_rank(&b.name))
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
+        // Per-folder unread counts, folded onto the folders (0 when a folder has none).
+        let counts: std::collections::HashMap<i64, i64> = store
+            .folder_unread_counts(account_id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         Ok(folders
             .into_iter()
             .map(|f| FolderDto {
+                unread: counts.get(&f.id).copied().unwrap_or(0),
                 id: f.id,
                 name: f.name,
             })
             .collect())
+    })
+    .await
+}
+
+/// Remove an account from this device (SEC-3): keychain password + local mail. Worker (keychain +
+/// SQLite). Returns whether the keychain password was cleared cleanly.
+#[tauri::command]
+pub async fn remove_account(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+) -> Result<bool, String> {
+    let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_remove_account(&db, &*secrets, account_id)
+    })
+    .await
+    .map_err(|_| "The task stopped unexpectedly.".to_owned())?
+}
+
+/// A boolean setting persisted in the store's `setting` k/v table (block-remote-images, mark-read,
+/// notify). Read/written by the settings window; defaults handled on the frontend.
+#[tauri::command]
+pub async fn get_bool_setting(
+    state: tauri::State<'_, AppState>,
+    key: String,
+) -> Result<Option<bool>, String> {
+    with_store(state.inner().clone(), move |store| {
+        Ok(store
+            .get_setting(&key)
+            .map_err(|_| "Couldn't read your settings.".to_owned())?
+            .map(|v| v == "1" || v == "true"))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_bool_setting(
+    state: tauri::State<'_, AppState>,
+    key: String,
+    value: bool,
+) -> Result<(), String> {
+    with_store(state.inner().clone(), move |store| {
+        store
+            .set_setting(&key, if value { "1" } else { "0" })
+            .map_err(|_| "Couldn't save your setting.".to_owned())
+    })
+    .await
+}
+
+/// The account's signature (for the settings editor). `set_signature` persists it.
+#[tauri::command]
+pub async fn get_signature(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+) -> Result<String, String> {
+    with_store(state.inner().clone(), move |store| {
+        Ok(store
+            .signature(account_id)
+            .map_err(|_| "Couldn't read your signature.".to_owned())?
+            .unwrap_or_default())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_signature(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+    signature: String,
+) -> Result<(), String> {
+    with_store(state.inner().clone(), move |store| {
+        store
+            .update_signature(account_id, &signature)
+            .map_err(|_| "Couldn't save your signature.".to_owned())
     })
     .await
 }
