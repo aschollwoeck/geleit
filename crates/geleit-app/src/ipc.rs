@@ -835,6 +835,22 @@ pub async fn dev_setup() -> bool {
     std::env::var("GELEIT_SETUP").is_ok_and(|v| v == "1")
 }
 
+/// Dev/test seam, debug builds only: `GELEIT_SETTINGS=1` opens the Settings window on boot. Never in
+/// release.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_settings() -> bool {
+    std::env::var("GELEIT_SETTINGS").is_ok_and(|v| v == "1")
+}
+
+/// Dev/test seam, debug builds only: `GELEIT_SEARCH=<query>` opens search and runs it on boot. Never
+/// in release.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_search() -> Option<String> {
+    std::env::var("GELEIT_SEARCH").ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::read_attachments;

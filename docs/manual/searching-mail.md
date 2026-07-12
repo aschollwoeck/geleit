@@ -2,10 +2,10 @@
 
 See also: [organizing](organizing-mail.md) · [accounts](accounts.md).
 
-Type in the **search box** above the message list. Results appear as you type — instantly, and
-**offline**: GeleitMail searches a private index kept on your own device (inside the encrypted
-database), so it never sends your search anywhere. Each result shows a snippet of the matching text
-so you can see *why* it matched. Choose **Clear** to return to your folder.
+Choose the **magnifier** at the top of the message list to open the **search box**, and type. Results
+appear as you type — instantly, and **offline**: GeleitMail searches a private index kept on your own
+device (inside the encrypted database), so it never sends your search anywhere. Each result shows a
+snippet of the matching text so you can see *why* it matched. Clear the box to return to your folder.
 
 ![Searching for "report": the search box shows a result count and the matching message.](images/search.png)
 
@@ -23,6 +23,6 @@ or body.
 
 ## Searching every account
 
-With more than one account set up, an **All accounts** toggle appears next to the search box. Turn it
-on to search across **all** your accounts at once. Opening a result that lives in another account
-switches you to that account so you can act on it.
+Switch to the **All inboxes** view from the account menu (see [accounts](accounts.md)) and search
+there to look across **all** your accounts at once. Opening a result adopts the account it belongs to,
+so you can reply from the right address.

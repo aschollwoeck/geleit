@@ -22,9 +22,10 @@ The first time you open GeleitMail, it asks you to add an account. Fill in:
 
 ![The Add-account screen, with fields for email, IMAP and SMTP servers, and password.](images/setup.png)
 
-Choose **Connect**. GeleitMail signs in, downloads your inbox, and shows your mail. Your details
+Choose **Add account**. GeleitMail signs in, downloads your inbox, and shows your mail. Your details
 stay on your own device — your password is saved securely in your system keychain, so it's
-remembered the next time you open GeleitMail.
+remembered the next time you open GeleitMail. (The wizard also has buttons for common providers that
+fill the server settings in for you — you just add your email and password.)
 
 > Sign-in is manual IMAP/SMTP for now. One-click Gmail/Outlook (OAuth) is planned.
 
@@ -39,12 +40,15 @@ When you open GeleitMail you see three areas, left to right:
   shows when a message has an attachment.
 - **The reading area** on the right, where the message you pick opens.
 
-![The main window: folder rail on the left, the inbox list with unread dots, stars, and attachment markers in the middle, and the reading area on the right.](images/inbox-light.png)
+Messages are **grouped by day** (Today, Yesterday, Earlier), and each row also shows a small coloured
+dot for the account it belongs to.
+
+![The main window: folder rail on the left, the day-grouped inbox list with unread dots and attachment markers in the middle, and the reading area on the right.](images/inbox-light.png)
 
 Drag the divider between the message list and the reading area to make either wider; your choice is
 remembered next time you open GeleitMail.
 
-When several messages are part of the same back-and-forth, a small **conversation · N** marker shows
+When several messages are part of the same back-and-forth, a small **· conversation N** marker shows
 how many messages are in that thread.
 
 ## Opening a message
@@ -52,13 +56,14 @@ how many messages are in that thread.
 Click a message and it opens on the right, showing the subject, who it's from, the date, and the
 text of the message. The row you're reading is marked with a soft highlight and a coloured edge.
 
-![An open message in the reading area, with Reply, Reply all, Forward, Star, Archive, Delete, Move, Spam, and Mark-as-unread actions across the top.](images/reading.png)
+The action buttons — **Reply, Reply all, Forward, Archive, Move…, Delete, Unread** — sit across the
+**top** of the reading area, above the sender and subject, so they don't move as the subject wraps.
 
-Opening a message marks it as read, and its unread dot disappears. If you'd like to come back to it
-later, choose **Mark as unread** at the top of the reading area to bring the dot back.
+![An open message in the reading area: the action buttons across the top, then the sender, then the subject.](images/reading.png)
 
-If the message has files attached, an **Attachments** list appears under the message showing each
-file's name and size. (Saving attachments to your computer is coming soon.)
+Opening a message marks it as read and its unread dot disappears — unless you've turned off **Mark as
+read when opened** in **Settings → General**, in which case it stays unread until you decide. To make
+a read message unread again, choose **Unread** at the top of the reading area.
 
 Messages written in rich (HTML) formatting are shown **formatted** — with their colors, fonts,
 layout, images, and links intact, exactly as the sender wrote them. You can **scroll** the message,
@@ -84,24 +89,12 @@ with a **Load images** button. Nothing remote loads until you choose to: click i
 fetches that one message's images and re-shows it with them in place. (Scripts are never run, even
 then, and only that message's images are fetched.)
 
-## Saving and opening message files
-
-You can save any message to a standard **`.eml`** file and open `.eml` files back into GeleitMail —
-handy for archiving a message, moving one between computers, or sharing it.
-
-- **Save:** with a message open, choose **Save** at the top of the reading area, pick where to put it,
-  and GeleitMail writes the message (subject, sender/recipients, date, and the text + formatted
-  bodies) as a `.eml` file that any mail program can also open.
-- **Open:** choose **Open mail file…** at the bottom-left, pick a `.eml`, and it appears in a local
-  **Saved** folder and opens in the reading area — formatted exactly like your other mail. The Saved
-  folder stays on your device and is never uploaded to your provider.
-
 ## Writing, replying, and organizing
 
-Choose **New message** on the left to compose, or use **Reply**, **Reply all**, and **Forward** at
-the top of an open message. See [writing your mail](writing-mail.md) for the full details (Cc,
-attachments, formatting, signatures, and drafts), and [organizing your mail](organizing-mail.md) for
-starring, archiving, moving, folders, and acting on several messages at once.
+Choose **Compose** on the left to write, or use **Reply**, **Reply all**, and **Forward** at the top
+of an open message. See [writing your mail](writing-mail.md) for the details (Cc, recipient chips,
+attachments, signature), and [organizing your mail](organizing-mail.md) for archiving, deleting,
+moving, and Undo.
 
 ## Getting new mail
 
