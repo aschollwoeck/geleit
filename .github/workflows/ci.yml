@@ -46,7 +46,11 @@ jobs:
     # X server, so PERF_BUDGET_SOFT_DISPLAY=1 makes "couldn't reach first paint" a warning rather than a
     # failure — while a *measured* cold-start/RSS breach still fails. The hard enforcement of those two
     # is the release perf gate (scripts/perf-budget.sh on a real display, before tagging).
-    if: github.event_name == 'pull_request'
+    #
+    # Runs on PUSH to main (i.e. when a PR merges), NOT on every PR: a fat-LTO release build is ~10 min
+    # and dominated the PR feedback loop. It still gates what actually lands on main, and the release
+    # perf gate before tagging is the hard backstop. PRs stay fast (lint-test + deny + mutants, ~2 min).
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
