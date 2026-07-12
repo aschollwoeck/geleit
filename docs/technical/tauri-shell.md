@@ -218,6 +218,14 @@ callback threading). Notable models:
   `store_body`, return the new id; the UI reloads folders, switches to **Saved**, and opens it. HTML
   can't be rendered ad-hoc (the reading pane serves HTML by store id over `mail://`), so an opened .eml
   becomes a real local row. `safe_filename_stem` is a pure, unit-tested helper in `dto.rs`.
+- **Multi-select bulk actions** (ORG-7) — pure UI reusing the per-message commands, no new IPC. A
+  `selected: HashSet<i64>` (mirrors `read_now`/`marked_unread`) drives a hover-revealed per-row
+  checkbox and a bulk bar (Archive / Delete / Mark unread / Clear + a select-all box backed by the pure
+  `all_selected` in `view.rs`). Bulk Archive/Delete reuse the deferred-Undo machinery, generalized from
+  a single `PendingMove{id}` to `PendingMove{ids}`: `rows()` hides the whole set, one "N archived · Undo"
+  toast shows, and on commit the server moves loop `move_to_role` per id, re-inserting only the rows
+  that fail. Mark-unread is an immediate `set_unread` loop. Selection clears on folder/account/view/
+  search change.
 - **List** is one keyed `<For>` over three fixed day buckets (Today/Yesterday/Earlier), so rank-ordered
   search results group correctly. Reading-pane header order is actions · sender · subject (buttons
   pinned on top). Keyboard: `c` `/` `e` `#` `r` `f` `z` `j`/`k` `Esc`.
@@ -248,6 +256,7 @@ isn't registered at all and the env var is never read:
 | `GELEIT_COMPOSE=new\|reply\|reply_all\|forward` | the composer (`reply`/`reply_all`/`forward` also need `GELEIT_OPEN`) |
 | `GELEIT_TO=<text>` | with `GELEIT_COMPOSE=new`, pre-fills the To input (surfaces the autocomplete dropdown) |
 | `GELEIT_DRAFTS=1` | the saved-Drafts list |
+| `GELEIT_SELECT=<id,id,…>` | pre-selects those message rows (surfaces the bulk-action bar) |
 | `GELEIT_UNIFIED=1` | the merged "All inboxes" view |
 | `GELEIT_SETUP=1` | the add-account wizard |
 | `GELEIT_SETTINGS=1` | the Settings window |

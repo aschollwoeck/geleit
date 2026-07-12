@@ -577,6 +577,11 @@ pub async fn dev_drafts() -> Result<bool, String> {
     call("dev_drafts", &NoArgs {}).await
 }
 
+/// Dev/test seam — see `geleit-app::ipc::dev_select`. Always `None` in a release build.
+pub async fn dev_select() -> Result<Option<String>, String> {
+    call("dev_select", &NoArgs {}).await
+}
+
 /// Dev/test seam — see `geleit-app::ipc::dev_setup`. Always `false` in a release build.
 pub async fn dev_setup() -> Result<bool, String> {
     call("dev_setup", &NoArgs {}).await

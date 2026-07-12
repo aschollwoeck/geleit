@@ -133,6 +133,13 @@ pub fn rank_suggestions(candidates: &[String], already: &[String], limit: usize)
         .collect()
 }
 
+/// Whether every id in `ids` is present in the selection `set` — the state of a "select all" box
+/// over the currently-listed messages. Empty `ids` is not "all selected" (nothing to select). Pure.
+#[must_use]
+pub fn all_selected(ids: &[i64], set: &std::collections::HashSet<i64>) -> bool {
+    !ids.is_empty() && ids.iter().all(|id| set.contains(id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +169,17 @@ mod tests {
             split_addrs(" a@x.com , b@y.com ;c@z.com,"),
             ["a@x.com", "b@y.com", "c@z.com"]
         );
+    }
+
+    #[test]
+    fn all_selected_needs_every_id_and_a_non_empty_list() {
+        use std::collections::HashSet;
+        let set: HashSet<i64> = [1, 2, 3].into_iter().collect();
+        assert!(all_selected(&[1, 2], &set)); // subset present
+        assert!(all_selected(&[1, 2, 3], &set)); // all present
+        assert!(!all_selected(&[1, 4], &set)); // 4 missing
+        assert!(!all_selected(&[], &set)); // nothing listed → not "all"
+        assert!(!all_selected(&[1], &HashSet::new())); // empty selection
     }
 
     #[test]

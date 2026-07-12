@@ -32,6 +32,22 @@ Mail you delete goes to **Trash**, where it stays until you clear it.
 Both are **irreversible** — there's no undo, which is why GeleitMail always asks first. Everywhere
 else, deleting only moves mail to Trash, so you have a safety net until you choose to empty it.
 
+## Acting on several messages at once
+
+To handle a batch of mail together, **hover a message row** and a checkbox appears on the left —
+choose it to select that message. Once anything is selected, a small bar appears above the list
+showing how many you've picked, with actions for all of them:
+
+- **Archive** — move them all to Archive.
+- **Delete** — move them all to Trash.
+- **Mark unread** — bring back their unread dots.
+- **Clear** (the ✕) — deselect everything.
+
+The checkbox at the far left of that bar **selects (or clears) every message in the list** at once.
+Archive and Delete work just like single messages: the rows slide out with one **Undo** bar
+(*3 archived · Undo*), and nothing is sent to your provider until the moment passes — so a bulk Undo
+can never lose mail. Switching folders or accounts clears your selection.
+
 ## Undo
 
 When you **Archive** or **Delete** a message, it slides out of the list and a short bar appears at the
