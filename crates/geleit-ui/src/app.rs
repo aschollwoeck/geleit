@@ -638,6 +638,31 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    // Dev-only screenshot seam (the commands return nothing in a release build): `GELEIT_OPEN=<id>`
+    // opens a message on launch (`GELEIT_IMAGES=1` loads its remote content), `GELEIT_COMPOSE=<kind>`
+    // opens the composer. Used to drive the UI into a state for a screenshot without click injection.
+    Effect::new(move |prev: Option<()>| {
+        if prev.is_some() {
+            return;
+        }
+        leptos::task::spawn_local(async move {
+            if let Ok(Some(id)) = api::dev_open_message().await {
+                if api::dev_load_images().await.unwrap_or(false) {
+                    load_images.set(true);
+                }
+                choose_message(id);
+            }
+            if let Ok(Some(kind)) = api::dev_compose().await {
+                match kind.as_str() {
+                    "new" => compose_new(),
+                    "reply_all" => compose_from_open("reply_all"),
+                    "forward" => compose_from_open("forward"),
+                    _ => compose_from_open("reply"),
+                }
+            }
+        });
+    });
+
     // keyboard shortcuts on the document (c compose, / search, e archive, r reply, f forward, Esc close)
     #[cfg(target_arch = "wasm32")]
     {
