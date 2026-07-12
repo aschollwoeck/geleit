@@ -1,8 +1,10 @@
 # Design overhaul — "Soft daylight" desktop reskin
 
 **Constitution:** P3 (calm and fast *is* the feature), P4 (lean), P5 (effortless setup), P2 (privacy).
-**Reference:** `design/design_handoff_geleitmail/` (README + the desktop prototype `.dc.html`), and
-`design.md` (tokens). High-fidelity: reproduce the settled look pixel-closely.
+**Reference:** the "Soft daylight" design handoff (README + desktop prototype `.dc.html`). It was a
+throwaway reference and has been removed now that the design is implemented in-repo
+(`crates/geleit-app/dist/style.css` + `crates/geleit-ui/src/app.rs`); recover it from git history if
+ever needed. High-fidelity goal: reproduce the settled look pixel-closely.
 
 ## What it delivers
 
