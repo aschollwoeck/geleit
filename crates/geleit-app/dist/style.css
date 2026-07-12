@@ -279,7 +279,9 @@ iframe.mail { flex: 1; width: 100%; border: 0; background: #fff; }
 .field-label { color: var(--text-faint); width: 52px; flex: none; }
 .field-row input { flex: 1; min-width: 120px; background: transparent; border: none; font-size: 13.5px; color: var(--text); padding: 4px 0; }
 .chip { display: inline-flex; align-items: center; gap: 6px; background: var(--surface-raised); border-radius: 999px; padding: 3px 10px; font-size: 13px; font-weight: 500; }
-.chip .x { color: var(--text-faint); cursor: pointer; }
+.chip .x { color: var(--text-faint); cursor: pointer; display: inline-flex; }
+.chip .x:hover { color: var(--danger-strong); }
+.chip .x .ic svg { width: 11px; height: 11px; }
 .compose textarea { padding: 16px 20px; font-size: 14.5px; line-height: 1.6; height: 180px; background: transparent; border: none; resize: none; color: var(--text); }
 .compose-foot { display: flex; align-items: center; gap: 6px; padding: 10px 16px; border-top: 1px solid var(--divider); }
 .btn-primary { background: var(--primary); color: #fff; border: none; border-radius: var(--radius-md); padding: 8px 18px; font-weight: 600; font-size: 13.5px; cursor: pointer; }
@@ -288,6 +290,9 @@ iframe.mail { flex: 1; width: 100%; border: 0; background: #fff; }
 :root[data-theme="dark"] .btn-primary { color: #14191B; }
 .btn-ghost { background: var(--surface); color: var(--text); border: 1px solid var(--divider); border-radius: var(--radius-md); padding: 9px 16px; font-weight: 500; font-size: 13.5px; cursor: pointer; }
 .btn-ghost:hover { border-color: var(--text-muted); }
+.foot-discard { display: inline-flex; align-items: center; gap: 6px; background: transparent; border: none; color: var(--text-muted); font-size: 13px; cursor: pointer; padding: 6px 8px; border-radius: var(--radius-sm); }
+.foot-discard:hover { color: var(--danger-strong); background: var(--danger-quiet); }
+.foot-discard .ic svg { width: 15px; height: 15px; }
 .draft-status { margin-left: auto; font-size: 12px; color: var(--text-faint); }
 
 /* settings */

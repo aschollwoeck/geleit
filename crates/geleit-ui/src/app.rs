@@ -3,7 +3,7 @@
 //! document — it is confined to a sandboxed `mail://` iframe (ADR-0012).
 use crate::api::{self, Account, AccountForm, ComposeDraft, Folder, Message, MessageBody};
 use crate::icons::{self, icon};
-use crate::view::{elide, format_date};
+use crate::view::{elide, format_date, merge_addrs, split_addrs};
 use leptos::either::Either;
 use leptos::prelude::*;
 use std::collections::HashSet;
@@ -184,6 +184,8 @@ pub fn App() -> impl IntoView {
     let acct_menu = RwSignal::new(false);
     let move_menu = RwSignal::new(false);
     let compose = RwSignal::new(Option::<ComposeDraft>::None);
+    let to_input = RwSignal::new(String::new()); // in-progress recipient text (not yet a chip)
+    let cc_input = RwSignal::new(String::new());
     let sending = RwSignal::new(false);
     let query = RwSignal::new(String::new());
     let search_open = RwSignal::new(false);
@@ -602,25 +604,44 @@ pub fn App() -> impl IntoView {
     };
 
     // compose
-    let compose_new = move || compose.set(Some(ComposeDraft::default()));
+    let reset_recipient_inputs = move || {
+        to_input.set(String::new());
+        cc_input.set(String::new());
+    };
+    let compose_new = move || {
+        reset_recipient_inputs();
+        compose.set(Some(ComposeDraft::default()));
+    };
     let compose_from_open = move |kind: &'static str| {
         let Some(id) = open.get().map(|b| b.id) else {
             return;
         };
         leptos::task::spawn_local(async move {
             match api::compose_draft(id, kind).await {
-                Ok(d) => compose.set(Some(d)),
+                Ok(d) => {
+                    reset_recipient_inputs();
+                    compose.set(Some(d));
+                }
                 Err(e) => error.set(Some(e)),
             }
         });
     };
+    // Discard the draft (danger action in the compose footer / Esc).
+    let discard_compose = move || {
+        reset_recipient_inputs();
+        compose.set(None);
+    };
     let send_compose = move || {
-        let (Some(aid), Some(d)) = (account.get(), compose.get()) else {
+        let (Some(aid), Some(mut d)) = (account.get(), compose.get()) else {
             return;
         };
         if sending.get() {
             return;
         }
+        // Fold any recipient text still in the input boxes (typed but not turned into a chip),
+        // de-duplicating so a repeated address never rides into the envelope twice.
+        d.to = merge_addrs(&d.to, &to_input.get_untracked());
+        d.cc = merge_addrs(&d.cc, &cc_input.get_untracked());
         if d.to.trim().is_empty() && d.cc.trim().is_empty() {
             error.set(Some("Add at least one recipient.".to_owned()));
             return;
@@ -640,6 +661,7 @@ pub fn App() -> impl IntoView {
             {
                 Ok(()) => {
                     compose.set(None);
+                    reset_recipient_inputs();
                     commit_pending(); // resolve any queued move before this confirmation toast
                     toast.set(Some("Sent".into()));
                 }
@@ -734,18 +756,22 @@ pub fn App() -> impl IntoView {
             return;
         }
         leptos::task::spawn_local(async move {
-            if let Ok(Some(id)) = api::dev_open_message().await {
+            let opened = api::dev_open_message().await.ok().flatten();
+            if let Some(id) = opened {
                 if api::dev_load_images().await.unwrap_or(false) {
                     load_images.set(true);
                 }
                 choose_message(id);
             }
             if let Ok(Some(kind)) = api::dev_compose().await {
-                match kind.as_str() {
-                    "new" => compose_new(),
-                    "reply_all" => compose_from_open("reply_all"),
-                    "forward" => compose_from_open("forward"),
-                    _ => compose_from_open("reply"),
+                if kind == "new" {
+                    compose_new();
+                } else if let Some(id) = opened {
+                    // Build the reply/forward draft straight from the opened id — `open` may not be
+                    // set yet, so don't route through `compose_from_open` (it reads `open`).
+                    if let Ok(d) = api::compose_draft(id, &kind).await {
+                        compose.set(Some(d));
+                    }
                 }
             }
         });
@@ -764,7 +790,7 @@ pub fn App() -> impl IntoView {
                 let key = e.key();
                 if key == "Escape" {
                     if compose.get_untracked().is_some() {
-                        compose.set(None);
+                        discard_compose();
                     } else if wiz.get_untracked().is_some() {
                         wiz.set(None);
                     } else if settings_open.get_untracked() {
@@ -1141,23 +1167,15 @@ pub fn App() -> impl IntoView {
                                 let s = compose.get().map(|d| d.subject).unwrap_or_default().to_lowercase();
                                 if s.starts_with("re:") { "Reply" } else if s.starts_with("fwd:") { "Forward" } else { "New message" }
                             }}</span>
-                            <button class="close-btn" on:click=move |_| compose.set(None)>{icon(icons::CLOSE)}</button>
+                            <button class="close-btn" on:click=move |_| discard_compose()>{icon(icons::CLOSE)}</button>
                         </div>
                         <div class="field-row">
                             <span class="field-label">"From"</span>
                             <span style="font-weight:500">{current_email}</span>
                             <span class="dot" style=move || format!("background:{}", current_color())></span>
                         </div>
-                        <div class="field-row">
-                            <span class="field-label">"To"</span>
-                            <input placeholder="name@example.com" prop:value=move || compose.get().map(|d| d.to).unwrap_or_default()
-                                on:input=move |e| compose.update(|c| if let Some(c) = c { c.to = event_target_value(&e); })/>
-                        </div>
-                        <div class="field-row">
-                            <span class="field-label">"Cc"</span>
-                            <input placeholder="" prop:value=move || compose.get().map(|d| d.cc).unwrap_or_default()
-                                on:input=move |e| compose.update(|c| if let Some(c) = c { c.cc = event_target_value(&e); })/>
-                        </div>
+                        {recipient_field(compose, to_input, "To", "name@example.com", |d| &d.to, |d, v| d.to = v)}
+                        {recipient_field(compose, cc_input, "Cc", "", |d| &d.cc, |d, v| d.cc = v)}
                         <div class="field-row">
                             <span class="field-label">"Subject"</span>
                             <input placeholder="Subject" prop:value=move || compose.get().map(|d| d.subject).unwrap_or_default()
@@ -1168,6 +1186,9 @@ pub fn App() -> impl IntoView {
                         <div class="compose-foot">
                             <button class="btn-primary" disabled=move || sending.get() on:click=move |_| send_compose()>
                                 {move || if sending.get() { "Sending…" } else { "Send" }}
+                            </button>
+                            <button class="foot-discard" title="Discard" on:click=move |_| discard_compose()>
+                                {icon(icons::TRASH)} "Discard"
                             </button>
                             <span class="draft-status">"Draft"</span>
                         </div>
@@ -1400,6 +1421,75 @@ fn folder_role(name: &str) -> &'static str {
         "spam"
     } else {
         "inbox"
+    }
+}
+
+/// A compose recipient row (To / Cc) rendered as removable chips plus an input for the next address.
+/// Committed addresses live in the draft field (`get`/`set`); `input` holds the in-progress text and
+/// becomes a chip on Enter, comma, or blur.
+fn recipient_field(
+    compose: RwSignal<Option<ComposeDraft>>,
+    input: RwSignal<String>,
+    label: &'static str,
+    placeholder: &'static str,
+    get: fn(&ComposeDraft) -> &String,
+    set: fn(&mut ComposeDraft, String),
+) -> impl IntoView {
+    let field = move || compose.get().map(|d| get(&d).clone()).unwrap_or_default();
+    let commit = move || {
+        let typed = input.get_untracked();
+        if typed.trim().is_empty() {
+            return;
+        }
+        compose.update(|c| {
+            if let Some(c) = c {
+                // Merge in the typed address(es), de-duplicating so the chip list (keyed off the
+                // address in its `<For>`) stays unique.
+                set(c, merge_addrs(get(c), &typed));
+            }
+        });
+        input.set(String::new());
+    };
+    let remove = move |addr: String| {
+        compose.update(|c| {
+            if let Some(c) = c {
+                let kept = split_addrs(get(c))
+                    .into_iter()
+                    .filter(|a| a != &addr)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                set(c, kept);
+            }
+        });
+    };
+    view! {
+        <div class="field-row">
+            <span class="field-label">{label}</span>
+            <For each=move || split_addrs(&field()) key=|a| a.clone() let:addr>
+                {
+                    let a = addr.clone();
+                    view! {
+                        <span class="chip">
+                            {addr}
+                            <span class="x" on:click=move |_| remove(a.clone())>{icon(icons::CLOSE)}</span>
+                        </span>
+                    }
+                }
+            </For>
+            <input
+                placeholder=placeholder
+                prop:value=move || input.get()
+                on:input=move |e| input.set(event_target_value(&e))
+                on:keydown=move |e| {
+                    let k = e.key();
+                    if k == "Enter" || k == "," {
+                        e.prevent_default();
+                        commit();
+                    }
+                }
+                on:blur=move |_| commit()
+            />
+        </div>
     }
 }
 
