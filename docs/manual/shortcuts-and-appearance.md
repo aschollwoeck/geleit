@@ -14,7 +14,7 @@ When you're browsing your mail (not typing in a box):
 | `r` | Reply to the open message |
 | `f` | Forward the open message |
 | `e` | Archive the open message |
-| `#` | Delete the open message (to Trash) |
+| `#` | Delete the open message (to Trash; if already in Trash, permanently delete after a confirm) |
 | `z` | Undo the last archive/delete |
 | `/` | Open search |
 | `Esc` | Close the open window/overlay, or the search box |

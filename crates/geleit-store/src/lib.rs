@@ -1396,6 +1396,14 @@ impl Store {
         Ok(())
     }
 
+    /// Delete every message in a folder locally (for "empty trash"); returns how many were removed.
+    /// The server side is emptied separately. Cascades to bodies/attachments/FTS like `delete_message`.
+    pub fn delete_folder_messages(&self, folder_id: i64) -> Result<usize, StoreError> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM message WHERE folder_id = ?1", [folder_id])?)
+    }
+
     /// The stored body for a message, or `None` if no body is stored yet.
     pub fn body_for(&self, message_id: i64) -> Result<Option<StoredBody>, StoreError> {
         Ok(self
@@ -1685,6 +1693,35 @@ mod tests {
         let mut want = vec![(inbox, 2), (archive, 1)];
         want.sort();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn delete_folder_messages_clears_only_that_folder() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@x.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let trash = s.upsert_folder(acc, "Trash").unwrap();
+        let mut uid = 0;
+        let mut add = |folder: i64| {
+            uid += 1;
+            s.upsert_message(
+                acc,
+                folder,
+                &NewMessage {
+                    uid: Some(uid),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        add(inbox);
+        add(trash);
+        add(trash);
+        add(trash);
+
+        assert_eq!(s.delete_folder_messages(trash).unwrap(), 3);
+        assert_eq!(s.messages_in_folder(trash, 50).unwrap().len(), 0);
+        assert_eq!(s.messages_in_folder(inbox, 50).unwrap().len(), 1); // untouched
     }
 
     #[test]

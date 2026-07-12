@@ -186,6 +186,8 @@ a:hover { color: var(--accent); }
 }
 .icon-btn:hover { background: var(--bg); border-color: var(--divider); }
 .icon-btn.on { background: var(--accent-quiet); color: var(--accent-strong); }
+.icon-btn.danger { color: var(--danger); }
+.icon-btn.danger:hover { background: var(--danger-quiet); border-color: var(--danger); }
 .list-search { padding: 0 16px 10px; }
 .list-search input {
   width: 100%; background: var(--bg); border: 1px solid var(--divider); border-radius: var(--radius-sm);

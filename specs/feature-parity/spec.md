@@ -35,3 +35,16 @@ guard, so it fires even while the caret is in the search field.
 
 ### Out of scope (later slices / not v0.1.0 either)
 A dedicated "Starred" filter/folder. Star is findable via the row indicator for now.
+
+## Slice 2 — Trash: Empty Trash + Delete forever
+
+The engine already has `run_empty_folder` and `run_delete_permanently` (server side); only the UI +
+IPC were dropped. Both are irreversible, so each goes through a **danger confirm dialog** (per the
+feedback rules — a dialog, not an undo toast).
+
+- **Empty Trash** — when the selected folder is Trash, an **Empty Trash** action in the list header →
+  confirm → `empty_trash(account)` IPC: resolve the account's Trash folder, empty it on the server
+  (`run_empty_folder`), and clear the local rows (new `store::delete_folder_messages`), then re-list.
+- **Delete forever** — when the open message is *in* Trash, its **Delete** button permanently removes
+  it (confirm → `delete_forever(id)`: `run_delete_permanently` by uid + `delete_message` locally)
+  instead of moving to Trash (where it already is).

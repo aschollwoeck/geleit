@@ -13,10 +13,24 @@ stay in the same place no matter how long the subject is:
 - **Star** — flag a message you want to find again; the button fills in gold and the message shows a
   gold **★** on its list row. Choose it again to unstar.
 - **Archive** — move it out of the inbox into your Archive folder.
-- **Delete** — move it to Trash.
+- **Delete** — move it to Trash. When the message is **already in Trash**, this button reads **Delete
+  forever** and permanently removes it (see below).
 - **Move…** — pick a folder to move the message into.
 - **Spam** — from the **Move…** menu, send a message to your Junk folder (or move it back to Inbox).
 - **Mark as unread** — bring back the unread dot.
+
+## Emptying the Trash
+
+Mail you delete goes to **Trash**, where it stays until you clear it.
+
+- **Empty Trash** — open the Trash folder and choose the **trash-can button** in the message-list
+  header. GeleitMail asks you to confirm, then permanently deletes every message in Trash from both
+  your provider and this device.
+- **Delete forever** — open a single message that's in Trash and choose **Delete forever** (or press
+  **`#`**). After you confirm, just that one message is permanently removed.
+
+Both are **irreversible** — there's no undo, which is why GeleitMail always asks first. Everywhere
+else, deleting only moves mail to Trash, so you have a safety net until you choose to empty it.
 
 ## Undo
 

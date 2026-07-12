@@ -173,6 +173,16 @@ callback threading). Notable models:
   `open_flagged` state captured when the message opens, so it stays correct even after the message
   leaves the list (e.g. clearing a search) — the body DTO doesn't carry the flag. **Esc** closes the
   search box.
+- **Trash (permanent delete)** — two irreversible IPC commands guard a **danger-confirm dialog**
+  (`trash_ask: Option<TrashAsk>`), never an undo toast. `empty_trash(account)` resolves the account's
+  Trash (`resolve_folder`), empties it server-side (`run_empty_folder`), then clears the local rows
+  (`store::delete_folder_messages`) — server first, so a server failure keeps the rows. `delete_forever(id)`
+  looks up `message_location` + `account_for_message`, calls `run_delete_permanently` by uid, then
+  `delete_message` locally (a message with no server location skips the server step but is still
+  removed locally, so the delete never silently reappears). An `in_trash` derived flag
+  (selected folder's role is `trash`) reveals the Empty-Trash header button and turns the reading-pane
+  **Delete** into **Delete forever** (button and `#` shortcut route to the confirm dialog instead of
+  the move-to-Trash undo flow).
 - **Compose** — To/Cc are removable chips (`split_addrs`/`merge_addrs`, case-insensitive dedup at both
   chip-commit and send); attachments come from a native picker (`pick_files` shells out to
   zenity/kdialog — deliberately not an in-process GTK dialog, which would clash with the webview loop)
@@ -209,6 +219,7 @@ isn't registered at all and the env var is never read:
 | `GELEIT_SETUP=1` | the add-account wizard |
 | `GELEIT_SETTINGS=1` | the Settings window |
 | `GELEIT_SEARCH=<query>` | search, opened and run |
+| `GELEIT_TRASH=empty\|delete` | the irreversible-delete confirm dialog (Empty Trash / Delete forever) |
 
 The seam waits for boot to finish (`loaded`) before firing, so preferences (e.g. mark-as-read) are
 already in effect. Seed a demo DB with `cargo run -p geleit-app --example seed_demo` (`-- --dark`

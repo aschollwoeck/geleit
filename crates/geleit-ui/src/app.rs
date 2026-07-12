@@ -18,6 +18,13 @@ enum ListRow {
     Msg(Message),
 }
 
+/// A pending irreversible Trash action awaiting the danger-confirm dialog.
+#[derive(Clone, Copy)]
+enum TrashAsk {
+    Empty,
+    DeleteOne(i64),
+}
+
 /// A move (archive / delete / spam) that has been requested but not yet committed to the server —
 /// the message is hidden from the list and an "Undo" toast is shown; the server move only happens
 /// when the toast's window elapses, so Undo is a pure local cancel that can never lose mail.
@@ -198,6 +205,7 @@ pub fn App() -> impl IntoView {
     let settings_open = RwSignal::new(false);
     let settings_tab = RwSignal::new("accounts".to_string());
     let confirm = RwSignal::new(Option::<(i64, String)>::None); // (account_id, email) to remove
+    let trash_ask = RwSignal::new(Option::<TrashAsk>::None); // irreversible Trash action to confirm
     let toast = RwSignal::new(Option::<String>::None);
     let pending = RwSignal::new(Option::<PendingMove>::None); // move awaiting its Undo window
                                                               // Handle of the running toast/commit timer, so a newer toast or an Undo can cancel it.
@@ -674,6 +682,51 @@ pub fn App() -> impl IntoView {
             });
         }
     };
+    // Whether the selected folder is the Trash — enables Empty Trash and turns Delete into a
+    // permanent delete (the message is already in Trash).
+    let in_trash = move || {
+        folders
+            .get()
+            .iter()
+            .find(|f| selected_folder.get() == Some(f.id))
+            .is_some_and(|f| folder_role(&f.name) == "trash")
+    };
+
+    // Empty the current Trash folder — permanent, confirmed. Re-lists (now empty) on success.
+    let do_empty_trash = move || {
+        trash_ask.set(None);
+        let (Some(aid), Some(fid)) = (account.get(), selected_folder.get()) else {
+            return;
+        };
+        open.set(None);
+        leptos::task::spawn_local(async move {
+            match api::empty_trash(aid).await {
+                Ok(()) => toast.set(Some("Trash emptied".into())),
+                Err(e) => error.set(Some(e)),
+            }
+            if let Ok(m) = api::list_messages(fid, PAGE).await {
+                messages.set(m);
+            }
+        });
+    };
+
+    // Permanently delete one message that's already in Trash — confirmed, no undo. Optimistic remove.
+    let do_delete_forever = move |id: i64| {
+        trash_ask.set(None);
+        let snapshot = messages.get_untracked();
+        messages.update(|l| l.retain(|m| m.id != id));
+        open.set(None);
+        leptos::task::spawn_local(async move {
+            match api::delete_forever(id).await {
+                Ok(()) => toast.set(Some("Deleted".into())),
+                Err(e) => {
+                    messages.set(snapshot);
+                    error.set(Some(e));
+                }
+            }
+        });
+    };
+
     let do_remove = move || {
         let Some((aid, _)) = confirm.get() else {
             return;
@@ -931,6 +984,13 @@ pub fn App() -> impl IntoView {
                 search_open.set(true);
                 run_search(q);
             }
+            if let Ok(Some(kind)) = api::dev_trash().await {
+                trash_ask.set(Some(if kind == "delete" {
+                    TrashAsk::DeleteOne(-1)
+                } else {
+                    TrashAsk::Empty
+                }));
+            }
         });
         true
     });
@@ -990,7 +1050,15 @@ pub fn App() -> impl IntoView {
                     }
                     "z" if pending.get_untracked().is_some() => undo_pending(),
                     "e" if open.get_untracked().is_some() => move_open("archive", "Archived"),
-                    "#" if open.get_untracked().is_some() => move_open("trash", "Deleted"),
+                    "#" if open.get_untracked().is_some() => {
+                        if in_trash() {
+                            if let Some(b) = open.get_untracked() {
+                                trash_ask.set(Some(TrashAsk::DeleteOne(b.id)));
+                            }
+                        } else {
+                            move_open("trash", "Deleted");
+                        }
+                    }
                     "r" if open.get_untracked().is_some() => compose_from_open("reply"),
                     "f" if open.get_untracked().is_some() => compose_from_open("forward"),
                     _ => {}
@@ -1207,6 +1275,9 @@ pub fn App() -> impl IntoView {
                         if n > 0 { format!("{n} unread") } else { String::new() }
                     }}</div>
                     <div class="list-actions">
+                        <Show when=in_trash>
+                            <span class="icon-btn danger" title="Empty Trash" on:click=move |_| trash_ask.set(Some(TrashAsk::Empty))>{icon(icons::TRASH)}</span>
+                        </Show>
                         <span class="icon-btn" class:on=move || search_open.get() title="Search" on:click=move |_| search_open.update(|o| *o = !*o)>{icon(icons::SEARCH)}</span>
                         <span class="icon-btn" title="Refresh" on:click=move |_| do_refresh()>{icon(icons::REFRESH)}</span>
                     </div>
@@ -1315,7 +1386,7 @@ pub fn App() -> impl IntoView {
                                         <span class="act" on:click=move |_| compose_from_open("forward")>{icon(icons::FORWARD)} "Forward"</span>
                                         <span class="act" on:click=move |_| move_open("archive", "Archived")>{icon(icons::ARCHIVE)} "Archive"</span>
                                         <span class="act" on:click=move |_| move_menu.update(|o| *o = !*o)>{icon(icons::MOVE)} "Move"</span>
-                                        <span class="act danger" on:click=move |_| move_open("trash", "Deleted")>{icon(icons::TRASH)} "Delete"</span>
+                                        <span class="act danger" on:click=move |_| { if in_trash() { trash_ask.set(Some(TrashAsk::DeleteOne(id))); } else { move_open("trash", "Deleted"); } }>{icon(icons::TRASH)} {move || if in_trash() { "Delete forever" } else { "Delete" }}</span>
                                         <span class="act" on:click=move |_| mark_unread()>{icon(icons::UNREAD)} "Unread"</span>
                                         <Show when=move || move_menu.get()>
                                             <div class="menu" style="right:0;top:42px;width:180px">
@@ -1578,6 +1649,37 @@ pub fn App() -> impl IntoView {
                             <button class="btn-ghost" on:click=move |_| confirm.set(None)>"Cancel"</button>
                             <button class="btn-danger" on:click=move |_| do_remove()>"Remove"</button>
                         </div>
+                    </div>
+                </div>
+            </Show>
+
+            <Show when=move || trash_ask.get().is_some()>
+                <div class="scrim">
+                    <div class="window dialog">
+                        {move || match trash_ask.get() {
+                            Some(TrashAsk::Empty) => view! {
+                                <>
+                                    <h2>"Empty Trash?"</h2>
+                                    <p>"Every message in Trash will be permanently deleted from the server and this device. This can't be undone."</p>
+                                    <div class="drow">
+                                        <button class="btn-ghost" on:click=move |_| trash_ask.set(None)>"Cancel"</button>
+                                        <button class="btn-danger" on:click=move |_| do_empty_trash()>"Empty Trash"</button>
+                                    </div>
+                                </>
+                            }.into_any(),
+                            _ => view! {
+                                <>
+                                    <h2>"Delete forever?"</h2>
+                                    <p>"This message will be permanently deleted from the server and this device. This can't be undone."</p>
+                                    <div class="drow">
+                                        <button class="btn-ghost" on:click=move |_| trash_ask.set(None)>"Cancel"</button>
+                                        <button class="btn-danger" on:click=move |_| {
+                                            if let Some(TrashAsk::DeleteOne(id)) = trash_ask.get() { do_delete_forever(id); }
+                                        }>"Delete forever"</button>
+                                    </div>
+                                </>
+                            }.into_any(),
+                        }}
                     </div>
                 </div>
             </Show>
