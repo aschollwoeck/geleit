@@ -94,12 +94,62 @@ pub fn nav_index(len: usize, current: Option<usize>, delta: i32) -> Option<usize
     })
 }
 
+/// Split a recipient field into individual addresses for display as chips. Commas and semicolons
+/// separate; surrounding whitespace is trimmed and empty entries dropped. (Direct entry only —
+/// display names containing a comma are not handled; the backend re-parses the joined string.)
+#[must_use]
+pub fn split_addrs(s: &str) -> Vec<String> {
+    s.split([',', ';'])
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Merge `typed` recipient text into an existing comma-separated field, de-duplicating
+/// case-insensitively and preserving order. Used both when a chip is committed and at send time, so
+/// a recipient can't end up in the envelope twice.
+#[must_use]
+pub fn merge_addrs(existing: &str, typed: &str) -> String {
+    let mut out = split_addrs(existing);
+    for a in split_addrs(typed) {
+        if !out.iter().any(|e| e.eq_ignore_ascii_case(&a)) {
+            out.push(a);
+        }
+    }
+    out.join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// 2026-07-11T12:00:00Z (a Saturday).
     const NOW: i64 = 1_783_771_200;
+
+    #[test]
+    fn merge_addrs_dedups_case_insensitively_and_keeps_order() {
+        assert_eq!(merge_addrs("", "a@x.com"), "a@x.com");
+        assert_eq!(merge_addrs("a@x.com", ""), "a@x.com");
+        assert_eq!(merge_addrs("a@x.com", "b@y.com"), "a@x.com, b@y.com");
+        assert_eq!(merge_addrs("a@x.com", "a@x.com"), "a@x.com"); // exact dup dropped
+        assert_eq!(merge_addrs("a@x.com", "A@X.com"), "a@x.com"); // case-insensitive dup
+        assert_eq!(
+            merge_addrs("a@x.com", "b@y.com, a@x.com"),
+            "a@x.com, b@y.com"
+        );
+    }
+
+    #[test]
+    fn split_addrs_separates_trims_and_drops_blanks() {
+        assert_eq!(split_addrs(""), Vec::<String>::new());
+        assert_eq!(split_addrs("  "), Vec::<String>::new());
+        assert_eq!(split_addrs("a@x.com"), ["a@x.com"]);
+        assert_eq!(
+            split_addrs(" a@x.com , b@y.com ;c@z.com,"),
+            ["a@x.com", "b@y.com", "c@z.com"]
+        );
+    }
 
     #[test]
     fn nav_index_steps_and_clamps() {
