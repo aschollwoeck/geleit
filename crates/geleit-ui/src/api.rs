@@ -17,6 +17,8 @@ pub struct Account {
 pub struct Folder {
     pub id: i64,
     pub name: String,
+    #[serde(default)]
+    pub unread: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -124,6 +126,22 @@ struct SearchArgs {
 #[derive(Serialize)]
 struct ThemeArg {
     theme: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyBoolArg {
+    key: String,
+    value: bool,
+}
+#[derive(Serialize)]
+struct KeyArg {
+    key: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SigArg {
+    account_id: i64,
+    signature: String,
 }
 /// The add-account form. camelCase to match the Tauri command parameters.
 ///
@@ -318,6 +336,52 @@ pub async fn refresh(account_id: i64, folder: &str) -> Result<(), String> {
         &RefreshArgs {
             account_id,
             folder: folder.to_owned(),
+        },
+    )
+    .await
+}
+
+/// Remove an account and its downloaded mail from this device (the server copy is untouched).
+/// Returns whether the keychain password was cleared cleanly (the local mail is gone either way).
+pub async fn remove_account(account_id: i64) -> Result<bool, String> {
+    call("remove_account", &AccountArgs { account_id }).await
+}
+
+/// A persisted boolean preference, or `None` if never set.
+pub async fn get_bool_setting(key: &str) -> Result<Option<bool>, String> {
+    call(
+        "get_bool_setting",
+        &KeyArg {
+            key: key.to_owned(),
+        },
+    )
+    .await
+}
+
+/// Persist a boolean preference.
+pub async fn set_bool_setting(key: &str, value: bool) -> Result<(), String> {
+    call(
+        "set_bool_setting",
+        &KeyBoolArg {
+            key: key.to_owned(),
+            value,
+        },
+    )
+    .await
+}
+
+/// An account's signature (empty if unset).
+pub async fn get_signature(account_id: i64) -> Result<String, String> {
+    call("get_signature", &AccountArgs { account_id }).await
+}
+
+/// Persist an account's signature.
+pub async fn set_signature(account_id: i64, signature: &str) -> Result<(), String> {
+    call(
+        "set_signature",
+        &SigArg {
+            account_id,
+            signature: signature.to_owned(),
         },
     )
     .await

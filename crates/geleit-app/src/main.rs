@@ -111,6 +111,11 @@ fn main() {
         ipc::add_account,
         ipc::search,
         ipc::set_theme,
+        ipc::remove_account,
+        ipc::get_bool_setting,
+        ipc::set_bool_setting,
+        ipc::get_signature,
+        ipc::set_signature,
         ipc::theme,
         ipc::dev_open_message,
         ipc::dev_load_images,
@@ -132,6 +137,11 @@ fn main() {
         ipc::add_account,
         ipc::search,
         ipc::set_theme,
+        ipc::remove_account,
+        ipc::get_bool_setting,
+        ipc::set_bool_setting,
+        ipc::get_signature,
+        ipc::set_signature,
         ipc::theme,
     ]);
 

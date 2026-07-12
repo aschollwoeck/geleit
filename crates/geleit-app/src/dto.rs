@@ -20,6 +20,8 @@ pub struct AccountDto {
 pub struct FolderDto {
     pub id: i64,
     pub name: String,
+    /// Unread count for this folder (0 when none) — shown in the rail.
+    pub unread: i64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
