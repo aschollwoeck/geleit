@@ -207,6 +207,29 @@ pub async fn list_messages(
     .await
 }
 
+/// The merged "All inboxes" listing — every account's INBOX, newest first, each row tagged with its
+/// account so the UI can show which mailbox it came from. No thread counts (a thread is per-account).
+#[tauri::command]
+pub async fn list_all_messages(
+    state: tauri::State<'_, AppState>,
+    limit: i64,
+) -> Result<Vec<MessageDto>, String> {
+    with_store(state.inner().clone(), move |store| {
+        let rows = store
+            .messages_in_all_inboxes(limit.clamp(1, 5_000))
+            .map_err(|_| "Couldn't read your inboxes.".to_owned())?;
+        Ok(rows
+            .into_iter()
+            .map(|(h, account)| {
+                let mut dto = MessageDto::from(h);
+                dto.account = account;
+                dto
+            })
+            .collect())
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn open_message(
     state: tauri::State<'_, AppState>,
@@ -492,6 +515,29 @@ pub async fn search(
     .await
 }
 
+/// Search every account's mail at once — for the merged "All inboxes" view. Rows are tagged with
+/// their account (no thread counts: a thread is per-account).
+#[tauri::command]
+pub async fn search_all(
+    state: tauri::State<'_, AppState>,
+    query: String,
+) -> Result<Vec<MessageDto>, String> {
+    with_store(state.inner().clone(), move |store| {
+        let rows = store
+            .search_all_accounts(&query, 300)
+            .map_err(|_| "Couldn't search your mail.".to_owned())?;
+        Ok(rows
+            .into_iter()
+            .map(|(h, account)| {
+                let mut dto = MessageDto::from(h);
+                dto.account = account;
+                dto
+            })
+            .collect())
+    })
+    .await
+}
+
 /// Persist the theme choice (`"dark"` / `"light"`) — the same `setting` row S9.1 reads on boot, so a
 /// choice survives restart. The frontend already flipped the document; this makes it stick.
 #[tauri::command]
@@ -771,6 +817,14 @@ pub async fn dev_load_images() -> bool {
 #[tauri::command]
 pub async fn dev_compose() -> Option<String> {
     std::env::var("GELEIT_COMPOSE").ok()
+}
+
+/// Dev/test seam, debug builds only: `GELEIT_UNIFIED=1` opens the merged "All inboxes" view on boot
+/// so it can be screenshot-verified without a click. Never in release.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_unified() -> bool {
+    std::env::var("GELEIT_UNIFIED").is_ok_and(|v| v == "1")
 }
 
 /// Dev/test seam, debug builds only: `GELEIT_SETUP=1` opens the add-account overlay on boot. Never

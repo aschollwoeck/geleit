@@ -39,6 +39,9 @@ pub struct MessageDto {
     /// How many messages are in this message's conversation (READ-5). `1` = a singleton; the UI shows
     /// a `conversation · N` marker only when `> 1`. Computed over the loaded page in `list_messages`.
     pub thread_count: u32,
+    /// The account this message belongs to. Only meaningful in the merged "All inboxes" view (where
+    /// rows span accounts); `0` in a single-folder listing, where the UI already knows the account.
+    pub account: i64,
 }
 
 /// A message opened for reading.
@@ -174,6 +177,7 @@ impl From<MessageHeader> for MessageDto {
             flagged: h.flagged,
             has_attachments: h.has_attachments,
             thread_count: 1, // set for real by `with_thread_counts` over the whole page
+            account: 0,      // set only by the merged "All inboxes" listing
         }
     }
 }

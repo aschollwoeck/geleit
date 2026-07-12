@@ -161,6 +161,7 @@ pub fn App() -> impl IntoView {
     // ---- data ----
     let accounts = RwSignal::new(Vec::<Account>::new());
     let account = RwSignal::new(Option::<i64>::None);
+    let unified = RwSignal::new(false); // the merged "All inboxes" view (spans every account)
     let folders = RwSignal::new(Vec::<Folder>::new());
     let selected_folder = RwSignal::new(Option::<i64>::None);
     let messages = RwSignal::new(Vec::<Message>::new());
@@ -219,7 +220,23 @@ pub fn App() -> impl IntoView {
                 ));
             }
             let q = query.get_untracked();
-            if let Some(fid) = selected_folder.get_untracked() {
+            if unified.get_untracked() {
+                // Merged view: re-list across all inboxes (or re-run the cross-account search).
+                let epoch = request.get_untracked() + 1;
+                request.set(epoch);
+                leptos::task::spawn_local(async move {
+                    let result = if q.trim().is_empty() {
+                        api::list_all_messages(PAGE).await
+                    } else {
+                        api::search_all(&q).await
+                    };
+                    if let Ok(m) = result {
+                        if request.get_untracked() == epoch {
+                            messages.set(m);
+                        }
+                    }
+                });
+            } else if let Some(fid) = selected_folder.get_untracked() {
                 let epoch = request.get_untracked() + 1;
                 request.set(epoch);
                 leptos::task::spawn_local(async move {
@@ -294,6 +311,7 @@ pub fn App() -> impl IntoView {
 
     // ---- handlers ----
     let choose_folder = move |id: i64| {
+        unified.set(false);
         selected_folder.set(Some(id));
         open.set(None);
         query.set(String::new());
@@ -310,9 +328,41 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // Switch to the merged "All inboxes" view: every account's INBOX in one date-sorted list.
+    let choose_unified = move || {
+        unified.set(true);
+        acct_menu.set(false);
+        selected_folder.set(None);
+        open.set(None);
+        query.set(String::new());
+        search_open.set(false);
+        messages.set(Vec::new());
+        let epoch = request.get_untracked() + 1;
+        request.set(epoch);
+        leptos::task::spawn_local(async move {
+            match api::list_all_messages(PAGE).await {
+                Ok(m) if request.get_untracked() == epoch => messages.set(m),
+                Ok(_) => {}
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
     let choose_message = move |id: i64| {
         load_images.set(!block_remote.get_untracked()); // block-off ⇒ show images by default
         move_menu.set(false);
+        // In the merged view a row can belong to any account — adopt its account so a reply is sent
+        // from the right mailbox and the reading-pane header shows the right one.
+        if unified.get_untracked() {
+            if let Some(acc) = messages
+                .get_untracked()
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| m.account)
+            {
+                account.set(Some(acc));
+            }
+        }
         let mr = mark_read.get_untracked(); // "mark as read when opened" preference
         leptos::task::spawn_local(async move {
             match api::open_message(id, mr).await {
@@ -450,17 +500,29 @@ pub fn App() -> impl IntoView {
 
     let run_search = move |q: String| {
         query.set(q.clone());
-        let Some(aid) = account.get() else { return };
+        let is_unified = unified.get();
+        // Per-account search needs a selected account; the merged view searches across all.
+        if !is_unified && account.get().is_none() {
+            return;
+        }
+        let aid = account.get();
         let epoch = request.get_untracked() + 1;
         request.set(epoch);
         leptos::task::spawn_local(async move {
             let result = if q.trim().is_empty() {
-                match selected_folder.get_untracked() {
-                    Some(fid) => api::list_messages(fid, PAGE).await,
-                    None => Ok(Vec::new()),
+                // empty query → back to the underlying listing
+                if is_unified {
+                    api::list_all_messages(PAGE).await
+                } else {
+                    match selected_folder.get_untracked() {
+                        Some(fid) => api::list_messages(fid, PAGE).await,
+                        None => Ok(Vec::new()),
+                    }
                 }
+            } else if is_unified {
+                api::search_all(&q).await
             } else {
-                api::search(aid, &q).await
+                api::search(aid.expect("checked above"), &q).await
             };
             match result {
                 Ok(m) if request.get_untracked() == epoch => messages.set(m),
@@ -482,6 +544,7 @@ pub fn App() -> impl IntoView {
 
     // account switching
     let switch_account = move |aid: i64| {
+        unified.set(false); // picking a specific account leaves the merged view
         acct_menu.set(false);
         account.set(Some(aid));
         leptos::task::spawn_local(async move {
@@ -529,6 +592,7 @@ pub fn App() -> impl IntoView {
             match api::add_account(&form).await {
                 Ok(aid) => {
                     wiz.set(None);
+                    unified.set(false); // land on the new account, not a stale merged view
                     if let Ok(list) = api::list_accounts().await {
                         accounts.set(list);
                     }
@@ -587,6 +651,7 @@ pub fn App() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match api::remove_account(aid).await {
                 Ok(_) => {
+                    unified.set(false); // fall back to a concrete account, not a stale merged view
                     if let Ok(list) = api::list_accounts().await {
                         let first = list.first().map(|a| a.id);
                         accounts.set(list);
@@ -695,6 +760,28 @@ pub fn App() -> impl IntoView {
     };
 
     let do_refresh = move || {
+        // Merged view: sync every account's INBOX, then re-list the combined inbox.
+        if unified.get() {
+            if refreshing.get() {
+                return;
+            }
+            refreshing.set(true);
+            let epoch = request.get_untracked() + 1;
+            request.set(epoch);
+            let accs = accounts.get_untracked();
+            leptos::task::spawn_local(async move {
+                for a in &accs {
+                    let _ = api::refresh(a.id, "INBOX").await;
+                }
+                if let Ok(m) = api::list_all_messages(PAGE).await {
+                    if request.get_untracked() == epoch {
+                        messages.set(m);
+                    }
+                }
+                refreshing.set(false);
+            });
+            return;
+        }
         let (Some(aid), Some(fid)) = (account.get(), selected_folder.get()) else {
             return;
         };
@@ -781,6 +868,9 @@ pub fn App() -> impl IntoView {
             return ran;
         }
         leptos::task::spawn_local(async move {
+            if api::dev_unified().await.unwrap_or(false) {
+                choose_unified();
+            }
             let opened = api::dev_open_message().await.ok().flatten();
             if let Some(id) = opened {
                 if api::dev_load_images().await.unwrap_or(false) {
@@ -893,6 +983,23 @@ pub fn App() -> impl IntoView {
             .map(account_color)
             .unwrap_or("transparent")
     };
+    // For merged-view rows, look up a specific account's email / dot colour by id.
+    let email_of = move |id: i64| {
+        accounts
+            .get()
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.email.clone())
+            .unwrap_or_default()
+    };
+    let color_of = move |id: i64| {
+        accounts
+            .get()
+            .iter()
+            .position(|a| a.id == id)
+            .map(account_color)
+            .unwrap_or("transparent")
+    };
 
     // Accounts paired with their position (for the indicator colour). A `Copy` closure so it can feed
     // more than one `<For>`; the turbofish would otherwise trip the view macro's tag parser.
@@ -965,9 +1072,9 @@ pub fn App() -> impl IntoView {
                 >
                     <div class="acct-head">
                         <div class="acct-switch" on:click=move |_| acct_menu.update(|o| *o = !*o)>
-                            <div class="avatar">{account_initial}</div>
+                            <div class="avatar">{move || if unified.get() { "\u{2211}".to_string() } else { account_initial() }}</div>
                             <div style="min-width:0;flex:1">
-                                <div class="acct-name">{current_email}</div>
+                                <div class="acct-name">{move || if unified.get() { "All inboxes".to_string() } else { current_email() }}</div>
                                 <div class="acct-sub">
                                     {move || {
                                         let n = accounts.get().len();
@@ -980,12 +1087,19 @@ pub fn App() -> impl IntoView {
                         <button class="rail-btn" title="Collapse" on:click=move |_| { rail_collapsed.set(true); acct_menu.set(false); }>{icon(icons::COLLAPSE)}</button>
                         <Show when=move || acct_menu.get()>
                             <div class="menu" style="left:4px;top:46px;width:200px">
+                                <Show when=move || { accounts.get().len() > 1 }>
+                                    <div class="menu-item" class:sel=move || unified.get()
+                                        on:click=move |_| choose_unified()>
+                                        {icon(icons::INBOX)} "All inboxes"
+                                    </div>
+                                    <div class="menu-sep"></div>
+                                </Show>
                                 <For each=accounts_indexed key=|(_, a)| a.id let:pair>
                                     {
                                         let (i, a) = pair;
                                         let (id, email) = (a.id, a.email.clone());
                                         view! {
-                                            <div class="menu-item" class:sel=move || account.get() == Some(id)
+                                            <div class="menu-item" class:sel=move || !unified.get() && account.get() == Some(id)
                                                 on:click=move |_| switch_account(id)>
                                                 <span class="dot" style=format!("background:{}", account_color(i))></span>
                                                 {email}
@@ -1001,21 +1115,34 @@ pub fn App() -> impl IntoView {
                         </Show>
                     </div>
                     <button class="compose-btn" on:click=move |_| compose_new()>{icon(icons::PLUS)} "Compose"</button>
-                    <For each=move || folders.get() key=|f| f.id let:f>
-                        {
-                            let (id, name, unread) = (f.id, f.name.clone(), f.unread);
-                            let label = name.clone();
-                            view! {
-                                <button class="folder" class:active=move || selected_folder.get() == Some(id)
-                                    on:click=move |_| choose_folder(id)>
-                                    <span class="guide"></span>
-                                    <span class="fic">{icon(icons::folder_icon(&name))}</span>
-                                    {label}
-                                    <span class="fcount">{move || if unread > 0 { unread.to_string() } else { String::new() }}</span>
-                                </button>
-                            }
+                    // In the merged view, folders are per-account and don't apply — show a single
+                    // "All inboxes" marker instead of a folder list.
+                    <Show
+                        when=move || !unified.get()
+                        fallback=|| view! {
+                            <button class="folder active">
+                                <span class="guide"></span>
+                                <span class="fic">{icon(icons::INBOX)}</span>
+                                "All inboxes"
+                            </button>
                         }
-                    </For>
+                    >
+                        <For each=move || folders.get() key=|f| f.id let:f>
+                            {
+                                let (id, name, unread) = (f.id, f.name.clone(), f.unread);
+                                let label = name.clone();
+                                view! {
+                                    <button class="folder" class:active=move || selected_folder.get() == Some(id)
+                                        on:click=move |_| choose_folder(id)>
+                                        <span class="guide"></span>
+                                        <span class="fic">{icon(icons::folder_icon(&name))}</span>
+                                        {label}
+                                        <span class="fcount">{move || if unread > 0 { unread.to_string() } else { String::new() }}</span>
+                                    </button>
+                                }
+                            }
+                        </For>
+                    </Show>
                     <div class="rail-fill"></div>
                     <button class="rail-tool" on:click=move |_| toggle_theme()>
                         {icon(icons::THEME)}
@@ -1028,7 +1155,7 @@ pub fn App() -> impl IntoView {
             // ============ LIST ============
             <div class="list-col">
                 <div class="list-head">
-                    <div class="list-title">{move || folders.get().into_iter().find(|f| selected_folder.get() == Some(f.id)).map(|f| f.name).unwrap_or_default()}</div>
+                    <div class="list-title">{move || if unified.get() { "All inboxes".to_string() } else { folders.get().into_iter().find(|f| selected_folder.get() == Some(f.id)).map(|f| f.name).unwrap_or_default() }}</div>
                     <div class="list-sub">{move || {
                         let n = messages.get().iter().filter(|m| is_unread(m.id, m.seen, read_now, marked_unread)).count();
                         if n > 0 { format!("{n} unread") } else { String::new() }
@@ -1082,6 +1209,7 @@ pub fn App() -> impl IntoView {
                                 let (from, subject) = (m.from.clone(), m.subject.clone());
                                 let attach = m.has_attachments;
                                 let convo = m.thread_count;
+                                let macc = m.account; // owning account (merged view only)
                                 Either::Right(view! {
                                     <div class="row"
                                         id=format!("row-{id}")
@@ -1100,8 +1228,8 @@ pub fn App() -> impl IntoView {
                                         <div class="subj">{subject}</div>
                                         <div class="prev">{snippet}</div>
                                         <div class="acct">
-                                            <span class="dot" style=move || format!("background:{}", current_color())></span>
-                                            {current_email}
+                                            <span class="dot" style=move || format!("background:{}", if unified.get() { color_of(macc) } else { current_color() })></span>
+                                            {move || if unified.get() { email_of(macc) } else { current_email() }}
                                             <Show when=move || { convo > 1 }>
                                                 <span>{move || format!("· conversation {convo}")}</span>
                                             </Show>

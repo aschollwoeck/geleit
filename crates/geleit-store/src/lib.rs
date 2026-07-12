@@ -991,6 +991,23 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Recent messages across **every** account's INBOX, newest first — for the merged "All inboxes"
+    /// view. Each row is paired with its account id so the UI can tag it. (IMAP's inbox is always the
+    /// folder literally named `INBOX`, so that's what "inbox" means here.)
+    pub fn messages_in_all_inboxes(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(MessageHeader, i64)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, m.uid, m.message_id, m.in_reply_to, m.subject, m.from_name, m.from_addr, \
+             m.date, m.seen, m.has_attachments, m.snippet, m.flagged, m.account_id \
+             FROM message m JOIN folder f ON f.id = m.folder_id \
+             WHERE f.name = 'INBOX' ORDER BY m.date DESC, m.id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit], |r| Ok((header_from_row(r)?, r.get::<_, i64>(12)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Address suggestions for autocomplete (SEND-9): distinct senders seen in this account's mail
     /// whose address starts with `prefix` (case-insensitive), alphabetically, up to `limit`.
     pub fn suggest_addresses(
@@ -1668,6 +1685,43 @@ mod tests {
         let mut want = vec![(inbox, 2), (archive, 1)];
         want.sort();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn all_inboxes_merges_by_date_across_accounts_and_excludes_non_inbox() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.add_account("a@x.com", None).unwrap();
+        let b = s.add_account("b@y.com", None).unwrap();
+        let a_inbox = s.upsert_folder(a, "INBOX").unwrap();
+        let a_sent = s.upsert_folder(a, "Sent").unwrap();
+        let b_inbox = s.upsert_folder(b, "INBOX").unwrap();
+        let mut uid = 0;
+        let mut add = |acc: i64, folder: i64, date: i64| {
+            uid += 1;
+            s.upsert_message(
+                acc,
+                folder,
+                &NewMessage {
+                    uid: Some(uid),
+                    date: Some(date),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        add(a, a_inbox, 100);
+        add(a, a_inbox, 300);
+        add(a, a_sent, 500); // Sent — must NOT appear
+        add(b, b_inbox, 200);
+
+        let got: Vec<(Option<i64>, i64)> = s
+            .messages_in_all_inboxes(50)
+            .unwrap()
+            .into_iter()
+            .map(|(h, acc)| (h.date, acc))
+            .collect();
+        // newest first, merged across accounts, Sent excluded
+        assert_eq!(got, [(Some(300), a), (Some(200), b), (Some(100), a)]);
     }
 
     #[test]

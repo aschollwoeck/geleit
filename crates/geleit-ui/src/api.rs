@@ -33,6 +33,9 @@ pub struct Message {
     pub has_attachments: bool,
     /// Conversation size (READ-5); the UI shows `conversation · N` only when `> 1`.
     pub thread_count: u32,
+    /// Owning account — only set in the merged "All inboxes" listing (0 otherwise).
+    #[serde(default)]
+    pub account: i64,
 }
 
 /// A compose form, prefilled for reply/forward or blank for a new message.
@@ -76,6 +79,14 @@ struct AccountArgs {
 struct FolderArgs {
     folder_id: i64,
     limit: i64,
+}
+#[derive(Serialize)]
+struct LimitArgs {
+    limit: i64,
+}
+#[derive(Serialize)]
+struct QueryArg {
+    query: String,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -238,6 +249,11 @@ pub async fn list_messages(folder_id: i64, limit: i64) -> Result<Vec<Message>, S
     call("list_messages", &FolderArgs { folder_id, limit }).await
 }
 
+/// The merged "All inboxes" listing: every account's INBOX, newest first, tagged with its account.
+pub async fn list_all_messages(limit: i64) -> Result<Vec<Message>, String> {
+    call("list_all_messages", &LimitArgs { limit }).await
+}
+
 pub async fn open_message(id: i64, mark_read: bool) -> Result<MessageBody, String> {
     call("open_message", &OpenArgs { id, mark_read }).await
 }
@@ -258,6 +274,17 @@ pub async fn move_to_role(id: i64, role: &str) -> Result<bool, String> {
         &MoveArgs {
             id,
             role: role.to_owned(),
+        },
+    )
+    .await
+}
+
+/// Search every account's mail at once (for the merged "All inboxes" view), tagged with account.
+pub async fn search_all(query: &str) -> Result<Vec<Message>, String> {
+    call(
+        "search_all",
+        &QueryArg {
+            query: query.to_owned(),
         },
     )
     .await
@@ -431,6 +458,11 @@ pub fn on_sync_progress(_cb: impl Fn(i64) + 'static) {}
 /// Dev/test seam — see `geleit-app::ipc::dev_compose`. Always `None` in a release build.
 pub async fn dev_compose() -> Result<Option<String>, String> {
     call("dev_compose", &NoArgs {}).await
+}
+
+/// Dev/test seam — see `geleit-app::ipc::dev_unified`. Always `false` in a release build.
+pub async fn dev_unified() -> Result<bool, String> {
+    call("dev_unified", &NoArgs {}).await
 }
 
 /// Dev/test seam — see `geleit-app::ipc::dev_setup`. Always `false` in a release build.
