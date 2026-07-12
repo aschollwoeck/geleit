@@ -301,13 +301,20 @@ iframe.mail { flex: 1; width: 100%; border: 0; background: #fff; }
 .chip.attach { max-width: 260px; }
 .chip.attach .ic svg { width: 13px; height: 13px; }
 .chip.attach > .ic { color: var(--text-faint); }
-.foot-attach, .foot-discard, .foot-md { display: inline-flex; align-items: center; gap: 6px; background: transparent; border: none; color: var(--text-muted); font-size: 13px; cursor: pointer; padding: 6px 8px; border-radius: var(--radius-sm); }
-.foot-attach:hover { color: var(--text); background: var(--surface-raised); }
+.foot-attach, .foot-discard, .foot-md, .foot-save { display: inline-flex; align-items: center; gap: 6px; background: transparent; border: none; color: var(--text-muted); font-size: 13px; cursor: pointer; padding: 6px 8px; border-radius: var(--radius-sm); }
+.foot-attach:hover, .foot-save:hover { color: var(--text); background: var(--surface-raised); }
 .foot-discard:hover { color: var(--danger-strong); background: var(--danger-quiet); }
 .foot-md:hover { color: var(--text); background: var(--surface-raised); }
 .foot-md.on { color: var(--accent-strong); background: var(--accent-quiet); }
-.foot-attach .ic svg, .foot-discard .ic svg, .foot-md .ic svg { width: 15px; height: 15px; }
+.foot-save { margin-left: auto; }
+.foot-attach .ic svg, .foot-discard .ic svg, .foot-md .ic svg, .foot-save .ic svg { width: 15px; height: 15px; }
 .draft-status { margin-left: auto; font-size: 12px; color: var(--text-faint); }
+
+/* Draft list rows: a delete affordance that appears on hover, like an inbox row's actions. */
+.row.draft .draftdel { margin-left: auto; color: var(--text-faint); cursor: pointer; display: inline-flex; opacity: 0; }
+.row.draft:hover .draftdel { opacity: 1; }
+.row.draft .draftdel:hover { color: var(--danger-strong); }
+.row.draft .draftdel .ic svg { width: 14px; height: 14px; }
 
 /* Address autocomplete dropdown, anchored under the To/Cc input. */
 .field-row.recipient { position: relative; }

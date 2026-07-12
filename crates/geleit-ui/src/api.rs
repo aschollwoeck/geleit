@@ -49,6 +49,16 @@ pub struct ComposeDraft {
     pub references: Vec<String>,
 }
 
+/// A row in the Drafts list (mirrors `geleit-app::dto::DraftSummary`).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DraftSummary {
+    pub id: i64,
+    pub to: String,
+    pub subject: String,
+    pub snippet: String,
+    pub updated_at: i64,
+}
+
 /// A message opened for reading.
 ///
 /// The HTML body is deliberately **absent**: hostile markup never enters the app's document, not even
@@ -135,6 +145,14 @@ struct SendArgs {
     references: Vec<String>,
     attachments: Vec<String>,
     markdown: bool,
+    draft_id: Option<i64>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveDraftArgs {
+    account_id: i64,
+    draft_id: Option<i64>,
+    draft: ComposeDraft,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -365,6 +383,7 @@ pub async fn send_message(
     references: Vec<String>,
     attachments: Vec<String>,
     markdown: bool,
+    draft_id: Option<i64>,
 ) -> Result<(), String> {
     call(
         "send_message",
@@ -378,9 +397,42 @@ pub async fn send_message(
             references,
             attachments,
             markdown,
+            draft_id,
         },
     )
     .await
+}
+
+/// Save (or update) a local draft; returns its id so the composer keeps editing the same row.
+pub async fn save_draft(
+    account_id: i64,
+    draft_id: Option<i64>,
+    draft: ComposeDraft,
+) -> Result<i64, String> {
+    call(
+        "save_draft",
+        &SaveDraftArgs {
+            account_id,
+            draft_id,
+            draft,
+        },
+    )
+    .await
+}
+
+/// Every saved draft for an account, newest first.
+pub async fn list_drafts(account_id: i64) -> Result<Vec<DraftSummary>, String> {
+    call("list_drafts", &AccountArgs { account_id }).await
+}
+
+/// Load a draft's content back into a compose form (`None` if it's gone).
+pub async fn load_draft(id: i64) -> Result<Option<ComposeDraft>, String> {
+    call("load_draft", &IdArgs { id }).await
+}
+
+/// Delete a saved draft (idempotent).
+pub async fn delete_draft(id: i64) -> Result<(), String> {
+    call("delete_draft", &IdArgs { id }).await
 }
 
 /// Open a native file picker and return the chosen paths (empty if cancelled).
@@ -507,6 +559,11 @@ pub async fn dev_trash() -> Result<Option<String>, String> {
 /// Dev/test seam — see `geleit-app::ipc::dev_compose_to`. Always `None` in a release build.
 pub async fn dev_compose_to() -> Result<Option<String>, String> {
     call("dev_compose_to", &NoArgs {}).await
+}
+
+/// Dev/test seam — see `geleit-app::ipc::dev_drafts`. Always `false` in a release build.
+pub async fn dev_drafts() -> Result<bool, String> {
+    call("dev_drafts", &NoArgs {}).await
 }
 
 /// Dev/test seam — see `geleit-app::ipc::dev_setup`. Always `false` in a release build.

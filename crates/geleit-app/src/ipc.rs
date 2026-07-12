@@ -22,7 +22,8 @@ use geleit_store::Store;
 use std::sync::{Arc, Mutex};
 
 use crate::dto::{
-    display_sender, display_subject, folder_rank, AccountDto, FolderDto, MessageBodyDto, MessageDto,
+    compose_from_draft, display_sender, display_subject, draft_content_from, draft_summary,
+    folder_rank, AccountDto, ComposeDraft, DraftSummary, FolderDto, MessageBodyDto, MessageDto,
 };
 
 /// What the shell needs to reach the encrypted store. Cheap to clone into a blocking task.
@@ -675,6 +676,7 @@ pub async fn send_message(
     references: Vec<String>,
     attachments: Vec<String>,
     markdown: bool,
+    draft_id: Option<i64>,
 ) -> Result<(), String> {
     // Append the account's signature (SEND-7). Read it up front on the store thread.
     let signature = with_store(state.inner().clone(), move |store| {
@@ -705,11 +707,69 @@ pub async fn send_message(
             references,
             attachments,
             markdown,
-            None, // draft persistence is a follow-up
+            draft_id, // if this was a resumed draft, run_send deletes it after a successful send
         )
     })
     .await
     .map_err(|_| "The send task stopped unexpectedly.".to_owned())?
+}
+
+/// Save (or update) a local draft (SEND-5). Returns the draft's id so the composer can keep editing
+/// the same row. Local-only and encrypted at rest; never touches the server.
+#[tauri::command]
+pub async fn save_draft(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+    draft_id: Option<i64>,
+    draft: ComposeDraft,
+) -> Result<i64, String> {
+    with_store(state.inner().clone(), move |store| {
+        store
+            .save_draft(account_id, draft_id, &draft_content_from(&draft))
+            .map_err(|_| "Couldn't save the draft.".to_owned())
+    })
+    .await
+}
+
+/// Every saved draft for an account, newest first, as list summaries.
+#[tauri::command]
+pub async fn list_drafts(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+) -> Result<Vec<DraftSummary>, String> {
+    with_store(state.inner().clone(), move |store| {
+        store
+            .list_drafts(account_id)
+            .map(|rows| rows.iter().map(draft_summary).collect())
+            .map_err(|_| "Couldn't load your drafts.".to_owned())
+    })
+    .await
+}
+
+/// Load a draft's full content back into a compose form, to resume editing. `None` if it's gone.
+#[tauri::command]
+pub async fn load_draft(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<Option<ComposeDraft>, String> {
+    with_store(state.inner().clone(), move |store| {
+        store
+            .draft_by_id(id)
+            .map(|row| row.map(|r| compose_from_draft(r.content)))
+            .map_err(|_| "Couldn't open the draft.".to_owned())
+    })
+    .await
+}
+
+/// Delete a saved draft (idempotent). Used by the draft-list delete affordance.
+#[tauri::command]
+pub async fn delete_draft(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    with_store(state.inner().clone(), move |store| {
+        store
+            .delete_draft(id)
+            .map_err(|_| "Couldn't delete the draft.".to_owned())
+    })
+    .await
 }
 
 /// Distinct past-sender addresses matching a prefix, for To/Cc autocomplete (SEND-9). Read-only;
@@ -957,6 +1017,13 @@ pub async fn dev_trash() -> Option<String> {
 #[tauri::command]
 pub async fn dev_compose_to() -> Option<String> {
     std::env::var("GELEIT_TO").ok()
+}
+
+/// Dev/test seam, debug builds only: `GELEIT_DRAFTS=1` opens the Drafts list on boot. Never in release.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_drafts() -> bool {
+    std::env::var("GELEIT_DRAFTS").is_ok_and(|v| v == "1")
 }
 
 #[cfg(test)]

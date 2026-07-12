@@ -1,7 +1,9 @@
 //! The "Soft daylight" three-pane desktop client (design-overhaul slice): folder rail · message list
 //! · reading pane, plus compose / settings / add-account windows. Mail HTML is never rendered in this
 //! document — it is confined to a sandboxed `mail://` iframe (ADR-0012).
-use crate::api::{self, Account, AccountForm, ComposeDraft, Folder, Message, MessageBody};
+use crate::api::{
+    self, Account, AccountForm, ComposeDraft, DraftSummary, Folder, Message, MessageBody,
+};
 use crate::icons::{self, icon};
 use crate::view::{elide, format_date, merge_addrs, rank_suggestions, split_addrs};
 use leptos::either::Either;
@@ -196,6 +198,9 @@ pub fn App() -> impl IntoView {
     let acct_menu = RwSignal::new(false);
     let move_menu = RwSignal::new(false);
     let compose = RwSignal::new(Option::<ComposeDraft>::None);
+    let current_draft_id = RwSignal::new(Option::<i64>::None); // the saved draft being edited, if any
+    let drafts_open = RwSignal::new(false); // list pane shows saved drafts instead of a folder
+    let drafts = RwSignal::new(Vec::<DraftSummary>::new());
     let to_input = RwSignal::new(String::new()); // in-progress recipient text (not yet a chip)
     let cc_input = RwSignal::new(String::new());
     let attach_paths = RwSignal::new(Vec::<String>::new()); // files attached to the current draft
@@ -329,6 +334,7 @@ pub fn App() -> impl IntoView {
     // ---- handlers ----
     let choose_folder = move |id: i64| {
         unified.set(false);
+        drafts_open.set(false);
         selected_folder.set(Some(id));
         open.set(None);
         query.set(String::new());
@@ -348,6 +354,7 @@ pub fn App() -> impl IntoView {
     // Switch to the merged "All inboxes" view: every account's INBOX in one date-sorted list.
     let choose_unified = move || {
         unified.set(true);
+        drafts_open.set(false);
         acct_menu.set(false);
         selected_folder.set(None);
         open.set(None);
@@ -590,6 +597,7 @@ pub fn App() -> impl IntoView {
     // account switching
     let switch_account = move |aid: i64| {
         unified.set(false); // picking a specific account leaves the merged view
+        drafts_open.set(false); // and leaves the drafts view (drafts are per-account)
         acct_menu.set(false);
         account.set(Some(aid));
         leptos::task::spawn_local(async move {
@@ -771,6 +779,7 @@ pub fn App() -> impl IntoView {
         cc_suggest.set(Vec::new());
         attach_paths.set(Vec::new());
         md_on.set(false); // each new draft starts as plain text
+        current_draft_id.set(None); // a fresh compose isn't tied to a saved draft yet
     };
     // Open the native file picker and add the chosen files to the draft.
     let attach_files = move || {
@@ -828,6 +837,7 @@ pub fn App() -> impl IntoView {
         sending.set(true);
         let atts = attach_paths.get_untracked();
         let markdown = md_on.get_untracked();
+        let draft_id = current_draft_id.get_untracked(); // if resumed, run_send deletes it after send
         leptos::task::spawn_local(async move {
             match api::send_message(
                 aid,
@@ -839,18 +849,111 @@ pub fn App() -> impl IntoView {
                 d.references,
                 atts,
                 markdown,
+                draft_id,
             )
             .await
             {
                 Ok(()) => {
                     compose.set(None);
                     reset_recipient_inputs();
+                    // The sent draft (if any) is gone server-side; drop its row from the open list.
+                    if let Some(id) = draft_id {
+                        drafts.update(|l| l.retain(|d| d.id != id));
+                    }
                     commit_pending(); // resolve any queued move before this confirmation toast
                     toast.set(Some("Sent".into()));
                 }
                 Err(e) => error.set(Some(e)),
             }
             sending.set(false);
+        });
+    };
+
+    // Load the account's saved drafts into the list pane (the "Drafts" rail entry).
+    let open_drafts = move || {
+        unified.set(false);
+        drafts_open.set(true);
+        selected_folder.set(None);
+        open.set(None);
+        search_open.set(false);
+        query.set(String::new());
+        acct_menu.set(false);
+        let Some(aid) = account.get() else {
+            drafts.set(Vec::new());
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            match api::list_drafts(aid).await {
+                Ok(list) => drafts.set(list),
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
+    // Save the current compose form as a draft (new or updating the one being edited), then close.
+    let save_current_draft = move || {
+        let (Some(aid), Some(mut d)) = (account.get(), compose.get()) else {
+            return;
+        };
+        // Fold any half-typed recipient text into the draft so nothing typed is lost on save.
+        d.to = merge_addrs(&d.to, &to_input.get_untracked());
+        d.cc = merge_addrs(&d.cc, &cc_input.get_untracked());
+        let existing = current_draft_id.get_untracked();
+        // A completely empty compose (nothing typed) isn't worth a draft row — just close it. A draft
+        // being *edited* still saves, so clearing its fields and saving records the (now empty) update.
+        let blank = d.to.trim().is_empty()
+            && d.cc.trim().is_empty()
+            && d.subject.trim().is_empty()
+            && d.body.trim().is_empty();
+        if blank && existing.is_none() {
+            compose.set(None);
+            reset_recipient_inputs();
+            return;
+        }
+        compose.set(None);
+        reset_recipient_inputs();
+        let showing_drafts = drafts_open.get_untracked();
+        leptos::task::spawn_local(async move {
+            match api::save_draft(aid, existing, d).await {
+                Ok(_) => {
+                    toast.set(Some("Draft saved".into()));
+                    // Keep the drafts list current if it's the pane on screen.
+                    if showing_drafts {
+                        if let Ok(list) = api::list_drafts(aid).await {
+                            drafts.set(list);
+                        }
+                    }
+                }
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
+    // Reopen a saved draft in the composer, tied to its id so edits update the same row.
+    let resume_draft = move |id: i64| {
+        leptos::task::spawn_local(async move {
+            match api::load_draft(id).await {
+                Ok(Some(d)) => {
+                    reset_recipient_inputs();
+                    compose.set(Some(d));
+                    current_draft_id.set(Some(id));
+                }
+                Ok(None) => {
+                    // Already gone (e.g. sent elsewhere) — drop the stale row.
+                    drafts.update(|l| l.retain(|d| d.id != id));
+                }
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
+    // Delete a saved draft from the list (its own row affordance).
+    let remove_draft = move |id: i64| {
+        drafts.update(|l| l.retain(|d| d.id != id));
+        leptos::task::spawn_local(async move {
+            if let Err(e) = api::delete_draft(id).await {
+                error.set(Some(e));
+            }
         });
     };
 
@@ -1005,6 +1108,9 @@ pub fn App() -> impl IntoView {
                     TrashAsk::Empty
                 }));
             }
+            if api::dev_drafts().await.unwrap_or(false) {
+                open_drafts();
+            }
         });
         true
     });
@@ -1152,6 +1258,9 @@ pub fn App() -> impl IntoView {
     // rank order, not date order), then emitted as a flat header/message stream for a single keyed
     // `<For>`. Keys are unique and stable: `h:<label>` for a header, `m:<id>` for a message.
     let rows = move || {
+        if drafts_open.get() {
+            return Vec::new(); // the drafts pane renders its own rows
+        }
         let hidden = pending.get().map(|p| p.id);
         let mut buckets: [(&'static str, Vec<Message>); 3] = [
             ("Today", Vec::new()),
@@ -1278,6 +1387,12 @@ pub fn App() -> impl IntoView {
                                 }
                             }
                         </For>
+                        <button class="folder" class:active=move || drafts_open.get()
+                            on:click=move |_| open_drafts()>
+                            <span class="guide"></span>
+                            <span class="fic">{icon(icons::DRAFTS)}</span>
+                            "Drafts"
+                        </button>
                     </Show>
                     <div class="rail-fill"></div>
                     <button class="rail-tool" on:click=move |_| toggle_theme()>
@@ -1291,8 +1406,12 @@ pub fn App() -> impl IntoView {
             // ============ LIST ============
             <div class="list-col">
                 <div class="list-head">
-                    <div class="list-title">{move || if unified.get() { "All inboxes".to_string() } else { folders.get().into_iter().find(|f| selected_folder.get() == Some(f.id)).map(|f| f.name).unwrap_or_default() }}</div>
+                    <div class="list-title">{move || if drafts_open.get() { "Drafts".to_string() } else if unified.get() { "All inboxes".to_string() } else { folders.get().into_iter().find(|f| selected_folder.get() == Some(f.id)).map(|f| f.name).unwrap_or_default() }}</div>
                     <div class="list-sub">{move || {
+                        if drafts_open.get() {
+                            let n = drafts.get().len();
+                            return if n > 0 { format!("{n} saved") } else { String::new() };
+                        }
                         let n = messages.get().iter().filter(|m| is_unread(m.id, m.seen, read_now, marked_unread)).count();
                         if n > 0 { format!("{n} unread") } else { String::new() }
                     }}</div>
@@ -1300,8 +1419,10 @@ pub fn App() -> impl IntoView {
                         <Show when=in_trash>
                             <span class="icon-btn danger" title="Empty Trash" on:click=move |_| trash_ask.set(Some(TrashAsk::Empty))>{icon(icons::TRASH)}</span>
                         </Show>
-                        <span class="icon-btn" class:on=move || search_open.get() title="Search" on:click=move |_| search_open.update(|o| *o = !*o)>{icon(icons::SEARCH)}</span>
-                        <span class="icon-btn" title="Refresh" on:click=move |_| do_refresh()>{icon(icons::REFRESH)}</span>
+                        <Show when=move || !drafts_open.get()>
+                            <span class="icon-btn" class:on=move || search_open.get() title="Search" on:click=move |_| search_open.update(|o| *o = !*o)>{icon(icons::SEARCH)}</span>
+                            <span class="icon-btn" title="Refresh" on:click=move |_| do_refresh()>{icon(icons::REFRESH)}</span>
+                        </Show>
                     </div>
                 </div>
                 <Show when=move || refreshing.get() || catchup.get().is_some()>
@@ -1320,13 +1441,44 @@ pub fn App() -> impl IntoView {
                     </div>
                 </Show>
                 <div class="list-scroll">
-                    <Show when=move || loaded.get() && messages.get().is_empty() && error.get().is_none()>
+                    <Show when=move || !drafts_open.get() && loaded.get() && messages.get().is_empty() && error.get().is_none()>
                         <div class="list-empty">
                             <Show when=move || account.get().is_none() fallback=|| view! { <div class="big">"✓"</div><div class="msg">"Nothing here."</div> }>
                                 <div class="msg">"No account yet."</div>
                                 <button class="btn-primary add" on:click=move |_| open_wizard()>"Add account"</button>
                             </Show>
                         </div>
+                    </Show>
+                    <Show when=move || drafts_open.get() && drafts.get().is_empty()>
+                        <div class="list-empty">
+                            <div class="msg">"No saved drafts."</div>
+                        </div>
+                    </Show>
+                    <Show when=move || drafts_open.get()>
+                        <For each=move || drafts.get() key=|d| (d.id, d.updated_at) let:d>
+                            {
+                                let id = d.id;
+                                let subject = if d.subject.trim().is_empty() { "(no subject)".to_owned() } else { d.subject.clone() };
+                                let to = if d.to.trim().is_empty() { "(no recipient)".to_owned() } else { d.to.clone() };
+                                let snippet = elide(&d.snippet, 84);
+                                let saved = local_date(Some(d.updated_at));
+                                view! {
+                                    <div class="row draft" on:click=move |_| resume_draft(id)>
+                                        <span class="guide"></span>
+                                        <div class="row-top">
+                                            <span class="sender">{to}</span>
+                                            <span class="draftdel" title="Delete draft"
+                                                on:click=move |e| { e.stop_propagation(); remove_draft(id); }>
+                                                {icon(icons::TRASH)}
+                                            </span>
+                                            <span class="time">{saved}</span>
+                                        </div>
+                                        <div class="subj">{subject}</div>
+                                        <div class="prev">{snippet}</div>
+                                    </div>
+                                }
+                            }
+                        </For>
                     </Show>
                     <For
                         each=rows
@@ -1514,7 +1666,10 @@ pub fn App() -> impl IntoView {
                                 on:click=move |_| md_on.update(|m| *m = !*m)>
                                 {icon(icons::MARKDOWN)} "Markdown"
                             </button>
-                            <span class="draft-status">"Draft"</span>
+                            <button class="foot-save" title="Save as a draft to finish later"
+                                on:click=move |_| save_current_draft()>
+                                {icon(icons::DRAFTS)} "Save draft"
+                            </button>
                         </div>
                     </div>
                 </div>
