@@ -100,6 +100,26 @@ struct FolderArgs {
     limit: i64,
 }
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateFolderArgs {
+    account_id: i64,
+    name: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameFolderArgs {
+    account_id: i64,
+    from: String,
+    to: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteFolderArgs {
+    account_id: i64,
+    folder_id: i64,
+    name: String,
+}
+#[derive(Serialize)]
 struct LimitArgs {
     limit: i64,
 }
@@ -327,6 +347,37 @@ pub async fn empty_trash(account_id: i64) -> Result<(), String> {
 /// Permanently delete a single message that's already in Trash. Irreversible.
 pub async fn delete_forever(id: i64) -> Result<(), String> {
     call("delete_forever", &IdArgs { id }).await
+}
+
+/// Create a folder on the server + locally; returns the new folder id.
+pub async fn create_folder(account_id: i64, name: String) -> Result<i64, String> {
+    call("create_folder", &CreateFolderArgs { account_id, name }).await
+}
+
+/// Rename a folder (server + local, keeping its messages).
+pub async fn rename_folder(account_id: i64, from: String, to: String) -> Result<(), String> {
+    call(
+        "rename_folder",
+        &RenameFolderArgs {
+            account_id,
+            from,
+            to,
+        },
+    )
+    .await
+}
+
+/// Delete a folder (server + local, with its messages). Irreversible.
+pub async fn delete_folder(account_id: i64, folder_id: i64, name: String) -> Result<(), String> {
+    call(
+        "delete_folder",
+        &DeleteFolderArgs {
+            account_id,
+            folder_id,
+            name,
+        },
+    )
+    .await
 }
 
 /// Search every account's mail at once (for the merged "All inboxes" view), tagged with account.
@@ -600,6 +651,11 @@ pub async fn dev_drafts() -> Result<bool, String> {
 /// Dev/test seam — see `geleit-app::ipc::dev_select`. Always `None` in a release build.
 pub async fn dev_select() -> Result<Option<String>, String> {
     call("dev_select", &NoArgs {}).await
+}
+
+/// Dev/test seam — see `geleit-app::ipc::dev_folder`. Always `None` in a release build.
+pub async fn dev_folder() -> Result<Option<String>, String> {
+    call("dev_folder", &NoArgs {}).await
 }
 
 /// Dev/test seam — see `geleit-app::ipc::dev_setup`. Always `false` in a release build.

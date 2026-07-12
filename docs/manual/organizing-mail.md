@@ -19,6 +19,19 @@ stay in the same place no matter how long the subject is:
 - **Spam** — from the **Move…** menu, send a message to your Junk folder (or move it back to Inbox).
 - **Mark as unread** — bring back the unread dot.
 
+## Managing folders
+
+You can make your own folders to sort your mail. At the bottom of the folder list:
+
+- **New folder** — choose it, type a name, and choose **Create**. GeleitMail makes the folder on your
+  provider and shows it in the list. Move messages into it with **Move…**.
+- **Rename** or **Delete** — hover a folder you created and choose the **⋯** button. **Rename** lets
+  you give it a new name (its messages come along). **Delete** removes the folder — and, after you
+  confirm, **all the messages in it** — from your provider and this device; this can't be undone.
+
+Your standard folders — Inbox, Sent, Drafts, Archive, Trash, Junk, and Saved — are kept as they are,
+so they don't show the rename or delete options.
+
 ## Emptying the Trash
 
 Mail you delete goes to **Trash**, where it stays until you clear it.

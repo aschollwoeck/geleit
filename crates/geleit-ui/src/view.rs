@@ -133,6 +133,30 @@ pub fn rank_suggestions(candidates: &[String], already: &[String], limit: usize)
         .collect()
 }
 
+/// Whether a folder is a well-known special folder that can't be renamed or deleted (ORG-6) — used to
+/// hide the Rename/Delete affordances. Mirror of `geleit-app::dto::is_protected_folder` (the two
+/// crates can't share code); the IPC command re-checks the authoritative copy.
+#[must_use]
+pub fn is_protected_folder(name: &str) -> bool {
+    matches!(
+        name.trim().to_lowercase().as_str(),
+        "inbox"
+            | "sent"
+            | "sent items"
+            | "sent mail"
+            | "drafts"
+            | "draft"
+            | "archive"
+            | "trash"
+            | "deleted"
+            | "deleted items"
+            | "bin"
+            | "spam"
+            | "junk"
+            | "saved"
+    )
+}
+
 /// Whether every id in `ids` is present in the selection `set` — the state of a "select all" box
 /// over the currently-listed messages. Empty `ids` is not "all selected" (nothing to select). Pure.
 #[must_use]
@@ -169,6 +193,15 @@ mod tests {
             split_addrs(" a@x.com , b@y.com ;c@z.com,"),
             ["a@x.com", "b@y.com", "c@z.com"]
         );
+    }
+
+    #[test]
+    fn is_protected_folder_guards_special_but_not_user_folders() {
+        assert!(is_protected_folder("Inbox"));
+        assert!(is_protected_folder("trash"));
+        assert!(is_protected_folder(" Saved "));
+        assert!(!is_protected_folder("Work"));
+        assert!(!is_protected_folder("Receipts"));
     }
 
     #[test]

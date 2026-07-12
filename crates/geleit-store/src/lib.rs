@@ -1404,6 +1404,29 @@ impl Store {
             .execute("DELETE FROM message WHERE folder_id = ?1", [folder_id])?)
     }
 
+    /// Rename a folder in place (ORG-6). Keeps the same `folder_id`, so the folder's messages stay
+    /// attached (a delete-and-re-list would cascade them away). Returns how many rows changed (0 if
+    /// no folder by that name).
+    pub fn rename_folder(
+        &self,
+        account_id: i64,
+        from: &str,
+        to: &str,
+    ) -> Result<usize, StoreError> {
+        Ok(self.conn.execute(
+            "UPDATE folder SET name = ?3 WHERE account_id = ?1 AND name = ?2",
+            (account_id, from, to),
+        )?)
+    }
+
+    /// Delete a folder row and, by `ON DELETE CASCADE`, all of its messages/bodies/attachments
+    /// (ORG-6). For the local half of a server folder delete.
+    pub fn delete_folder(&self, folder_id: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM folder WHERE id = ?1", [folder_id])?;
+        Ok(())
+    }
+
     /// The stored body for a message, or `None` if no body is stored yet.
     pub fn body_for(&self, message_id: i64) -> Result<Option<StoredBody>, StoreError> {
         Ok(self
@@ -1722,6 +1745,56 @@ mod tests {
         assert_eq!(s.delete_folder_messages(trash).unwrap(), 3);
         assert_eq!(s.messages_in_folder(trash, 50).unwrap().len(), 0);
         assert_eq!(s.messages_in_folder(inbox, 50).unwrap().len(), 1); // untouched
+    }
+
+    #[test]
+    fn rename_folder_keeps_the_id_so_messages_survive() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@x.com", None).unwrap();
+        let work = s.upsert_folder(acc, "Work").unwrap();
+        s.upsert_message(
+            acc,
+            work,
+            &NewMessage {
+                uid: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(s.rename_folder(acc, "Work", "Projects").unwrap(), 1);
+        // Same id, new name, message still attached.
+        let folders = s.folders_for_account(acc).unwrap();
+        let f = folders.iter().find(|f| f.id == work).expect("same row");
+        assert_eq!(f.name, "Projects");
+        assert_eq!(s.messages_in_folder(work, 50).unwrap().len(), 1);
+        // Renaming a name that doesn't exist changes nothing.
+        assert_eq!(s.rename_folder(acc, "Nope", "X").unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_folder_removes_the_row_and_cascades_its_messages() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@x.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let work = s.upsert_folder(acc, "Work").unwrap();
+        for uid in 1..=2 {
+            s.upsert_message(
+                acc,
+                work,
+                &NewMessage {
+                    uid: Some(uid),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        s.delete_folder(work).unwrap();
+        let folders = s.folders_for_account(acc).unwrap();
+        assert!(folders.iter().all(|f| f.id != work), "row gone");
+        assert!(folders.iter().any(|f| f.id == inbox), "inbox kept");
+        // The messages cascaded away with the folder.
+        assert_eq!(s.messages_in_folder(work, 50).unwrap().len(), 0);
     }
 
     #[test]

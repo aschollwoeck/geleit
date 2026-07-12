@@ -228,6 +228,19 @@ callback threading). Notable models:
   helpers in `dto.rs`; `extract_attachment` is unit-tested in `mime.rs` and the fetch path has a live
   `#[ignore]` Dovecot test (`live_fetch_raw_and_extract_attachment`). This is the one slice with a new
   network path — everything else reuses stored data.
+- **Folder management** (ORG-6) — the IMAP primitives (`imap::create_folder`/`rename_folder`/
+  `delete_folder`) already existed; this wires them up. `create_folder`/`rename_folder`/`delete_folder`
+  IPC commands run the server op on a worker (`run_*_folder`), then update the local store: create →
+  `upsert_folder`, **rename → `store::rename_folder` (an in-place `UPDATE`, so `folder_id` is stable
+  and the folder's messages stay attached** — a delete+re-list would cascade them away), delete →
+  `store::delete_folder` (the row's `ON DELETE CASCADE` removes its messages/bodies/attachments).
+  Protected folders (Inbox, the role folders, local `Saved`/`Drafts`) are gated by the pure
+  `is_protected_folder` — mirrored in `view.rs` (hides the rail's Rename/Delete affordances) and
+  `dto.rs` (the IPC re-checks the authoritative copy, so a protected rename/delete is refused even if
+  the UI is bypassed). `validate_folder_name` (pure) trims + rejects blank/slashed names. The rail
+  gains a "+ New folder" button and a per-folder ⋯ menu; delete goes through a danger-confirm dialog.
+  Store `rename_folder`/`delete_folder` are unit-tested; the create/rename/delete round-trip has a live
+  `#[ignore]` Dovecot test (`live_create_rename_delete_folder`). `GELEIT_FOLDER=new|menu` is a seam.
 - **Multi-select bulk actions** (ORG-7) — pure UI reusing the per-message commands, no new IPC. A
   `selected: HashSet<i64>` (mirrors `read_now`/`marked_unread`) drives a hover-revealed per-row
   checkbox and a bulk bar (Archive / Delete / Mark unread / Clear + a select-all box backed by the pure
@@ -267,6 +280,7 @@ isn't registered at all and the env var is never read:
 | `GELEIT_TO=<text>` | with `GELEIT_COMPOSE=new`, pre-fills the To input (surfaces the autocomplete dropdown) |
 | `GELEIT_DRAFTS=1` | the saved-Drafts list |
 | `GELEIT_SELECT=<id,id,…>` | pre-selects those message rows (surfaces the bulk-action bar) |
+| `GELEIT_FOLDER=new\|menu` | the New-folder dialog, or the first user folder's ⋯ (Rename/Delete) menu |
 | `GELEIT_UNIFIED=1` | the merged "All inboxes" view |
 | `GELEIT_SETUP=1` | the add-account wizard |
 | `GELEIT_SETTINGS=1` | the Settings window |
