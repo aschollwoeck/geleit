@@ -40,6 +40,32 @@ jobs:
       - name: Boundary (engine must not depend on UI)
         run: ./scripts/check-boundary.sh
 
+  perf-budget:
+    # Enforce the constitution P4 performance ceilings (M9, ADR-0012). Binary size is a HARD gate here.
+    # Cold start + idle RSS are measured too, but WebKitGTK's first paint is unreliable on a headless
+    # X server, so PERF_BUDGET_SOFT_DISPLAY=1 makes "couldn't reach first paint" a warning rather than a
+    # failure — while a *measured* cold-start/RSS breach still fails. The hard enforcement of those two
+    # is the release perf gate (scripts/perf-budget.sh on a real display, before tagging).
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Webview + GTK + xvfb
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev xvfb
+      - name: Install wasm-bindgen-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.125
+      - name: Build release (wasm + app)
+        run: ./scripts/build-ui.sh --release && cargo build --release -p geleit-app
+      - name: Perf budget (P4 ceilings)
+        run: PERF_BUDGET_SOFT_DISPLAY=1 xvfb-run -a --server-args="-screen 0 1400x1000x24" ./scripts/perf-budget.sh
+
   supply-chain:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest

@@ -148,6 +148,14 @@ fn main() {
                 // cannot be correlated across sessions.
                 .incognito(true)
                 .on_navigation(allow_navigation)
+                // Perf-budget harness (S9.8): when GELEIT_PERF=1, print a marker the moment the page
+                // loads, so the CI cold-start check can time exec→first-paint without a window
+                // manager (works headless under xvfb). No effect otherwise.
+                .on_page_load(|_win, _payload| {
+                    if std::env::var_os("GELEIT_PERF").is_some() {
+                        println!("GELEIT_READY");
+                    }
+                })
                 .build()?;
             Ok(())
         })
