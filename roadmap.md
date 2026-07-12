@@ -203,7 +203,7 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 
 ---
 
-## M9 — UI rebuild on Tauri + Leptos 🔨 IN PROGRESS
+## M9 — UI rebuild on Tauri + Leptos ✅ COMPLETE
 **Why:** the reading pane *is* the product, and **no Rust-native path renders real mail correctly.**
 Both attempts failed on their merits — the embedded webview crashed on X11 (ADR-0001) and the
 pure-Rust CPU renderer (Blitz, ADR-0011) could not render real mail. M9 moves the shell to the OS
@@ -215,8 +215,14 @@ Required **amending constitution P4**. Decision + evidence: **[ADR-0012]**,
 `remoteimg.rs`, `ureq`, Slint, and the Blitz stack. **`core`/`platform`/`store`/`engine` (6,069
 lines) are untouched** — only `geleit-app` is rewritten.
 
-**Costs (accepted, capped in CI by P4):** cold start ~275 ms → ~1000 ms (WebKit boot; ~630 ms of it
-before our code runs), idle RSS ~60 MB → ~150–250 MB.
+**Costs (accepted, measured on the release build):** cold start ~275 ms → ~850 ms first paint (WebKit
+boot; most of it before our code runs), idle RSS ~60 MB → ~135 MB (PSS). Both well under the P4
+ceilings, which are enforced by `scripts/perf-budget.sh` (S9.8).
+
+**Outcome:** all 8 slices merged (PRs #107–#114). The UI is fully Tauri + Leptos; Slint and Blitz
+are gone; mail renders correctly (re-verified with the real `.eml`) with **zero workarounds**; the
+app has **no HTTP client at all**; and P4's lean budgets are machine-checked. Every slice was
+code-reviewed and each review caught ≥3 real bugs that CI-green had missed.
 
 - **S9.1** — Tauri shell + Leptos scaffold: window, skeleton paint, IPC seam to the engine, folder
   rail / list / reading-pane chrome. Nothing renders mail yet; proves the app boots and talks to
