@@ -23,11 +23,16 @@
 - [x] Gates: fmt, clippy `-D warnings`, tests, `cargo deny`, boundary, mutants.
 - [x] Real-mail render re-check (gitignored `.eml`) in the sandboxed iframe.
 
-## Deferred (see plan.md "Deltas")
+## Deferred — since delivered as follow-up slices (PRs #118–#122)
 
-- [ ] To/Cc recipient chips.
-- [ ] Toast **Undo** for a committed archive/delete (needs restore-to-folder).
-- [ ] `j`/`k` list navigation; `z` undo.
-- [ ] Compose attach / "Aa" / discard buttons.
-- [ ] True unified "All accounts" inbox (backend cross-account query).
-- [ ] Real OAuth (M7).
+- [x] `j`/`k` list navigation + `z` undo, and a deferred-commit **Undo** for archive/delete (#118).
+- [x] To/Cc recipient chips + a Discard button (#119).
+- [x] "Mark as read when opened" actually enforced (#120).
+- [x] Compose attachments (native file picker) (#121).
+- [x] Unified "All inboxes" view — cross-account merged inbox + search (#122).
+
+## Still deferred
+
+- [ ] Real OAuth (one-click Google/Microsoft) — **blocked**: needs real provider app credentials and
+      a live test account (a maintainer step). The wizard shows the tier honestly and routes to manual
+      / app-password setup meanwhile.
