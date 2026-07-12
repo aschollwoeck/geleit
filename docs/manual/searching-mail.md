@@ -5,7 +5,8 @@ See also: [organizing](organizing-mail.md) · [accounts](accounts.md).
 Choose the **magnifier** at the top of the message list to open the **search box**, and type. Results
 appear as you type — instantly, and **offline**: GeleitMail searches a private index kept on your own
 device (inside the encrypted database), so it never sends your search anywhere. Each result shows a
-snippet of the matching text so you can see *why* it matched. Clear the box to return to your folder.
+snippet of the matching text so you can see *why* it matched. Clear the box, or press **`Esc`**, to
+return to your folder.
 
 ![Searching for "report": the search box shows a result count and the matching message.](images/search.png)
 

@@ -32,6 +32,10 @@ pub const FORWARD: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fil
 pub const MOVE: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M2.5 4.5a1 1 0 0 1 1-1h3l1.5 1.5h4.5a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-7.5Z" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/></svg>"#;
 pub const TRASH: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M3 4.5h10M6.5 4.5V3.5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1M4.5 4.5 5 12.5a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1l.5-8" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 pub const UNREAD: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M2.5 4.5h11a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.5"/><path d="m2.5 5.5 5.5 4 5.5-4" stroke="currentColor" stroke-width="1.5"/></svg>"#;
+/// Outline star (not flagged).
+pub const STAR: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 1.6l1.86 3.77 4.16.6-3.01 2.94.71 4.14L8 11.2 4.28 13.05l.71-4.14L1.98 5.97l4.16-.6L8 1.6Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>"#;
+/// Filled star (flagged).
+pub const STAR_FILLED: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.6l1.86 3.77 4.16.6-3.01 2.94.71 4.14L8 11.2 4.28 13.05l.71-4.14L1.98 5.97l4.16-.6L8 1.6Z"/></svg>"#;
 
 /// Folder icons keyed by a role/name; unknown folders get the generic folder glyph.
 pub fn folder_icon(name: &str) -> &'static str {

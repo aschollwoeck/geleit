@@ -10,6 +10,8 @@ hiccup happens, the change simply reconciles on the next refresh — nothing is 
 The action buttons sit **across the top of the reading area**, above the sender and subject, so they
 stay in the same place no matter how long the subject is:
 
+- **Star** — flag a message you want to find again; the button fills in gold and the message shows a
+  gold **★** on its list row. Choose it again to unstar.
 - **Archive** — move it out of the inbox into your Archive folder.
 - **Delete** — move it to Trash.
 - **Move…** — pick a folder to move the message into.

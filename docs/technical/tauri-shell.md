@@ -168,6 +168,11 @@ callback threading). Notable models:
 - **Read/unread** is tracked in two small session sets (`read_now`, `marked_unread`) rather than by
   mutating the list, so a toggle doesn't clone it. `open_message(mark_read)` gates whether opening
   persists the seen flag, honouring the General setting.
+- **Star** toggles `Message.flagged` (optimistic local flip + the existing `set_star` server
+  write-back). The list-row ★ reads the flag from the loaded list; the reading-pane button uses an
+  `open_flagged` state captured when the message opens, so it stays correct even after the message
+  leaves the list (e.g. clearing a search) — the body DTO doesn't carry the flag. **Esc** closes the
+  search box.
 - **Compose** — To/Cc are removable chips (`split_addrs`/`merge_addrs`, case-insensitive dedup at both
   chip-commit and send); attachments come from a native picker (`pick_files` shells out to
   zenity/kdialog — deliberately not an in-process GTK dialog, which would clash with the webview loop)
