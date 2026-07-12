@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.1.1 — Tauri + Leptos rebuild & the "Soft daylight" design — 2026-07-12
+
+The reading pane *is* the product, and no Rust-native path rendered real mail correctly — so the UI
+was rebuilt on **Tauri (OS webview) + Leptos** (Rust→WASM), replacing Slint (ADR-0012). HTML mail now
+renders faithfully in a sandboxed `mail://` iframe (no scripts, no same-origin, CSP) with **zero**
+of the old rendering workarounds. Still Rust end to end, still no HTTP client, still no telemetry.
+
+### Design
+- A complete **"Soft daylight"** visual overhaul: quiet, rounded, roomy; a 3px accent guide edge on
+  whatever has attention; deep-indigo primary action; Hanken Grotesk + IBM Plex Mono bundled locally
+  (never fetched at runtime). Light + dark throughout.
+
+### Reading & organizing
+- **Undo** for archive / delete / spam — the move is deferred through the toast window, so Undo is a
+  pure local cancel that can't lose mail.
+- **Keyboard navigation:** `j`/`k` (or ↑/↓) move through the list; `z` undoes.
+- "Mark as read when opened" (General settings) is now actually honored.
+- Reading-pane action buttons are pinned above the sender and subject, so they don't shift as the
+  subject wraps.
+
+### Accounts
+- A merged **"All inboxes"** view — every account's inbox in one date-sorted list, each row tagged
+  with its account; search and refresh span all accounts.
+- Account switcher, add-account wizard, and remove-account in the new UI.
+
+### Composing
+- Recipient **chips** for To/Cc (de-duplicated), a Discard button, and file **attachments** via the
+  native picker.
+
+### Notes
+- First release built on the new stack; sign-in is still manual IMAP/SMTP (one-click OAuth is planned).
+- Linux only. The release tarball now builds the WASM frontend before packaging.
+
 ## v0.1.0 — first release (Linux) — 2026-06-22
 
 GeleitMail's first releasable build: a native, local-first, privacy-first email client in Rust

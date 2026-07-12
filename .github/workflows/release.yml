@@ -20,9 +20,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.96.0
+          # The Leptos frontend compiles to WASM and is embedded in the Tauri app, so the release
+          # build needs the wasm target + the wasm-bindgen CLI (see build-ui.sh / package-linux.sh).
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Webview + GTK build deps
         run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwebkit2gtk-4.1-dev libgtk-3-dev
+      - name: Install wasm-bindgen-cli
+        uses: taiki-e/install-action@v2
+        with:
+          # MUST match the wasm-bindgen crate version in Cargo.lock; build-ui.sh enforces this.
+          tool: wasm-bindgen-cli@0.2.125
       - name: Package (Linux x86_64)
         run: ./packaging/package-linux.sh "${GITHUB_REF_NAME}"
       - name: Attach to the GitHub Release
