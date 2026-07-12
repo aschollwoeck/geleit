@@ -79,12 +79,39 @@ pub fn elide(text: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
+/// The list index to move to for keyboard navigation: from `current` (`None` = nothing selected),
+/// step by `delta` (+1 = next, -1 = previous) over `len` items. Clamps at both ends; from nothing, a
+/// forward step lands on the first item and a backward step on the last. `None` when the list is empty.
+#[must_use]
+pub fn nav_index(len: usize, current: Option<usize>, delta: i32) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match current {
+        Some(i) => (i as i32 + delta).clamp(0, len as i32 - 1) as usize,
+        None if delta >= 0 => 0,
+        None => len - 1,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// 2026-07-11T12:00:00Z (a Saturday).
     const NOW: i64 = 1_783_771_200;
+
+    #[test]
+    fn nav_index_steps_and_clamps() {
+        assert_eq!(nav_index(0, None, 1), None); // empty list
+        assert_eq!(nav_index(0, Some(0), -1), None);
+        assert_eq!(nav_index(5, None, 1), Some(0)); // from nothing: first going down
+        assert_eq!(nav_index(5, None, -1), Some(4)); // from nothing: last going up
+        assert_eq!(nav_index(5, Some(2), 1), Some(3)); // next
+        assert_eq!(nav_index(5, Some(2), -1), Some(1)); // previous
+        assert_eq!(nav_index(5, Some(4), 1), Some(4)); // clamp at the bottom
+        assert_eq!(nav_index(5, Some(0), -1), Some(0)); // clamp at the top
+    }
 
     #[test]
     fn today_shows_the_time_of_day() {

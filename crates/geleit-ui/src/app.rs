@@ -18,6 +18,15 @@ enum ListRow {
     Msg(Message),
 }
 
+/// A move (archive / delete / spam) that has been requested but not yet committed to the server —
+/// the message is hidden from the list and an "Undo" toast is shown; the server move only happens
+/// when the toast's window elapses, so Undo is a pure local cancel that can never lose mail.
+#[derive(Clone, Copy)]
+struct PendingMove {
+    id: i64,
+    role: &'static str,
+}
+
 /// Whether a row shows as unread, from the two session sets (see `read_now` / `marked_unread`).
 /// `was_seen` is the message's server state at load; an explicit "mark unread" overrides it.
 fn is_unread(
@@ -182,6 +191,10 @@ pub fn App() -> impl IntoView {
     let settings_tab = RwSignal::new("accounts".to_string());
     let confirm = RwSignal::new(Option::<(i64, String)>::None); // (account_id, email) to remove
     let toast = RwSignal::new(Option::<String>::None);
+    let pending = RwSignal::new(Option::<PendingMove>::None); // move awaiting its Undo window
+                                                              // Handle of the running toast/commit timer, so a newer toast or an Undo can cancel it.
+    #[cfg(target_arch = "wasm32")]
+    let toast_timer = RwSignal::new(Option::<i32>::None);
     let dark = RwSignal::new(document_is_dark());
     // settings-backed prefs
     let block_remote = RwSignal::new(true);
@@ -334,31 +347,98 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    // Archive / trash / spam the open message: remove it now, close the pane, move on the server, and
-    // show a toast. (Undo of a committed server move is a named follow-up — see the spec.)
+    // Commit the pending move to the server: drop the row locally and run the move. A server refusal
+    // or failure restores the row (nothing is ever lost). Clears the pending state + toast.
+    let commit_pending = move || {
+        let Some(pm) = pending.get_untracked() else {
+            return;
+        };
+        #[cfg(target_arch = "wasm32")]
+        if let Some(h) = toast_timer.get_untracked() {
+            if let Some(w) = web_sys::window() {
+                w.clear_timeout_with_handle(h);
+            }
+        }
+        let id = pm.id;
+        // Keep only the one row so a failed move re-inserts *it* — not a whole stale snapshot that
+        // could resurrect a message a concurrent (overlapping) commit has since removed.
+        let row = messages.get_untracked().into_iter().find(|m| m.id == id);
+        messages.update(|list| list.retain(|m| m.id != id));
+        pending.set(None);
+        toast.set(None);
+        leptos::task::spawn_local(async move {
+            let restore = move |msg: String| {
+                if let Some(m) = row {
+                    messages.update(|list| {
+                        if !list.iter().any(|x| x.id == id) {
+                            list.push(m);
+                        }
+                    });
+                }
+                error.set(Some(msg));
+            };
+            match api::move_to_role(id, pm.role).await {
+                Ok(true) => {}
+                Ok(false) => restore("This account has no folder for that.".to_owned()),
+                Err(e) => restore(e),
+            }
+        });
+    };
+
+    // Cancel a pending move within its window: the row simply reappears (it was only hidden, never
+    // touched on the server), so this can't lose mail.
+    let undo_pending = move || {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(h) = toast_timer.get_untracked() {
+            if let Some(w) = web_sys::window() {
+                w.clear_timeout_with_handle(h);
+            }
+        }
+        pending.set(None);
+        toast.set(None);
+    };
+
+    // Archive / trash / spam the open message. The move is *deferred*: the row is hidden and an Undo
+    // toast is shown; the server move only runs when the toast window elapses (see the auto-dismiss
+    // Effect), so Undo is a pure local cancel. Any earlier pending move is committed first.
     let move_open = move |role: &'static str, verb: &'static str| {
         let Some(id) = open.get().map(|b| b.id) else {
             return;
         };
-        let snapshot = messages.get_untracked();
-        messages.update(|list| list.retain(|m| m.id != id));
+        commit_pending(); // only one move can be pending at a time
         open.set(None);
         move_menu.set(false);
-        leptos::task::spawn_local(async move {
-            match api::move_to_role(id, role).await {
-                Ok(true) => {
-                    toast.set(Some(verb.to_owned()));
-                }
-                Ok(false) => {
-                    messages.set(snapshot);
-                    error.set(Some("This account has no folder for that.".to_owned()));
-                }
-                Err(e) => {
-                    messages.set(snapshot);
-                    error.set(Some(e));
-                }
-            }
-        });
+        pending.set(Some(PendingMove { id, role }));
+        toast.set(Some(verb.to_owned()));
+    };
+
+    // Keyboard list navigation (j/k / arrows): open the message `delta` steps from the current one,
+    // skipping the day headers. Hidden (pending-move) rows are excluded. Scrolls the row into view.
+    #[cfg(target_arch = "wasm32")]
+    let nav = move |delta: i32| {
+        let hidden = pending.get_untracked().map(|p| p.id);
+        let ids: Vec<i64> = messages
+            .get_untracked()
+            .iter()
+            .map(|m| m.id)
+            .filter(|id| Some(*id) != hidden)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let cur = open.get_untracked().map(|b| b.id);
+        let pos = cur.and_then(|c| ids.iter().position(|&x| x == c));
+        let Some(next) = crate::view::nav_index(ids.len(), pos, delta) else {
+            return;
+        };
+        let id = ids[next];
+        choose_message(id);
+        if let Some(el) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id(&format!("row-{id}")))
+        {
+            el.scroll_into_view_with_bool(false); // keep the row within the viewport
+        }
     };
 
     let run_search = move |q: String| {
@@ -448,6 +528,7 @@ pub fn App() -> impl IntoView {
                     account.set(Some(aid));
                     load_folders(aid, folders, selected_folder, messages, error, request).await;
                     loaded.set(true);
+                    commit_pending(); // resolve any queued move before this confirmation toast
                     toast.set(Some("Account added".into()));
                 }
                 Err(e) => error.set(Some(e)),
@@ -512,6 +593,7 @@ pub fn App() -> impl IntoView {
                             open.set(None);
                         }
                     }
+                    commit_pending(); // resolve any queued move before this confirmation toast
                     toast.set(Some("Account removed".into()));
                 }
                 Err(e) => error.set(Some(e)),
@@ -558,6 +640,7 @@ pub fn App() -> impl IntoView {
             {
                 Ok(()) => {
                     compose.set(None);
+                    commit_pending(); // resolve any queued move before this confirmation toast
                     toast.set(Some("Sent".into()));
                 }
                 Err(e) => error.set(Some(e)),
@@ -614,10 +697,9 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    // auto-dismiss the toast after ~4.5s, cancelling any previous timer so a fresh toast that
-    // replaces an older one still gets its full lifetime (rather than being cleared early).
-    #[cfg(target_arch = "wasm32")]
-    let toast_timer = RwSignal::new(Option::<i32>::None);
+    // Dismiss the toast after its window, cancelling any previous timer so a fresh toast that
+    // replaces an older one still gets its full lifetime. If a move is pending, the window elapsing
+    // is what *commits* it to the server (so the whole window is the Undo grace period).
     Effect::new(move |_| {
         if toast.get().is_some() {
             #[cfg(target_arch = "wasm32")]
@@ -626,10 +708,16 @@ pub fn App() -> impl IntoView {
                     if let Some(prev) = toast_timer.get_untracked() {
                         w.clear_timeout_with_handle(prev);
                     }
-                    let cb = wasm_bindgen::closure::Closure::once_into_js(move || toast.set(None));
+                    let cb = wasm_bindgen::closure::Closure::once_into_js(move || {
+                        if pending.get_untracked().is_some() {
+                            commit_pending();
+                        } else {
+                            toast.set(None);
+                        }
+                    });
                     if let Ok(id) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
                         cb.as_ref().unchecked_ref(),
-                        4500,
+                        5000,
                     ) {
                         toast_timer.set(Some(id));
                     }
@@ -704,6 +792,15 @@ pub fn App() -> impl IntoView {
                         search_open.set(true);
                         e.prevent_default();
                     }
+                    "j" | "ArrowDown" => {
+                        nav(1);
+                        e.prevent_default();
+                    }
+                    "k" | "ArrowUp" => {
+                        nav(-1);
+                        e.prevent_default();
+                    }
+                    "z" if pending.get_untracked().is_some() => undo_pending(),
                     "e" if open.get_untracked().is_some() => move_open("archive", "Archived"),
                     "#" if open.get_untracked().is_some() => move_open("trash", "Deleted"),
                     "r" if open.get_untracked().is_some() => compose_from_open("reply"),
@@ -760,12 +857,16 @@ pub fn App() -> impl IntoView {
     // rank order, not date order), then emitted as a flat header/message stream for a single keyed
     // `<For>`. Keys are unique and stable: `h:<label>` for a header, `m:<id>` for a message.
     let rows = move || {
+        let hidden = pending.get().map(|p| p.id);
         let mut buckets: [(&'static str, Vec<Message>); 3] = [
             ("Today", Vec::new()),
             ("Yesterday", Vec::new()),
             ("Earlier", Vec::new()),
         ];
         for m in messages.get() {
+            if Some(m.id) == hidden {
+                continue; // hidden during its Undo window
+            }
             let slot = match day_bucket(m.date) {
                 "Today" => 0,
                 "Yesterday" => 1,
@@ -931,6 +1032,7 @@ pub fn App() -> impl IntoView {
                                 let convo = m.thread_count;
                                 Either::Right(view! {
                                     <div class="row"
+                                        id=format!("row-{id}")
                                         class:unread=move || is_unread(id, was_seen, read_now, marked_unread)
                                         class:sel=move || open.get().is_some_and(|b| b.id == id)
                                         on:click=move |_| choose_message(id)>
@@ -1243,6 +1345,9 @@ pub fn App() -> impl IntoView {
                 <div class="toast" role="status">
                     {icon(icons::CHECK)}
                     {move || toast.get().unwrap_or_default()}
+                    <Show when=move || pending.get().is_some()>
+                        <a class="undo" on:click=move |_| undo_pending()>"Undo"</a>
+                    </Show>
                 </div>
             </Show>
         </div>
