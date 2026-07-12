@@ -56,6 +56,19 @@ fn main() {
         let snippet: String = body.chars().take(80).collect();
         s.store_body(id, Some(body), None, Some(&snippet), *attach)
             .unwrap();
+        // Give the attachment-flagged demo messages some attachment metadata so the reading pane's
+        // attachment list has something to show (bytes aren't stored — the real save fetches them).
+        if *attach {
+            s.store_attachments(
+                id,
+                &[geleit_store::Attachment {
+                    filename: Some(format!("attachment-{}.pdf", i + 1)),
+                    content_type: "application/pdf".to_owned(),
+                    size: 320_500 + (i as i64) * 12_000,
+                }],
+            )
+            .unwrap();
+        }
     }
     // An HTML newsletter with a LONG (wrapping) subject and a remote image — exercises the CPU HTML
     // renderer + the "remote content blocked" cue. Newest, so `GELEIT_SHOT=read` opens it.

@@ -42,13 +42,7 @@ pub(crate) fn parse_body(raw: &[u8]) -> ParsedBody {
         .attachments()
         .map(|part| Attachment {
             filename: part.attachment_name().map(str::to_owned),
-            content_type: part.content_type().map_or_else(
-                || "application/octet-stream".to_owned(),
-                |ct| match ct.subtype() {
-                    Some(sub) => format!("{}/{}", ct.ctype(), sub),
-                    None => ct.ctype().to_owned(),
-                },
-            ),
+            content_type: part_content_type(part),
             size: part.len() as u64,
         })
         .collect();
@@ -59,6 +53,37 @@ pub(crate) fn parse_body(raw: &[u8]) -> ParsedBody {
         has_attachments: !attachments.is_empty(),
         attachments,
     }
+}
+
+/// A part's `type/subtype` (e.g. `application/pdf`), defaulting to `application/octet-stream`.
+fn part_content_type(part: &mail_parser::MessagePart) -> String {
+    part.content_type().map_or_else(
+        || "application/octet-stream".to_owned(),
+        |ct| match ct.subtype() {
+            Some(sub) => format!("{}/{}", ct.ctype(), sub),
+            None => ct.ctype().to_owned(),
+        },
+    )
+}
+
+/// One attachment's actual bytes, pulled from a raw message by its position (0-based) among the
+/// attachments — the same order [`parse_body`] lists them, so a reading-pane index maps straight
+/// here. `None` if the message can't be parsed or has no attachment at that index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExtractedAttachment {
+    pub filename: Option<String>,
+    pub content_type: String,
+    pub data: Vec<u8>,
+}
+
+pub(crate) fn extract_attachment(raw: &[u8], index: usize) -> Option<ExtractedAttachment> {
+    let msg = MessageParser::default().parse(raw)?;
+    let part = msg.attachments().nth(index)?;
+    Some(ExtractedAttachment {
+        filename: part.attachment_name().map(str::to_owned),
+        content_type: part_content_type(part),
+        data: part.contents().to_vec(),
+    })
 }
 
 /// A short one-line preview: whitespace collapsed to single spaces, truncated to `max` characters.
@@ -107,6 +132,20 @@ attached file contents\r\n\
             .as_deref()
             .unwrap()
             .contains("Hello in plain text"));
+    }
+
+    #[test]
+    fn extract_attachment_returns_the_right_part_bytes() {
+        use super::extract_attachment;
+        // Index 0 is the message's single attachment: name + decoded bytes match the fixture.
+        let a = extract_attachment(MULTIPART, 0).expect("attachment 0");
+        assert_eq!(a.filename.as_deref(), Some("note.txt"));
+        assert_eq!(a.data, b"attached file contents");
+        assert!(a.content_type.starts_with("text/plain"));
+        // Out-of-range index → None (not a panic).
+        assert!(extract_attachment(MULTIPART, 1).is_none());
+        // Garbage input → None.
+        assert!(extract_attachment(b"not a message", 0).is_none());
     }
 
     #[test]

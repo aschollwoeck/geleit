@@ -74,6 +74,15 @@ pub struct MessageBody {
     pub is_html: bool,
     /// Remote content was blocked (PRIV-3) → show the cue + "Load images" (PRIV-2).
     pub has_remote: bool,
+    /// Attachments (name + human size); bytes are fetched on demand to save (READ-8).
+    pub attachments: Vec<Attachment>,
+}
+
+/// One attachment in the reading pane (mirrors `geleit-app::dto::AttachmentDto`).
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+pub struct Attachment {
+    pub name: String,
+    pub size: String,
 }
 
 // Tauri looks up command arguments by their **camelCase** names on the JS side, so the payload must
@@ -153,6 +162,12 @@ struct SaveDraftArgs {
     account_id: i64,
     draft_id: Option<i64>,
     draft: ComposeDraft,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveAttachmentArgs {
+    message_id: i64,
+    index: usize,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -449,6 +464,11 @@ pub async fn save_eml(id: i64) -> Result<bool, String> {
 /// if cancelled) so the caller can switch to Saved and open it.
 pub async fn open_eml_file(account_id: i64) -> Result<Option<i64>, String> {
     call("open_eml_file", &AccountArgs { account_id }).await
+}
+
+/// Save a message's `index`-th attachment to disk (fetched on demand). `Ok(false)` if cancelled.
+pub async fn save_attachment(message_id: i64, index: usize) -> Result<bool, String> {
+    call("save_attachment", &SaveAttachmentArgs { message_id, index }).await
 }
 
 /// Distinct past-sender addresses matching `prefix`, for To/Cc autocomplete. Empty for a blank prefix.

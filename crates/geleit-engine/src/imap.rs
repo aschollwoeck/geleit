@@ -321,6 +321,38 @@ pub async fn empty_folder(
     res
 }
 
+/// Fetch one message's full raw RFC 822 bytes by UID (READ-8, save an attachment on demand). Uses
+/// `BODY.PEEK[]` so the fetch doesn't set `\Seen`. `Ok(None)` if the message isn't there. The whole
+/// message is fetched (not a single part) — it reuses the sync path's plumbing and messages are
+/// already fetched whole at sync time, so there's no new per-part machinery to maintain.
+pub async fn fetch_raw_message(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    uid: u32,
+) -> Result<Option<Vec<u8>>, ImapError> {
+    let mut session = connect(config, secrets).await?;
+    session.select(folder).await?;
+    let result = fetch_first_body(&mut session, uid).await;
+    let _ = session.logout().await; // best-effort
+    result
+}
+
+/// The first `BODY[]` payload for a UID fetch (there's at most one), or `None`.
+async fn fetch_first_body(
+    session: &mut ImapSession,
+    uid: u32,
+) -> Result<Option<Vec<u8>>, ImapError> {
+    let mut fetches = session.uid_fetch(uid.to_string(), "(BODY.PEEK[])").await?;
+    while let Some(fetch) = fetches.next().await {
+        let fetch = fetch?;
+        if let Some(body) = fetch.body() {
+            return Ok(Some(body.to_vec()));
+        }
+    }
+    Ok(None)
+}
+
 /// Consume an IMAP response stream (e.g. STORE's FETCH replies) to completion, surfacing the first
 /// error. We don't need the per-message data, only that the command succeeded.
 async fn drain<S, T>(stream: Result<S, async_imap::error::Error>) -> Result<(), ImapError>
@@ -926,6 +958,59 @@ mod tests {
         assert!(m.has_attachments, "expected attachment flag");
         let body = store.body_for(m.id).unwrap().expect("body stored");
         assert!(body.plain.unwrap().contains("Body in plain text"));
+    }
+
+    /// Fetch a message's raw bytes on demand and extract an attachment (READ-8, save-to-disk path):
+    /// append a multipart message, fetch it whole by UID, and assert the attachment's decoded bytes.
+    /// Needs Dovecot + `--features dangerous-tls`.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn live_fetch_raw_and_extract_attachment() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let subject = "Geleit READ-8 attachment fetch";
+        let raw = format!(
+            "Subject: {subject}\r\nFrom: Tester <tester@example.com>\r\n\
+             MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"B\"\r\n\r\n\
+             --B\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSee attached.\r\n\
+             --B\r\nContent-Type: text/plain; name=\"report.txt\"\r\n\
+             Content-Disposition: attachment; filename=\"report.txt\"\r\n\r\n\
+             the attachment bytes\r\n--B--\r\n"
+        );
+        // Append and find its UID.
+        let uid = {
+            let mut session = connect(&cfg, &secrets).await.expect("connect");
+            session
+                .append("INBOX", None, None, raw.as_bytes())
+                .await
+                .expect("append");
+            session.select("INBOX").await.expect("select");
+            let uids = session
+                .uid_search(format!("SUBJECT \"{subject}\""))
+                .await
+                .expect("search");
+            let uid = *uids.iter().max().expect("a uid");
+            let _ = session.logout().await;
+            uid
+        };
+
+        // Fetch the whole raw message on demand, then extract attachment index 0.
+        let fetched = fetch_raw_message(&cfg, &secrets, "INBOX", uid)
+            .await
+            .expect("fetch")
+            .expect("a message body");
+        let att = crate::mime::extract_attachment(&fetched, 0).expect("attachment 0");
+        assert_eq!(att.filename.as_deref(), Some("report.txt"));
+        assert_eq!(att.data, b"the attachment bytes");
     }
 
     /// Incremental sync: a new message appears, a re-sync is idempotent (no dupes), and a message

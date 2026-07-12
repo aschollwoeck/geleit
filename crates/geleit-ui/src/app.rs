@@ -1026,6 +1026,17 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // Save one of the open message's attachments to disk (READ-8) — fetched on demand from the server.
+    let save_att = move |message_id: i64, index: usize| {
+        leptos::task::spawn_local(async move {
+            match api::save_attachment(message_id, index).await {
+                Ok(true) => toast.set(Some("Saved to disk".into())),
+                Ok(false) => {} // cancelled
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
     // Save the open message to disk as a .eml file (READ-10). No-op if nothing is open.
     let save_open_eml = move || {
         let Some(id) = open.get_untracked().map(|b| b.id) else {
@@ -1746,6 +1757,21 @@ pub fn App() -> impl IntoView {
                                         <a class="load" on:click=move |_| load_images.set(true)>"Load images"</a>
                                     </div>
                                 </Show>
+                                {
+                                    let atts = body.attachments.clone();
+                                    (!atts.is_empty()).then(|| view! {
+                                        <div class="attachments">
+                                            {atts.into_iter().enumerate().map(|(i, a)| view! {
+                                                <span class="att-chip">
+                                                    {icon(icons::CLIP)}
+                                                    <span class="att-name">{a.name}</span>
+                                                    <span class="att-size">{a.size}</span>
+                                                    <span class="att-save" title="Save to disk" on:click=move |_| save_att(id, i)>{icon(icons::DOWNLOAD)}</span>
+                                                </span>
+                                            }).collect_view()}
+                                        </div>
+                                    })
+                                }
                                 {if body.is_html {
                                     Either::Left(view! {
                                         <iframe class="mail" sandbox="allow-popups allow-popups-to-escape-sandbox"

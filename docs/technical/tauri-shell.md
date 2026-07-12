@@ -218,6 +218,16 @@ callback threading). Notable models:
   `store_body`, return the new id; the UI reloads folders, switches to **Saved**, and opens it. HTML
   can't be rendered ad-hoc (the reading pane serves HTML by store id over `mail://`), so an opened .eml
   becomes a real local row. `safe_filename_stem` is a pure, unit-tested helper in `dto.rs`.
+- **Attachments (view + save)** (READ-8) — the reading pane lists attachments (name + `human_size`)
+  from the stored metadata (`attachments_for`, populated at sync); `open_message`'s `MessageBodyDto`
+  now carries `attachments: Vec<AttachmentDto>` in parse order, so a chip's index is its save key. The
+  **bytes are not stored**, so **Save** fetches on demand: `save_attachment(message_id, index)` →
+  `run_fetch_attachment` → new `imap::fetch_raw_message` (whole message by UID via `BODY.PEEK[]`, so
+  no `\Seen`) → pure `mime::extract_attachment(raw, index)` → the existing `pick_save_path` + write.
+  `human_size` and `safe_attachment_filename` (path-traversal-safe default name) are pure, unit-tested
+  helpers in `dto.rs`; `extract_attachment` is unit-tested in `mime.rs` and the fetch path has a live
+  `#[ignore]` Dovecot test (`live_fetch_raw_and_extract_attachment`). This is the one slice with a new
+  network path — everything else reuses stored data.
 - **Multi-select bulk actions** (ORG-7) — pure UI reusing the per-message commands, no new IPC. A
   `selected: HashSet<i64>` (mirrors `read_now`/`marked_unread`) drives a hover-revealed per-row
   checkbox and a bulk bar (Archive / Delete / Mark unread / Clear + a select-all box backed by the pure
