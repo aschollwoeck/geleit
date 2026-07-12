@@ -279,6 +279,16 @@ pub async fn move_to_role(id: i64, role: &str) -> Result<bool, String> {
     .await
 }
 
+/// Empty the account's Trash — permanently, server + local. Irreversible.
+pub async fn empty_trash(account_id: i64) -> Result<(), String> {
+    call("empty_trash", &AccountArgs { account_id }).await
+}
+
+/// Permanently delete a single message that's already in Trash. Irreversible.
+pub async fn delete_forever(id: i64) -> Result<(), String> {
+    call("delete_forever", &IdArgs { id }).await
+}
+
 /// Search every account's mail at once (for the merged "All inboxes" view), tagged with account.
 pub async fn search_all(query: &str) -> Result<Vec<Message>, String> {
     call(
@@ -473,6 +483,11 @@ pub async fn dev_settings() -> Result<bool, String> {
 /// Dev/test seam — see `geleit-app::ipc::dev_search`. Always `None` in a release build.
 pub async fn dev_search() -> Result<Option<String>, String> {
     call("dev_search", &NoArgs {}).await
+}
+
+/// Dev/test seam — see `geleit-app::ipc::dev_trash`. Always `None` in a release build.
+pub async fn dev_trash() -> Result<Option<String>, String> {
+    call("dev_trash", &NoArgs {}).await
 }
 
 /// Dev/test seam — see `geleit-app::ipc::dev_setup`. Always `false` in a release build.

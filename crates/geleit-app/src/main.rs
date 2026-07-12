@@ -106,6 +106,8 @@ fn main() {
         ipc::set_star,
         ipc::set_unread,
         ipc::move_to_role,
+        ipc::empty_trash,
+        ipc::delete_forever,
         ipc::refresh,
         ipc::compose_draft,
         ipc::send_message,
@@ -127,6 +129,7 @@ fn main() {
         ipc::dev_setup,
         ipc::dev_settings,
         ipc::dev_search,
+        ipc::dev_trash,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -138,6 +141,8 @@ fn main() {
         ipc::set_star,
         ipc::set_unread,
         ipc::move_to_role,
+        ipc::empty_trash,
+        ipc::delete_forever,
         ipc::refresh,
         ipc::compose_draft,
         ipc::send_message,

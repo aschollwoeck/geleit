@@ -439,6 +439,81 @@ pub async fn move_to_role(
     Ok(true)
 }
 
+/// Empty the account's Trash (ORG-2): permanently delete everything in it, on the server and locally.
+/// Irreversible — the UI confirms first.
+#[tauri::command]
+pub async fn empty_trash(state: tauri::State<'_, AppState>, account_id: i64) -> Result<(), String> {
+    use crate::dto::{resolve_folder, FolderRole};
+    let st = state.inner().clone();
+    // Resolve the Trash folder (name for the server call, id for the local clear).
+    let trash = with_store(st.clone(), move |store| {
+        let folders = store
+            .folders_for_account(account_id)
+            .map_err(|_| "Couldn't read your folders.".to_owned())?;
+        let names: Vec<String> = folders.iter().map(|f| f.name.clone()).collect();
+        Ok(resolve_folder(&names, FolderRole::Trash).and_then(|name| {
+            folders
+                .iter()
+                .find(|f| f.name == name)
+                .map(|f| (name.to_owned(), f.id))
+        }))
+    })
+    .await?;
+    let Some((name, folder_id)) = trash else {
+        return Err("This account has no Trash folder.".to_owned());
+    };
+    // Empty on the server first (blocking); only then clear the local rows, so a failure keeps them.
+    let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_empty_folder(&db, &*secrets, account_id, &name)
+    })
+    .await
+    .map_err(|_| "The mailbox task stopped unexpectedly.".to_owned())??;
+    with_store(st, move |store| {
+        store
+            .delete_folder_messages(folder_id)
+            .map(|_| ())
+            .map_err(|_| "Couldn't clear the local Trash.".to_owned())
+    })
+    .await
+}
+
+/// Permanently delete a single message that is already in Trash (ORG-2). Irreversible — the UI
+/// confirms first. A message with no server location (local-only, or already expunged) skips the
+/// server step but is still removed locally.
+#[tauri::command]
+pub async fn delete_forever(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let st = state.inner().clone();
+    let plan = with_store(st.clone(), move |store| {
+        let loc = store
+            .message_location(id)
+            .map_err(|_| "Couldn't delete the message.".to_owned())?;
+        let acc = store
+            .account_for_message(id)
+            .map_err(|_| "Couldn't delete the message.".to_owned())?;
+        Ok(loc.zip(acc))
+    })
+    .await?;
+    // A message with no server location (local-only, or already expunged) still needs its local row
+    // removed — otherwise "Delete forever" reports success but the message reappears on the next sync.
+    if let Some(((folder, uid), account_id)) = plan {
+        let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+        tauri::async_runtime::spawn_blocking(move || {
+            geleit_engine::sync_actions::run_delete_permanently(
+                &db, &*secrets, account_id, &folder, uid as u32,
+            )
+        })
+        .await
+        .map_err(|_| "The mailbox task stopped unexpectedly.".to_owned())??;
+    }
+    with_store(st, move |store| {
+        store
+            .delete_message(id)
+            .map_err(|_| "Couldn't update the local mailbox.".to_owned())
+    })
+    .await
+}
+
 /// The account a message belongs to — read once inside a write-back (its own store connection).
 fn account_of(db: &str, secrets: &dyn SecretStore, id: i64) -> Result<i64, String> {
     let store = open_store(db, secrets)?;
@@ -849,6 +924,14 @@ pub async fn dev_settings() -> bool {
 #[tauri::command]
 pub async fn dev_search() -> Option<String> {
     std::env::var("GELEIT_SEARCH").ok()
+}
+
+/// Dev/test seam, debug builds only: `GELEIT_TRASH=empty|delete` opens the irreversible-delete confirm
+/// dialog on boot (there's no click injection for the danger dialogs otherwise). Never in release.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_trash() -> Option<String> {
+    std::env::var("GELEIT_TRASH").ok()
 }
 
 #[cfg(test)]
