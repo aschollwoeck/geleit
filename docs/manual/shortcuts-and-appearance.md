@@ -17,7 +17,7 @@ When you're browsing your mail (not typing in a box):
 | `#` | Delete the open message (to Trash) |
 | `z` | Undo the last archive/delete |
 | `/` | Open search |
-| `Esc` | Close the open window or overlay |
+| `Esc` | Close the open window/overlay, or the search box |
 
 Shortcuts pause while you're typing in a field (so the letters land in your text), and resume when
 you click back out.

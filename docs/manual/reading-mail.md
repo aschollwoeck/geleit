@@ -56,8 +56,8 @@ how many messages are in that thread.
 Click a message and it opens on the right, showing the subject, who it's from, the date, and the
 text of the message. The row you're reading is marked with a soft highlight and a coloured edge.
 
-The action buttons — **Reply, Reply all, Forward, Archive, Move…, Delete, Unread** — sit across the
-**top** of the reading area, above the sender and subject, so they don't move as the subject wraps.
+The action buttons — **Star, Reply, Reply all, Forward, Archive, Move…, Delete, Unread** — sit across
+the **top** of the reading area, above the sender and subject, so they don't move as the subject wraps.
 
 ![An open message in the reading area: the action buttons across the top, then the sender, then the subject.](images/reading.png)
 

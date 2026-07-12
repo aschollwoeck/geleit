@@ -166,6 +166,10 @@ pub fn App() -> impl IntoView {
     let selected_folder = RwSignal::new(Option::<i64>::None);
     let messages = RwSignal::new(Vec::<Message>::new());
     let open = RwSignal::new(Option::<MessageBody>::None);
+    // The open message's star state, captured when it opens — the body DTO doesn't carry it, and the
+    // message may later leave `messages` (e.g. after clearing a search), so the reading pane can't
+    // rely on looking it up there.
+    let open_flagged = RwSignal::new(false);
     let error = RwSignal::new(Option::<String>::None);
     let loaded = RwSignal::new(false);
     // Read/unread tracked this session in small sets, kept apart from `messages` so toggling one
@@ -363,10 +367,18 @@ pub fn App() -> impl IntoView {
                 account.set(Some(acc));
             }
         }
+        // Capture the star state now, while the message is still in the loaded list.
+        let flag = messages
+            .get_untracked()
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.flagged)
+            .unwrap_or(false);
         let mr = mark_read.get_untracked(); // "mark as read when opened" preference
         leptos::task::spawn_local(async move {
             match api::open_message(id, mr).await {
                 Ok(body) => {
+                    open_flagged.set(flag);
                     open.set(Some(body));
                     // When the preference is on, mark it read this session and clear any earlier
                     // "mark unread". When off, leave the unread state exactly as it was.
@@ -380,6 +392,26 @@ pub fn App() -> impl IntoView {
                     }
                 }
                 Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
+    // Star / unstar the open message (ORG-4). Flip the captured `open_flagged` (authoritative even if
+    // the message has since left the list), mirror it into the list row if present, then write back.
+    let toggle_star = move || {
+        let Some(id) = open.get().map(|b| b.id) else {
+            return;
+        };
+        let now_on = !open_flagged.get_untracked();
+        open_flagged.set(now_on);
+        messages.update(|list| {
+            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                m.flagged = now_on;
+            }
+        });
+        leptos::task::spawn_local(async move {
+            if let Err(e) = api::set_star(id, now_on).await {
+                error.set(Some(e));
             }
         });
     };
@@ -926,6 +958,10 @@ pub fn App() -> impl IntoView {
                     } else if move_menu.get_untracked() || acct_menu.get_untracked() {
                         move_menu.set(false);
                         acct_menu.set(false);
+                    } else if search_open.get_untracked() {
+                        // close the search box and return to the current folder / merged view
+                        search_open.set(false);
+                        run_search(String::new());
                     }
                     return;
                 }
@@ -1233,6 +1269,9 @@ pub fn App() -> impl IntoView {
                                             <Show when=move || attach>
                                                 <span class="clip">{icon(icons::CLIP)}</span>
                                             </Show>
+                                            <Show when=move || messages.with(|l| l.iter().find(|m| m.id == id).map(|m| m.flagged).unwrap_or(false))>
+                                                <span class="rowstar">{icon(icons::STAR_FILLED)}</span>
+                                            </Show>
                                             <span class="time">{date}</span>
                                         </div>
                                         <div class="subj">{subject}</div>
@@ -1267,6 +1306,10 @@ pub fn App() -> impl IntoView {
                             <>
                                 <div class="read-inner">
                                     <div class="actions">
+                                        <span class="act" class:starred=move || open_flagged.get() on:click=move |_| toggle_star()>
+                                            {move || if open_flagged.get() { icon(icons::STAR_FILLED) } else { icon(icons::STAR) }}
+                                            {move || if open_flagged.get() { "Starred" } else { "Star" }}
+                                        </span>
                                         <span class="act" on:click=move |_| compose_from_open("reply")>{icon(icons::REPLY)} "Reply"</span>
                                         <span class="act" on:click=move |_| compose_from_open("reply_all")>{icon(icons::REPLY_ALL)} "Reply all"</span>
                                         <span class="act" on:click=move |_| compose_from_open("forward")>{icon(icons::FORWARD)} "Forward"</span>
