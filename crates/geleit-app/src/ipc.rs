@@ -23,7 +23,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::dto::{
     compose_from_draft, display_sender, display_subject, draft_content_from, draft_summary,
-    folder_rank, AccountDto, ComposeDraft, DraftSummary, FolderDto, MessageBodyDto, MessageDto,
+    folder_rank, safe_filename_stem, AccountDto, ComposeDraft, DraftSummary, FolderDto,
+    MessageBodyDto, MessageDto,
 };
 
 /// What the shell needs to reach the encrypted store. Cheap to clone into a blocking task.
@@ -863,6 +864,155 @@ pub async fn pick_files() -> Result<Vec<String>, String> {
     })
     .await
     .map_err(|_| "The file picker stopped unexpectedly.".to_owned())?
+}
+
+/// A native "save as" dialog, pre-filled with `default_name`. `Ok(Some(path))` = chosen,
+/// `Ok(None)` = the user cancelled, `Err` = no dialog tool is installed (so the caller can say so,
+/// rather than silently no-op). Blocking — call inside `spawn_blocking`.
+fn pick_save_path(default_name: &str) -> Result<Option<String>, String> {
+    let attempts: [(&str, Vec<String>); 2] = [
+        (
+            "zenity",
+            vec![
+                "--file-selection".into(),
+                "--save".into(),
+                "--confirm-overwrite".into(),
+                "--title=Save message".into(),
+                format!("--filename={default_name}"),
+            ],
+        ),
+        (
+            "kdialog",
+            vec!["--getsavefilename".into(), format!("./{default_name}")],
+        ),
+    ];
+    for (cmd, args) in attempts {
+        match std::process::Command::new(cmd).args(&args).output() {
+            Ok(out) if out.status.success() => {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                return Ok((!path.is_empty()).then_some(path));
+            }
+            Ok(_) => return Ok(None), // ran but cancelled
+            Err(_) => continue,       // not installed → try the next tool
+        }
+    }
+    Err("No file picker found — install zenity or kdialog.".to_owned())
+}
+
+/// Save an open message to disk as a `.eml` file (READ-10). Rebuilds RFC 822 bytes from what's stored
+/// (no network), asks where to save via a native dialog, and writes. Returns whether a file was
+/// written (`false` = the user cancelled the dialog).
+#[tauri::command]
+pub async fn save_eml(state: tauri::State<'_, AppState>, id: i64) -> Result<bool, String> {
+    // Read the header + body and build the bytes on the store thread.
+    let (bytes, default_name) = with_store(state.inner().clone(), move |store| {
+        let header = store
+            .header_by_id(id)
+            .map_err(|_| "Couldn't load the message to save.".to_owned())?
+            .ok_or_else(|| "That message is no longer here.".to_owned())?;
+        let body = store.body_for(id).ok().flatten();
+        let bytes = geleit_engine::message::export_eml(&header, body.as_ref())?;
+        let name = format!(
+            "{}.eml",
+            safe_filename_stem(header.subject.as_deref().unwrap_or("message"))
+        );
+        Ok((bytes, name))
+    })
+    .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(path) = pick_save_path(&default_name)? else {
+            return Ok(false); // cancelled
+        };
+        std::fs::write(&path, &bytes)
+            .map(|()| true)
+            .map_err(|_| "Couldn't write that file.".to_owned())
+    })
+    .await
+    .map_err(|_| "The save task stopped unexpectedly.".to_owned())?
+}
+
+/// Open a `.eml` file from disk (READ-10): pick a file, parse it, store it in the account's local
+/// **Saved** folder, and return the new message id so the UI can switch there and open it. Returns
+/// `None` if the user cancelled. No network — the file is parsed and rendered like any synced mail.
+#[tauri::command]
+pub async fn open_eml_file(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+) -> Result<Option<i64>, String> {
+    // Pick + read the file off the async runtime (dialog + disk are blocking).
+    let bytes = tauri::async_runtime::spawn_blocking(pick_open_eml)
+        .await
+        .map_err(|_| "The file picker stopped unexpectedly.".to_owned())??;
+    let Some(bytes) = bytes else {
+        return Ok(None); // cancelled
+    };
+    with_store(state.inner().clone(), move |store| {
+        let eml = geleit_engine::message::parse_eml(&bytes);
+        let folder = store
+            .upsert_folder(account_id, geleit_store::SAVED_FOLDER)
+            .map_err(|_| "Couldn't open the file.".to_owned())?;
+        let snippet: Option<String> = eml.plain.as_deref().map(|t| t.chars().take(140).collect());
+        let new = geleit_store::NewMessage {
+            uid: None, // a local-only message — no server UID
+            message_id: eml.message_id,
+            subject: eml.subject,
+            from_name: eml.from_name,
+            from_addr: eml.from_addr,
+            to_addrs: eml.to_addrs,
+            date: eml.date,
+            has_attachments: eml.has_attachments,
+            snippet: snippet.clone(),
+            ..Default::default()
+        };
+        let id = store
+            .upsert_message(account_id, folder, &new)
+            .map_err(|_| "Couldn't import the message.".to_owned())?;
+        store
+            .store_body(
+                id,
+                eml.plain.as_deref(),
+                eml.html.as_deref(),
+                snippet.as_deref(),
+                eml.has_attachments,
+            )
+            .map_err(|_| "Couldn't import the message.".to_owned())?;
+        Ok(Some(id))
+    })
+    .await
+}
+
+/// Pick a single `.eml`/message file and read its bytes. Returns `None` if cancelled. Blocking.
+fn pick_open_eml() -> Result<Option<Vec<u8>>, String> {
+    let path = {
+        let zen = std::process::Command::new("zenity")
+            .args(["--file-selection", "--title=Open mail file"])
+            .output();
+        match zen {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
+            Ok(_) => return Ok(None), // cancelled
+            Err(_) => {
+                // zenity missing — try kdialog.
+                match std::process::Command::new("kdialog")
+                    .args(["--getopenfilename", "."])
+                    .output()
+                {
+                    Ok(o) if o.status.success() => {
+                        String::from_utf8_lossy(&o.stdout).trim().to_owned()
+                    }
+                    Ok(_) => return Ok(None),
+                    Err(_) => {
+                        return Err("No file picker found — install zenity or kdialog.".to_owned())
+                    }
+                }
+            }
+        }
+    };
+    if path.is_empty() {
+        return Ok(None);
+    }
+    std::fs::read(&path)
+        .map(Some)
+        .map_err(|_| "Couldn't read that file.".to_owned())
 }
 
 /// Refresh an account's folder: sync the folder list + the current folder's recent envelopes, then

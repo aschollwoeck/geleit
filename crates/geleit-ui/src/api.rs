@@ -440,6 +440,17 @@ pub async fn pick_files() -> Result<Vec<String>, String> {
     call("pick_files", &NoArgs {}).await
 }
 
+/// Save an open message to disk as a `.eml`. `Ok(false)` if the user cancelled the save dialog.
+pub async fn save_eml(id: i64) -> Result<bool, String> {
+    call("save_eml", &IdArgs { id }).await
+}
+
+/// Open a `.eml` file into the account's local Saved folder; returns the new message id (or `None`
+/// if cancelled) so the caller can switch to Saved and open it.
+pub async fn open_eml_file(account_id: i64) -> Result<Option<i64>, String> {
+    call("open_eml_file", &AccountArgs { account_id }).await
+}
+
 /// Distinct past-sender addresses matching `prefix`, for To/Cc autocomplete. Empty for a blank prefix.
 pub async fn suggest_addresses(account_id: i64, prefix: String) -> Result<Vec<String>, String> {
     call("suggest_addresses", &SuggestArgs { account_id, prefix }).await

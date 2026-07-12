@@ -126,6 +126,31 @@ pub fn draft_snippet(body: &str, max: usize) -> String {
     format!("{}…", clipped.trim_end())
 }
 
+/// A filesystem-safe filename stem from a message subject, for the default `<subject>.eml` save name.
+/// Keeps alphanumerics, spaces, `-` and `_`; every other char becomes `_`; capped at 60 chars and
+/// trimmed of surrounding whitespace/underscores. Falls back to `"message"` when nothing usable
+/// remains. Pure.
+#[must_use]
+pub fn safe_filename_stem(subject: &str) -> String {
+    let stem: String = subject
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(60)
+        .collect();
+    let stem = stem.trim().trim_matches('_').trim();
+    if stem.is_empty() {
+        "message".to_owned()
+    } else {
+        stem.to_owned()
+    }
+}
+
 /// Map a stored draft row into its list summary.
 #[must_use]
 pub fn draft_summary(row: &DraftRow) -> DraftSummary {
@@ -316,6 +341,20 @@ pub fn resolve_folder(folders: &[String], role: FolderRole) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_filename_stem_sanitises_caps_and_falls_back() {
+        assert_eq!(safe_filename_stem("Q3 report"), "Q3 report");
+        // Path separators and other punctuation become underscores.
+        assert_eq!(safe_filename_stem("Re: a/b\\c?"), "Re_ a_b_c");
+        // Leading/trailing underscores and whitespace are trimmed away.
+        assert_eq!(safe_filename_stem("  *hi*  "), "hi");
+        // Nothing usable → the fallback stem, never an empty filename.
+        assert_eq!(safe_filename_stem("///"), "message");
+        assert_eq!(safe_filename_stem(""), "message");
+        // Capped at 60 chars.
+        assert_eq!(safe_filename_stem(&"a".repeat(100)).len(), 60);
+    }
 
     #[test]
     fn draft_snippet_flattens_whitespace_and_clips_on_a_boundary() {
