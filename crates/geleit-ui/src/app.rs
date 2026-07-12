@@ -1256,15 +1256,6 @@ pub fn App() -> impl IntoView {
                         view! {
                             <>
                                 <div class="read-inner">
-                                    <h1>{body.subject.clone()}</h1>
-                                    <div class="read-from">
-                                        <div class="read-avatar">{body.from.chars().next().map(|c| c.to_ascii_uppercase().to_string()).unwrap_or_default()}</div>
-                                        <div class="read-sender">{body.from.clone()}</div>
-                                        <div class="read-when">
-                                            <span class="dot" style=move || format!("background:{}", current_color())></span>
-                                            {local_date(body.date)}
-                                        </div>
-                                    </div>
                                     <div class="actions">
                                         <span class="act" on:click=move |_| compose_from_open("reply")>{icon(icons::REPLY)} "Reply"</span>
                                         <span class="act" on:click=move |_| compose_from_open("reply_all")>{icon(icons::REPLY_ALL)} "Reply all"</span>
@@ -1287,6 +1278,15 @@ pub fn App() -> impl IntoView {
                                             </div>
                                         </Show>
                                     </div>
+                                    <div class="read-from">
+                                        <div class="read-avatar">{body.from.chars().next().map(|c| c.to_ascii_uppercase().to_string()).unwrap_or_default()}</div>
+                                        <div class="read-sender">{body.from.clone()}</div>
+                                        <div class="read-when">
+                                            <span class="dot" style=move || format!("background:{}", current_color())></span>
+                                            {local_date(body.date)}
+                                        </div>
+                                    </div>
+                                    <h1>{body.subject.clone()}</h1>
                                 </div>
                                 <Show when=move || body.has_remote && !load_images.get()>
                                     <div class="cue">

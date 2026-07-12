@@ -231,13 +231,15 @@ a:hover { color: var(--accent); }
 .read .edge { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent); z-index: 5; }
 .read-inner { width: 100%; padding: 28px 32px; }
 .read.has-mail .read-inner { padding: 24px 28px 0; flex: none; }
-.read h1 { font-size: 22px; font-weight: 600; line-height: 1.3; margin: 0; }
-.read-from { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
+/* Header order is: actions (pinned toolbar) · from · subject — so the buttons never shift as the
+   subject wraps to more lines. */
+.read h1 { font-size: 22px; font-weight: 600; line-height: 1.3; margin: 10px 0 0; }
+.read-from { margin-top: 16px; display: flex; align-items: center; gap: 10px; }
 .read-avatar { width: 30px; height: 30px; flex: none; border-radius: 999px; background: var(--avatar-bg); color: var(--text-muted); font-weight: 600; display: grid; place-items: center; font-size: 13px; }
 .read-sender { font-weight: 600; font-size: 14px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .read-sender .addr { color: var(--text-muted); font-weight: 400; }
 .read-when { margin-left: auto; display: flex; align-items: center; gap: 7px; color: var(--text-muted); font-size: 12px; flex: none; }
-.actions { position: relative; display: flex; gap: 8px; margin: 14px 0; padding-bottom: 14px; border-bottom: 1px solid var(--divider); flex-wrap: wrap; }
+.actions { position: relative; display: flex; gap: 8px; margin: 0 0 4px; padding-bottom: 14px; border-bottom: 1px solid var(--divider); flex-wrap: wrap; }
 .act {
   display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; border-radius: 8px;
   background: var(--surface); border: 1px solid var(--divider); color: var(--text);
