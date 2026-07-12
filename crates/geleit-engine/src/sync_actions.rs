@@ -94,6 +94,27 @@ pub fn run_move(
         .map_err(|_| "Couldn't move the message on the server.".to_owned())
 }
 
+/// Fetch one attachment's bytes on demand (READ-8, save to disk). Fetches the whole raw message by
+/// UID and extracts the `index`-th attachment. Returns its filename (if the message names it) and
+/// bytes. Blocking + network: **worker thread.**
+pub fn run_fetch_attachment(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    folder: &str,
+    uid: u32,
+    index: usize,
+) -> Result<(Option<String>, Vec<u8>), String> {
+    let config = account_imap(db_path, secrets, account_id)?;
+    let raw = runtime()?
+        .block_on(imap::fetch_raw_message(&config, secrets, folder, uid))
+        .map_err(|_| "Couldn't fetch the attachment from the server.".to_owned())?
+        .ok_or_else(|| "That message is no longer on the server.".to_owned())?;
+    let att = crate::mime::extract_attachment(&raw, index)
+        .ok_or_else(|| "Couldn't find that attachment in the message.".to_owned())?;
+    Ok((att.filename, att.data))
+}
+
 /// Permanently delete one message by UID (ORG-2). Blocking + network: **worker thread.**
 pub fn run_delete_permanently(
     db_path: &str,

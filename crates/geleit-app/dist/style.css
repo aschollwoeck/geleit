@@ -215,6 +215,16 @@ a:hover { color: var(--accent); }
 .bulk-bar { display: flex; align-items: center; gap: 8px; padding: 2px 16px 10px; }
 .bulk-bar .rowcheck { position: static; opacity: 1; }
 .bulk-count { font-size: 13px; color: var(--text-muted); margin-right: auto; }
+
+/* Reading-pane attachments: one chip per file with name, size, and a save-to-disk button. */
+.attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 20px 14px; }
+.att-chip { display: inline-flex; align-items: center; gap: 8px; background: var(--surface-raised); border: 1px solid var(--divider); border-radius: 8px; padding: 6px 10px; font-size: 13px; max-width: 320px; }
+.att-chip > .ic { color: var(--text-faint); flex: none; }
+.att-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.att-size { color: var(--text-faint); font-size: 12px; flex: none; }
+.att-save { color: var(--text-muted); cursor: pointer; display: inline-flex; flex: none; }
+.att-save:hover { color: var(--accent-strong); }
+.att-chip .ic svg, .att-save .ic svg { width: 14px; height: 14px; }
 .row-top { display: flex; align-items: center; gap: 8px; }
 .row .udot { width: 8px; height: 8px; flex: none; border-radius: 999px; background: transparent; }
 .row.unread .udot { background: var(--accent); }

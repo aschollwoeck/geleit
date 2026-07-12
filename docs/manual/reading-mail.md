@@ -90,6 +90,13 @@ with a **Load images** button. Nothing remote loads until you choose to: click i
 fetches that one message's images and re-shows it with them in place. (Scripts are never run, even
 then, and only that message's images are fetched.)
 
+## Attachments
+
+When a message has files attached, they appear as **chips** just under the sender and subject — each
+showing the file's name and size. Choose the **save icon** on a chip to keep that file on your
+computer; pick where to put it and GeleitMail downloads it from your provider and writes it there.
+(Attachments aren't stored on your device until you save one, so saving needs a connection.)
+
 ## Saving and opening message files
 
 Choose **Save** at the top of an open message to keep a copy on your computer as a **`.eml`** file —

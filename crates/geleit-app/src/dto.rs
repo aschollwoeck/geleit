@@ -60,6 +60,69 @@ pub struct MessageBodyDto {
     pub is_html: bool,
     /// Remote content was blocked (PRIV-3) → show the cue + "Load images" (PRIV-2).
     pub has_remote: bool,
+    /// Attachments (name + human-readable size) shown in the reading pane; bytes are fetched on demand
+    /// to save (READ-8). Order matches the stored/parsed order, so a row's index is its save key.
+    pub attachments: Vec<AttachmentDto>,
+}
+
+/// One attachment shown in the reading pane. Metadata only — the bytes live on the server and are
+/// fetched when the user chooses to save.
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct AttachmentDto {
+    pub name: String,
+    pub size: String,
+}
+
+/// A human-readable byte size (e.g. `540 bytes`, `12.4 KB`, `3.1 MB`). Pure. Uses 1024-based units;
+/// bytes stay exact, larger units get one decimal (trimmed if `.0`).
+#[must_use]
+pub fn human_size(bytes: i64) -> String {
+    let b = bytes.max(0) as f64;
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let (value, unit) = if b < KB {
+        return format!("{} bytes", bytes.max(0));
+    } else if b < MB {
+        (b / KB, "KB")
+    } else if b < GB {
+        (b / MB, "MB")
+    } else {
+        (b / GB, "GB")
+    };
+    // Round to one decimal using integer tenths, dropping a trailing `.0` (and avoiding any float
+    // equality). `tenths` is small (< 10240), so the i64 cast never truncates meaningfully.
+    let tenths = (value * 10.0).round() as i64;
+    if tenths % 10 == 0 {
+        format!("{} {unit}", tenths / 10)
+    } else {
+        format!("{}.{} {unit}", tenths / 10, tenths % 10)
+    }
+}
+
+/// A filesystem-safe default name for saving an attachment. Unlike [`safe_filename_stem`] it keeps
+/// the extension (dots), only stripping directory separators and control characters (so a hostile
+/// `../../etc/passwd` filename can't steer the default save path), capping length and falling back to
+/// `attachment` when nothing usable remains. Pure.
+#[must_use]
+pub fn safe_attachment_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .take(120)
+        .collect();
+    let cleaned = cleaned.trim().trim_matches(['_', '.', ' ']).trim();
+    if cleaned.is_empty() {
+        "attachment".to_owned()
+    } else {
+        cleaned.to_owned()
+    }
 }
 
 /// A compose form, prefilled for a reply/forward or blank for a new message. Plain strings — the
@@ -341,6 +404,34 @@ pub fn resolve_folder(folders: &[String], role: FolderRole) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn human_size_scales_units_and_trims_trailing_zero() {
+        assert_eq!(human_size(0), "0 bytes");
+        assert_eq!(human_size(540), "540 bytes");
+        assert_eq!(human_size(1024), "1 KB"); // exact → no decimal
+        assert_eq!(human_size(1536), "1.5 KB"); // 1.5 KB
+        assert_eq!(human_size(1024 * 1024), "1 MB");
+        assert_eq!(human_size(3_250_586), "3.1 MB");
+        // Exactly at the MB and GB boundaries promote to the larger unit (pins the `< MB`/`< GB`
+        // comparisons — a `<=` there would keep the smaller unit, e.g. "1024 KB").
+        assert_eq!(human_size(1024 * 1024 * 1024), "1 GB");
+        assert_eq!(human_size(2 * 1024 * 1024 * 1024), "2 GB");
+        assert_eq!(human_size(-5), "0 bytes"); // negative clamps to 0
+    }
+
+    #[test]
+    fn safe_attachment_filename_keeps_extension_but_strips_paths() {
+        assert_eq!(safe_attachment_filename("report.pdf"), "report.pdf");
+        // Directory separators (traversal) become underscores; extension kept.
+        assert_eq!(safe_attachment_filename("../../etc/passwd"), "etc_passwd");
+        assert_eq!(safe_attachment_filename("a\\b\\c.txt"), "a_b_c.txt");
+        // Control characters are stripped.
+        assert_eq!(safe_attachment_filename("na\tme.txt"), "na_me.txt");
+        // Nothing usable → the fallback, never an empty filename.
+        assert_eq!(safe_attachment_filename("   "), "attachment");
+        assert_eq!(safe_attachment_filename("/"), "attachment");
+    }
 
     #[test]
     fn safe_filename_stem_sanitises_caps_and_falls_back() {

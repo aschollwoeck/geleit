@@ -23,8 +23,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::dto::{
     compose_from_draft, display_sender, display_subject, draft_content_from, draft_summary,
-    folder_rank, safe_filename_stem, AccountDto, ComposeDraft, DraftSummary, FolderDto,
-    MessageBodyDto, MessageDto,
+    folder_rank, human_size, safe_attachment_filename, safe_filename_stem, AccountDto,
+    AttachmentDto, ComposeDraft, DraftSummary, FolderDto, MessageBodyDto, MessageDto,
 };
 
 /// What the shell needs to reach the encrypted store. Cheap to clone into a blocking task.
@@ -263,6 +263,20 @@ pub async fn open_message(
             .html
             .as_deref()
             .is_some_and(geleit_engine::safehtml::has_remote_content);
+        // Attachment metadata for the reading pane (bytes fetched on demand to save). Order matches
+        // the parse order, so each row's index is its save key.
+        let attachments = store
+            .attachments_for(id)
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(i, a)| AttachmentDto {
+                name: a
+                    .filename
+                    .unwrap_or_else(|| format!("attachment {}", i + 1)),
+                size: human_size(a.size),
+            })
+            .collect();
         Ok(MessageBodyDto {
             id: header.id,
             subject: display_subject(header.subject.as_deref()),
@@ -271,6 +285,7 @@ pub async fn open_message(
             plain: body.plain,
             is_html,
             has_remote,
+            attachments,
         })
     })
     .await
@@ -919,6 +934,63 @@ pub async fn save_eml(state: tauri::State<'_, AppState>, id: i64) -> Result<bool
         Ok((bytes, name))
     })
     .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(path) = pick_save_path(&default_name)? else {
+            return Ok(false); // cancelled
+        };
+        std::fs::write(&path, &bytes)
+            .map(|()| true)
+            .map_err(|_| "Couldn't write that file.".to_owned())
+    })
+    .await
+    .map_err(|_| "The save task stopped unexpectedly.".to_owned())?
+}
+
+/// Save a message's `index`-th attachment to disk (READ-8). The bytes aren't stored locally, so this
+/// fetches the raw message from the server on demand (`BODY.PEEK[]`), extracts the part, and writes
+/// it via a native save dialog. Returns whether a file was written (`false` = cancelled).
+#[tauri::command]
+pub async fn save_attachment(
+    state: tauri::State<'_, AppState>,
+    message_id: i64,
+    index: usize,
+) -> Result<bool, String> {
+    let st = state.inner().clone();
+    // Resolve the server location + account and the stored default name on the store thread.
+    let plan = with_store(st.clone(), move |store| {
+        let loc = store
+            .message_location(message_id)
+            .map_err(|_| "Couldn't save the attachment.".to_owned())?;
+        let acc = store
+            .account_for_message(message_id)
+            .map_err(|_| "Couldn't save the attachment.".to_owned())?;
+        let meta_name = store
+            .attachments_for(message_id)
+            .ok()
+            .and_then(|a| a.into_iter().nth(index))
+            .and_then(|a| a.filename);
+        Ok(loc
+            .zip(acc)
+            .map(|((folder, uid), account)| (folder, uid, account, meta_name)))
+    })
+    .await?;
+    let Some((folder, uid, account_id, meta_name)) = plan else {
+        return Err("This attachment can't be saved (the message isn't on a server).".to_owned());
+    };
+    // Fetch the raw message and extract the part on a worker (network + parse).
+    let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+    let (fetched_name, bytes) = tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_fetch_attachment(
+            &db, &*secrets, account_id, &folder, uid as u32, index,
+        )
+    })
+    .await
+    .map_err(|_| "The download task stopped unexpectedly.".to_owned())??;
+    let default_name = safe_attachment_filename(
+        &fetched_name
+            .or(meta_name)
+            .unwrap_or_else(|| format!("attachment-{}", index + 1)),
+    );
     tauri::async_runtime::spawn_blocking(move || {
         let Some(path) = pick_save_path(&default_name)? else {
             return Ok(false); // cancelled
