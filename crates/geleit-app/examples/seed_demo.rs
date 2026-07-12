@@ -16,8 +16,9 @@ fn main() {
         .expect("no geleit-db key yet — launch the app once to create it");
     let s = Store::open_encrypted(&path, &key).expect("open encrypted demo db");
     let acc = s.add_account("you@example.com", Some("You")).unwrap();
-    // The store orders Inbox first, so a realistic rail still opens to the Inbox.
-    for f in ["INBOX", "Sent", "Archive", "Junk", "Trash"] {
+    // The store orders Inbox first, so a realistic rail still opens to the Inbox. "Work" is a
+    // user-created folder (not a protected one), so it shows the rename/delete options (ORG-6).
+    for f in ["INBOX", "Sent", "Archive", "Junk", "Trash", "Work"] {
         s.upsert_folder(acc, f).unwrap();
     }
     let inbox = s.upsert_folder(acc, "INBOX").unwrap();

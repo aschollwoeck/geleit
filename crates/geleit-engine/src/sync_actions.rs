@@ -142,6 +142,49 @@ pub fn run_empty_folder(
         .map_err(|_| "Couldn't empty the folder on the server.".to_owned())
 }
 
+/// Create a folder on the server (ORG-6). The local folder row is added by the caller. Blocking +
+/// network: **worker thread.**
+pub fn run_create_folder(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    name: &str,
+) -> Result<(), String> {
+    let config = account_imap(db_path, secrets, account_id)?;
+    runtime()?
+        .block_on(imap::create_folder(&config, secrets, name))
+        .map_err(|_| "Couldn't create the folder on the server.".to_owned())
+}
+
+/// Rename a folder on the server (ORG-6). The caller renames the local row in place. Blocking +
+/// network: **worker thread.**
+pub fn run_rename_folder(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    from: &str,
+    to: &str,
+) -> Result<(), String> {
+    let config = account_imap(db_path, secrets, account_id)?;
+    runtime()?
+        .block_on(imap::rename_folder(&config, secrets, from, to))
+        .map_err(|_| "Couldn't rename the folder on the server.".to_owned())
+}
+
+/// Delete a folder on the server (ORG-6). The caller removes the local row (cascading its messages).
+/// Blocking + network: **worker thread.**
+pub fn run_delete_folder(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    name: &str,
+) -> Result<(), String> {
+    let config = account_imap(db_path, secrets, account_id)?;
+    runtime()?
+        .block_on(imap::delete_folder(&config, secrets, name))
+        .map_err(|_| "Couldn't delete the folder on the server.".to_owned())
+}
+
 /// Sync `account_id`'s `folder` (+ folder list), reading settings from the store and the password
 /// from the shared secrets. Blocking + network: **run on a worker thread.**
 pub fn run_refresh(

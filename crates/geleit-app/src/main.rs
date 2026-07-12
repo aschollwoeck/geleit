@@ -108,6 +108,9 @@ fn main() {
         ipc::move_to_role,
         ipc::empty_trash,
         ipc::delete_forever,
+        ipc::create_folder,
+        ipc::rename_folder,
+        ipc::delete_folder,
         ipc::refresh,
         ipc::compose_draft,
         ipc::send_message,
@@ -141,6 +144,7 @@ fn main() {
         ipc::dev_compose_to,
         ipc::dev_drafts,
         ipc::dev_select,
+        ipc::dev_folder,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -154,6 +158,9 @@ fn main() {
         ipc::move_to_role,
         ipc::empty_trash,
         ipc::delete_forever,
+        ipc::create_folder,
+        ipc::rename_folder,
+        ipc::delete_folder,
         ipc::refresh,
         ipc::compose_draft,
         ipc::send_message,

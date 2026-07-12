@@ -5,7 +5,10 @@ use crate::api::{
     self, Account, AccountForm, ComposeDraft, DraftSummary, Folder, Message, MessageBody,
 };
 use crate::icons::{self, icon};
-use crate::view::{all_selected, elide, format_date, merge_addrs, rank_suggestions, split_addrs};
+use crate::view::{
+    all_selected, elide, format_date, is_protected_folder, merge_addrs, rank_suggestions,
+    split_addrs,
+};
 use leptos::either::Either;
 use leptos::prelude::*;
 use std::collections::HashSet;
@@ -25,6 +28,13 @@ enum ListRow {
 enum TrashAsk {
     Empty,
     DeleteOne(i64),
+}
+
+/// The New-folder / Rename-folder dialog state. `rename_from` is `Some(old_name)` in rename mode.
+#[derive(Clone)]
+struct FolderForm {
+    rename_from: Option<String>,
+    name: String,
 }
 
 /// A move (archive / delete / spam) that has been requested but not yet committed to the server —
@@ -218,6 +228,9 @@ pub fn App() -> impl IntoView {
     let settings_tab = RwSignal::new("accounts".to_string());
     let confirm = RwSignal::new(Option::<(i64, String)>::None); // (account_id, email) to remove
     let trash_ask = RwSignal::new(Option::<TrashAsk>::None); // irreversible Trash action to confirm
+    let folder_form = RwSignal::new(Option::<FolderForm>::None); // New/Rename folder dialog
+    let folder_del = RwSignal::new(Option::<(i64, String)>::None); // (id, name) folder to delete
+    let folder_menu = RwSignal::new(Option::<i64>::None); // which folder's ⋯ menu is open
     let toast = RwSignal::new(Option::<String>::None);
     let pending = RwSignal::new(Option::<PendingMove>::None); // move awaiting its Undo window
                                                               // Handle of the running toast/commit timer, so a newer toast or an Undo can cancel it.
@@ -1082,6 +1095,67 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // Submit the New-folder / Rename-folder dialog.
+    let submit_folder = move || {
+        let (Some(form), Some(aid)) = (folder_form.get(), account.get()) else {
+            return;
+        };
+        let name = form.name.trim().to_owned();
+        if name.is_empty() {
+            return;
+        }
+        folder_form.set(None);
+        let renaming = form.rename_from.is_some();
+        leptos::task::spawn_local(async move {
+            let res = match form.rename_from {
+                Some(from) => api::rename_folder(aid, from, name).await,
+                None => api::create_folder(aid, name).await.map(|_| ()),
+            };
+            match res {
+                Ok(()) => {
+                    if let Ok(fs) = api::list_folders(aid).await {
+                        folders.set(fs);
+                    }
+                    toast.set(Some(
+                        if renaming {
+                            "Folder renamed"
+                        } else {
+                            "Folder created"
+                        }
+                        .into(),
+                    ));
+                }
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
+    // Delete the folder in the confirm dialog (server + local, with its messages).
+    let do_delete_folder = move || {
+        let (Some((fid, name)), Some(aid)) = (folder_del.get(), account.get()) else {
+            return;
+        };
+        folder_del.set(None);
+        let was_selected = selected_folder.get_untracked() == Some(fid);
+        leptos::task::spawn_local(async move {
+            match api::delete_folder(aid, fid, name).await {
+                Ok(()) => {
+                    if let Ok(fs) = api::list_folders(aid).await {
+                        folders.set(fs);
+                    }
+                    // If the open folder was the one deleted, fall back to the first (Inbox).
+                    if was_selected {
+                        if let Some(f) = folders.get_untracked().into_iter().next() {
+                            choose_folder(f.id);
+                        }
+                    }
+                    toast.set(Some("Folder deleted".into()));
+                }
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
     let do_refresh = move || {
         // Merged view: sync every account's INBOX, then re-list the combined inbox.
         if unified.get() {
@@ -1243,6 +1317,22 @@ pub fn App() -> impl IntoView {
                     .collect();
                 selected.set(set);
             }
+            if let Ok(Some(kind)) = api::dev_folder().await {
+                if kind == "new" {
+                    folder_form.set(Some(FolderForm {
+                        rename_from: None,
+                        name: String::new(),
+                    }));
+                } else if kind == "menu" {
+                    if let Some(f) = folders
+                        .get_untracked()
+                        .into_iter()
+                        .find(|f| !is_protected_folder(&f.name))
+                    {
+                        folder_menu.set(Some(f.id));
+                    }
+                }
+            }
         });
         true
     });
@@ -1273,11 +1363,19 @@ pub fn App() -> impl IntoView {
                         wiz.set(None);
                     } else if settings_open.get_untracked() {
                         settings_open.set(false);
+                    } else if folder_form.get_untracked().is_some() {
+                        folder_form.set(None);
+                    } else if folder_del.get_untracked().is_some() {
+                        folder_del.set(None);
                     } else if confirm.get_untracked().is_some() {
                         confirm.set(None);
-                    } else if move_menu.get_untracked() || acct_menu.get_untracked() {
+                    } else if move_menu.get_untracked()
+                        || acct_menu.get_untracked()
+                        || folder_menu.get_untracked().is_some()
+                    {
                         move_menu.set(false);
                         acct_menu.set(false);
+                        folder_menu.set(None);
                     } else if search_open.get_untracked() {
                         // close the search box and return to the current folder / merged view
                         search_open.set(false);
@@ -1508,14 +1606,37 @@ pub fn App() -> impl IntoView {
                             {
                                 let (id, name, unread) = (f.id, f.name.clone(), f.unread);
                                 let label = name.clone();
+                                let protected = is_protected_folder(&name);
+                                let rename_name = name.clone();
+                                let del_name = name.clone();
                                 view! {
-                                    <button class="folder" class:active=move || selected_folder.get() == Some(id)
-                                        on:click=move |_| choose_folder(id)>
+                                    <div class="folder" role="button" tabindex="0"
+                                        class:active=move || selected_folder.get() == Some(id) && !drafts_open.get()
+                                        on:click=move |_| choose_folder(id)
+                                        on:keydown=move |e| { if e.key() == "Enter" || e.key() == " " { e.prevent_default(); choose_folder(id); } }>
                                         <span class="guide"></span>
                                         <span class="fic">{icon(icons::folder_icon(&name))}</span>
                                         {label}
                                         <span class="fcount">{move || if unread > 0 { unread.to_string() } else { String::new() }}</span>
-                                    </button>
+                                        <Show when=move || !protected>
+                                            <span class="folder-more" title="Folder options"
+                                                on:click=move |e| { e.stop_propagation(); folder_menu.update(|m| *m = if *m == Some(id) { None } else { Some(id) }); }>
+                                                {icon(icons::MORE)}
+                                            </span>
+                                        </Show>
+                                        <Show when=move || folder_menu.get() == Some(id)>
+                                            <div class="menu folder-menu">
+                                                <div class="menu-item" on:click={
+                                                    let n = rename_name.clone();
+                                                    move |e: web_sys::MouseEvent| { e.stop_propagation(); folder_menu.set(None); folder_form.set(Some(FolderForm { rename_from: Some(n.clone()), name: n.clone() })); }
+                                                }>{icon(icons::MOVE)} "Rename…"</div>
+                                                <div class="menu-item danger" on:click={
+                                                    let n = del_name.clone();
+                                                    move |e: web_sys::MouseEvent| { e.stop_propagation(); folder_menu.set(None); folder_del.set(Some((id, n.clone()))); }
+                                                }>{icon(icons::TRASH)} "Delete…"</div>
+                                            </div>
+                                        </Show>
+                                    </div>
                                 }
                             }
                         </For>
@@ -1524,6 +1645,11 @@ pub fn App() -> impl IntoView {
                             <span class="guide"></span>
                             <span class="fic">{icon(icons::DRAFTS)}</span>
                             "Drafts"
+                        </button>
+                        <button class="folder newfolder" on:click=move |_| folder_form.set(Some(FolderForm { rename_from: None, name: String::new() }))>
+                            <span class="guide"></span>
+                            <span class="fic">{icon(icons::PLUS)}</span>
+                            "New folder"
                         </button>
                     </Show>
                     <div class="rail-fill"></div>
@@ -1991,6 +2117,43 @@ pub fn App() -> impl IntoView {
                                     {move || if connecting.get() { "Connecting…" } else { "Add account" }}
                                 </button>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            </Show>
+
+            <Show when=move || folder_form.get().is_some()>
+                <div class="scrim">
+                    <div class="window dialog">
+                        <h2>{move || if folder_form.get().and_then(|f| f.rename_from).is_some() { "Rename folder" } else { "New folder" }}</h2>
+                        <input class="folder-input" placeholder="Folder name" autofocus
+                            prop:value=move || folder_form.get().map(|f| f.name).unwrap_or_default()
+                            on:input=move |e| folder_form.update(|f| { if let Some(f) = f { f.name = event_target_value(&e); } })
+                            on:keydown=move |e| { if e.key() == "Enter" { submit_folder(); } }/>
+                        <div class="drow">
+                            <button class="btn-ghost" on:click=move |_| folder_form.set(None)>"Cancel"</button>
+                            <button class="btn-primary"
+                                disabled=move || folder_form.get().map(|f| f.name.trim().is_empty()).unwrap_or(true)
+                                on:click=move |_| submit_folder()>
+                                {move || if folder_form.get().and_then(|f| f.rename_from).is_some() { "Rename" } else { "Create" }}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </Show>
+
+            <Show when=move || folder_del.get().is_some()>
+                <div class="scrim">
+                    <div class="window dialog">
+                        <h2>"Delete folder?"</h2>
+                        <p>
+                            {move || folder_del.get().map(|(_, n)| format!(
+                                "\u{201c}{n}\u{201d} and all the messages in it will be permanently deleted \
+                                 from the server and this device. This can't be undone."))}
+                        </p>
+                        <div class="drow">
+                            <button class="btn-ghost" on:click=move |_| folder_del.set(None)>"Cancel"</button>
+                            <button class="btn-danger" on:click=move |_| do_delete_folder()>"Delete folder"</button>
                         </div>
                     </div>
                 </div>

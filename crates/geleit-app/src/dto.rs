@@ -100,6 +100,49 @@ pub fn human_size(bytes: i64) -> String {
     }
 }
 
+/// Whether a folder is a well-known special folder that must not be renamed or deleted (ORG-6): the
+/// Inbox, the standard role folders, and GeleitMail's local `Saved`/`Drafts`. Exact case-insensitive
+/// match on the common names, so ordinary user folders (e.g. `Work`, `Receipts`) stay editable. The
+/// UI mirrors this in `view::is_protected_folder`; this copy is the authority the IPC commands
+/// re-check, so a rename/delete of a protected folder is refused even if the UI is bypassed.
+#[must_use]
+pub fn is_protected_folder(name: &str) -> bool {
+    matches!(
+        name.trim().to_lowercase().as_str(),
+        "inbox"
+            | "sent"
+            | "sent items"
+            | "sent mail"
+            | "drafts"
+            | "draft"
+            | "archive"
+            | "trash"
+            | "deleted"
+            | "deleted items"
+            | "bin"
+            | "spam"
+            | "junk"
+            | "saved"
+    )
+}
+
+/// Validate a user-entered folder name (ORG-6): trims surrounding whitespace and rejects an empty
+/// name or one containing a path/hierarchy separator (folders are kept flat). Returns the cleaned
+/// name. Pure.
+///
+/// # Errors
+/// A calm, user-facing message when the name is blank or contains `/` or `\`.
+pub fn validate_folder_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("Enter a folder name.".to_owned());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("A folder name can't contain a slash.".to_owned());
+    }
+    Ok(name.to_owned())
+}
+
 /// A filesystem-safe default name for saving an attachment. Unlike [`safe_filename_stem`] it keeps
 /// the extension (dots), only stripping directory separators and control characters (so a hostile
 /// `../../etc/passwd` filename can't steer the default save path), capping length and falling back to
@@ -404,6 +447,27 @@ pub fn resolve_folder(folders: &[String], role: FolderRole) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_protected_folder_guards_special_but_not_user_folders() {
+        for n in [
+            "Inbox", "INBOX", "Sent", "Drafts", "Trash", "Archive", "Junk", " Saved ",
+        ] {
+            assert!(is_protected_folder(n), "{n} should be protected");
+        }
+        for n in ["Work", "Receipts", "Sent-2024", "Projects", ""] {
+            assert!(!is_protected_folder(n), "{n} should be editable");
+        }
+    }
+
+    #[test]
+    fn validate_folder_name_trims_and_rejects_blank_or_slashes() {
+        assert_eq!(validate_folder_name("  Work  ").unwrap(), "Work");
+        assert!(validate_folder_name("").is_err());
+        assert!(validate_folder_name("   ").is_err());
+        assert!(validate_folder_name("a/b").is_err());
+        assert!(validate_folder_name("a\\b").is_err());
+    }
 
     #[test]
     fn human_size_scales_units_and_trims_trailing_zero() {

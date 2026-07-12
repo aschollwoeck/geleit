@@ -1013,6 +1013,49 @@ mod tests {
         assert_eq!(att.data, b"the attachment bytes");
     }
 
+    /// Folder management round-trip (ORG-6): create a folder, confirm it lists, rename it, confirm the
+    /// new name lists (old gone), then delete it and confirm it's gone. Needs Dovecot + dangerous-tls.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn live_create_rename_delete_folder() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        // Clean up any leftover from a previous run (best-effort).
+        let _ = delete_folder(&cfg, &secrets, "GeleitTmpA").await;
+        let _ = delete_folder(&cfg, &secrets, "GeleitTmpB").await;
+
+        create_folder(&cfg, &secrets, "GeleitTmpA")
+            .await
+            .expect("create");
+        let after_create = list_folders(&cfg, &secrets).await.expect("list");
+        assert!(
+            after_create.iter().any(|f| f == "GeleitTmpA"),
+            "created folder should list: {after_create:?}"
+        );
+
+        rename_folder(&cfg, &secrets, "GeleitTmpA", "GeleitTmpB")
+            .await
+            .expect("rename");
+        let after_rename = list_folders(&cfg, &secrets).await.expect("list");
+        assert!(after_rename.iter().any(|f| f == "GeleitTmpB"), "renamed");
+        assert!(!after_rename.iter().any(|f| f == "GeleitTmpA"), "old gone");
+
+        delete_folder(&cfg, &secrets, "GeleitTmpB")
+            .await
+            .expect("delete");
+        let after_delete = list_folders(&cfg, &secrets).await.expect("list");
+        assert!(!after_delete.iter().any(|f| f == "GeleitTmpB"), "deleted");
+    }
+
     /// Incremental sync: a new message appears, a re-sync is idempotent (no dupes), and a message
     /// deleted on the server is removed locally. Needs Dovecot + `--features dangerous-tls`.
     #[cfg(feature = "dangerous-tls")]

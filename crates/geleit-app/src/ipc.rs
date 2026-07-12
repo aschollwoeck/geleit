@@ -23,8 +23,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::dto::{
     compose_from_draft, display_sender, display_subject, draft_content_from, draft_summary,
-    folder_rank, human_size, safe_attachment_filename, safe_filename_stem, AccountDto,
-    AttachmentDto, ComposeDraft, DraftSummary, FolderDto, MessageBodyDto, MessageDto,
+    folder_rank, human_size, is_protected_folder, safe_attachment_filename, safe_filename_stem,
+    validate_folder_name, AccountDto, AttachmentDto, ComposeDraft, DraftSummary, FolderDto,
+    MessageBodyDto, MessageDto,
 };
 
 /// What the shell needs to reach the encrypted store. Cheap to clone into a blocking task.
@@ -527,6 +528,94 @@ pub async fn delete_forever(state: tauri::State<'_, AppState>, id: i64) -> Resul
         store
             .delete_message(id)
             .map_err(|_| "Couldn't update the local mailbox.".to_owned())
+    })
+    .await
+}
+
+/// Create a folder (ORG-6): create it on the server, then add the local row. Returns the new folder
+/// id. Rejects a blank/slashed name.
+#[tauri::command]
+pub async fn create_folder(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+    name: String,
+) -> Result<i64, String> {
+    let name = validate_folder_name(&name)?;
+    let st = state.inner().clone();
+    let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+    let name2 = name.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_create_folder(&db, &*secrets, account_id, &name2)
+    })
+    .await
+    .map_err(|_| "The folder task stopped unexpectedly.".to_owned())??;
+    with_store(st, move |store| {
+        store
+            .upsert_folder(account_id, &name)
+            .map_err(|_| "Created on the server, but couldn't add it locally.".to_owned())
+    })
+    .await
+}
+
+/// Rename a folder (ORG-6): rename it on the server, then rename the local row in place (its messages
+/// stay attached). Protected folders (Inbox, roles, Saved/Drafts) are refused.
+#[tauri::command]
+pub async fn rename_folder(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    if is_protected_folder(&from) {
+        return Err("That folder can't be renamed.".to_owned());
+    }
+    let to = validate_folder_name(&to)?;
+    // Don't let a user rename an ordinary folder *into* a reserved name — that would mint a
+    // role-named folder the UI then treats as protected (un-renamable, un-deletable).
+    if is_protected_folder(&to) {
+        return Err("That name is reserved for a standard folder.".to_owned());
+    }
+    let st = state.inner().clone();
+    let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+    let (from2, to2) = (from.clone(), to.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_rename_folder(&db, &*secrets, account_id, &from2, &to2)
+    })
+    .await
+    .map_err(|_| "The folder task stopped unexpectedly.".to_owned())??;
+    with_store(st, move |store| {
+        store
+            .rename_folder(account_id, &from, &to)
+            .map(|_| ())
+            .map_err(|_| "Renamed on the server, but couldn't update it locally.".to_owned())
+    })
+    .await
+}
+
+/// Delete a folder (ORG-6): delete it on the server, then remove the local row (cascading its
+/// messages). Protected folders are refused. Irreversible — the UI confirms first.
+#[tauri::command]
+pub async fn delete_folder(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+    folder_id: i64,
+    name: String,
+) -> Result<(), String> {
+    if is_protected_folder(&name) {
+        return Err("That folder can't be deleted.".to_owned());
+    }
+    let st = state.inner().clone();
+    let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+    let name2 = name.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_delete_folder(&db, &*secrets, account_id, &name2)
+    })
+    .await
+    .map_err(|_| "The folder task stopped unexpectedly.".to_owned())??;
+    with_store(st, move |store| {
+        store
+            .delete_folder(folder_id)
+            .map_err(|_| "Deleted on the server, but couldn't remove it locally.".to_owned())
     })
     .await
 }
@@ -1254,6 +1343,14 @@ pub async fn dev_drafts() -> bool {
 #[tauri::command]
 pub async fn dev_select() -> Option<String> {
     std::env::var("GELEIT_SELECT").ok()
+}
+
+/// Dev/test seam, debug builds only: `GELEIT_FOLDER=new` opens the New-folder dialog on boot;
+/// `GELEIT_FOLDER=menu` opens the first user folder's ⋯ (Rename/Delete) menu. Never in release.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_folder() -> Option<String> {
+    std::env::var("GELEIT_FOLDER").ok()
 }
 
 #[cfg(test)]
