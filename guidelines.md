@@ -120,21 +120,43 @@ Once a slice's **spec, plan, and tasks** are agreed (P8), it is built in this ex
    is obvious (e.g. `acceptance_<story-id>_...`). Cover the happy path, failure modes, and the
    integrity invariants (no mail loss/duplication) where relevant. *A slice with no user story
    (infrastructure or a throwaway spike) instead records measurable pass/fail criteria.*
-3. **Run** — run the suite; everything green: tests + `cargo fmt --check` + `clippy -D warnings`
-   + `cargo mutants` on touched core crates. Red means not done.
-4. **End-user manual** — update the extensive end-user manual in `docs/manual/` for any
-   user-facing behavior the slice adds or changes. Plain language for private people, not
-   engineers. *A slice with no user-facing behavior (infrastructure or a throwaway spike)
-   omits this step — note the omission in the PR.*
-5. **Technical documentation** — update the extensive technical documentation in
-   `docs/technical/`: architecture, data flow, decisions, how the slice works and why. This is
-   *in addition to* in-code `///` docs and ADRs (§8), not a replacement.
-6. **Code review** — run a code reviewer over the slice's diff (the `code-review` process),
-   checking correctness, the constitution, and these guidelines; address findings.
+3. **Run** — everything green: `cargo test` + `cargo fmt --check` + `clippy -D warnings`
+   **run for the host *and* the `wasm32-unknown-unknown` target** (a wasm-only break in the Leptos
+   frontend passes a host-only check, §13) + `cargo mutants` on the touched pure logic (§8, §13) +
+   `cargo deny check` + `scripts/check-boundary.sh`. Red means not done.
+   - **Verify by the means the slice needs, beyond the automated suite.** **UI slices are
+     screenshot-verified:** launch the app against a **seeded demo DB** — *never a real account*, and
+     target your own window by PID so you don't capture a running user instance — and check each
+     affected view in light and dark. **Engine / network slices are live-verified** against a local
+     IMAP/SMTP (Dovecot) with the `#[ignore]`d live tests. Pure logic is covered by the tests above.
+4. **User manual** — write the slice's user-facing behavior into the **end-user manual**
+   (`docs/manual/`) and keep it current. Plain language for private people, not engineers — what
+   they can now do and how. The manual is a **maintained, required artifact**, written per slice and
+   never deferred to a "docs later" phase. *A slice with no user-facing behavior (infrastructure or a
+   throwaway spike) omits this step — note the omission in the PR.*
+5. **Technical manual** — write the slice into the **technical manual** (`docs/technical/`) and keep
+   it current: architecture, data flow, the decisions, how the slice works and why. Also a
+   **maintained, required artifact**. This is *in addition to* in-code `///` docs and ADRs (§8), not
+   a replacement.
+6. **Review — a panel, not one pass.** Each reviewer below is a **separate agent** with its own,
+   single remit; **spawn them in parallel** over the slice's diff so the passes are independent (one
+   lens never colours another) and the review is fast. **Every reviewer checks its artifact is present
+   *and* of good quality**, not merely present, and **every warranted finding is addressed before
+   merge**:
+   - **Code reviewer** — correctness, the constitution, and these guidelines; failure modes and the
+     integrity invariants (no mail loss/duplication).
+   - **Tests reviewer** — the acceptance tests (step 2) were actually written, map to the slice's
+     user stories, cover the happy path / failure modes / integrity invariants, and are meaningful
+     (not vacuous, tautological, or asserting nothing).
+   - **Technical-manual reviewer** — the technical manual (step 5) was updated for this slice and is
+     accurate, complete, and clear.
+   - **User-manual reviewer** — the user manual (step 4) was updated and is correct, in plain
+     language, and covers what the user can now do.
 7. **Merge** — open and merge the PR per §12 once all of the above pass.
 
-Documentation (4, 5) is produced per slice and **accumulates incrementally** — it becomes
-extensive over the project's life, and is never deferred to a "docs later" phase.
+The user and technical manuals (steps 4–5) are produced per slice and **accumulate incrementally** —
+they become extensive over the project's life, and are never deferred to a "docs later" phase; each
+is checked by its own reviewer in step 6.
 
 ## 12. Git & commits
 
@@ -142,11 +164,15 @@ extensive over the project's life, and is never deferred to a "docs later" phase
   into `main` at the end via a pull request** — never committed straight to `main`. The PR is
   the slice's completion gate.
 - A slice's PR is mergeable only when the full §11 workflow has passed: end-to-end and
-  verifiable (P8), test-green (fmt + clippy `-D warnings` + tests + `cargo mutants` on touched
-  core crates), **manual (where the slice is user-facing) and technical docs updated**,
-  **code review addressed**, and the slice's `tasks.md` updated to mark the slice done.
+  verifiable (P8), **all gates green** (§11 step 3), the **user manual and technical manual**
+  written/updated (where the slice warrants it), **every reviewer in the §11 panel addressed**
+  (code · tests · technical-manual · user-manual), and the slice's `tasks.md` updated to mark it done.
 - The PR description states *what* the slice delivers and links the milestone spec/plan; the
   diff is reviewed against the constitution and `guidelines.md` before merge.
+- **CI mirrors the §11 gates on every PR** (fmt · clippy `-D warnings` · tests · `cargo deny` ·
+  mutants-on-diff · boundary — ~2 min). The slow **release perf-budget** (fat-LTO build + cold-start /
+  RSS measurement) runs on **merge to `main`**, not per-PR, so PR feedback stays fast while it still
+  gates what lands; the pre-tag release build is the hard perf backstop.
 - Small, focused commits within the branch; imperative subject lines that say *why*.
 - `main` stays buildable and test-green at all times.
 - Don't commit secrets, fixtures containing real mail, or generated artifacts.
