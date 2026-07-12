@@ -111,6 +111,7 @@ fn main() {
         ipc::refresh,
         ipc::compose_draft,
         ipc::send_message,
+        ipc::suggest_addresses,
         ipc::pick_files,
         ipc::add_account,
         ipc::search,
@@ -130,6 +131,7 @@ fn main() {
         ipc::dev_settings,
         ipc::dev_search,
         ipc::dev_trash,
+        ipc::dev_compose_to,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -146,6 +148,7 @@ fn main() {
         ipc::refresh,
         ipc::compose_draft,
         ipc::send_message,
+        ipc::suggest_addresses,
         ipc::pick_files,
         ipc::add_account,
         ipc::search,

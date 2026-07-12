@@ -187,6 +187,17 @@ callback threading). Notable models:
   chip-commit and send); attachments come from a native picker (`pick_files` shells out to
   zenity/kdialog — deliberately not an in-process GTK dialog, which would clash with the webview loop)
   and are read + size-capped backend-side.
+- **Address autocomplete** — each `recipient_field` runs an `Effect` on its input text that calls the
+  `suggest_addresses` IPC command (thin wrapper over `store::suggest_addresses`: distinct past
+  `from_addr` values, prefix-matched, LIKE-escaped, capped at 6). A pure `rank_suggestions` (`view.rs`,
+  unit-tested) drops addresses already chipped on the field before the dropdown renders. Selection is
+  on `mousedown` with `preventDefault` so it fires *before* the input's blur-commit and wins over the
+  half-typed text; a stale-lookup guard (`input` unchanged after the await) prevents an old response
+  clobbering newer keystrokes. `Esc` closes the dropdown before it can reach the composer-discard path.
+- **Markdown compose** — a footer toggle (`md_on`, off per new draft) threads a `markdown` flag through
+  `api::send_message` → the `send_message` IPC → `run_send`, which renders the body with
+  `message::render_markdown` (pulldown-cmark, engine-side) into a `multipart/alternative` (text + HTML).
+  The raw body is always the text/plain part, so a non-HTML reader still gets readable text.
 - **List** is one keyed `<For>` over three fixed day buckets (Today/Yesterday/Earlier), so rank-ordered
   search results group correctly. Reading-pane header order is actions · sender · subject (buttons
   pinned on top). Keyboard: `c` `/` `e` `#` `r` `f` `z` `j`/`k` `Esc`.
@@ -215,6 +226,7 @@ isn't registered at all and the env var is never read:
 |---|---|
 | `GELEIT_OPEN=<id>` | that message in the reading pane (`GELEIT_IMAGES=1` loads its remote content) |
 | `GELEIT_COMPOSE=new\|reply\|reply_all\|forward` | the composer (`reply`/`reply_all`/`forward` also need `GELEIT_OPEN`) |
+| `GELEIT_TO=<text>` | with `GELEIT_COMPOSE=new`, pre-fills the To input (surfaces the autocomplete dropdown) |
 | `GELEIT_UNIFIED=1` | the merged "All inboxes" view |
 | `GELEIT_SETUP=1` | the add-account wizard |
 | `GELEIT_SETTINGS=1` | the Settings window |

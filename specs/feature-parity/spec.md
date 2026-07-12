@@ -48,3 +48,26 @@ feedback rules — a dialog, not an undo toast).
 - **Delete forever** — when the open message is *in* Trash, its **Delete** button permanently removes
   it (confirm → `delete_forever(id)`: `run_delete_permanently` by uid + `delete_message` locally)
   instead of moving to Trash (where it already is).
+
+## Slice 3 — Markdown compose + address autocomplete
+
+Both features already have working **engine/store** support (SEND-6, SEND-9) that the M9 UI never
+wired through. This slice is the missing plumbing plus two small UI affordances.
+
+- **Markdown compose** — `run_send` already takes a `markdown: bool` and, when set, renders the body
+  with `message::render_markdown` into a `multipart/alternative` (text + HTML) message; the IPC layer
+  currently hardcodes `false`. Thread a `markdown` flag through `api::send_message` → `send_message`
+  IPC → `run_send`, and add a **Markdown** toggle in the composer footer (off by default; the plain
+  body is always sent as the text/plain part, so a reader without HTML still gets readable text).
+- **Address autocomplete** — `store::suggest_addresses(account, prefix, limit)` returns distinct past
+  senders matching a prefix (LIKE-escaped, case-insensitive). Expose it as a `suggest_addresses` IPC
+  command + `api` binding, and show a suggestion dropdown under the To/Cc input in `recipient_field`.
+  A pure `rank_suggestions(candidates, already, limit)` helper in `view.rs` drops addresses already
+  chipped on the field (case-insensitive) and caps the list; selection funnels through the existing
+  `merge_addrs` commit path. Selection is on `mousedown` (with `preventDefault`) so it beats the
+  input's blur-commit.
+
+### Out of scope
+A rich-text WYSIWYG editor or a live Markdown preview (the toggle sends Markdown; no in-app render
+pane — `pulldown-cmark` lives in the engine, and the UI reaches it only over IPC). Suggestions come
+from past **senders** only (what the store indexes today), not a separate contacts store.

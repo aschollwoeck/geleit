@@ -3,7 +3,7 @@
 //! document — it is confined to a sandboxed `mail://` iframe (ADR-0012).
 use crate::api::{self, Account, AccountForm, ComposeDraft, Folder, Message, MessageBody};
 use crate::icons::{self, icon};
-use crate::view::{elide, format_date, merge_addrs, split_addrs};
+use crate::view::{elide, format_date, merge_addrs, rank_suggestions, split_addrs};
 use leptos::either::Either;
 use leptos::prelude::*;
 use std::collections::HashSet;
@@ -199,6 +199,11 @@ pub fn App() -> impl IntoView {
     let to_input = RwSignal::new(String::new()); // in-progress recipient text (not yet a chip)
     let cc_input = RwSignal::new(String::new());
     let attach_paths = RwSignal::new(Vec::<String>::new()); // files attached to the current draft
+    let md_on = RwSignal::new(false); // send the current draft as Markdown (text + HTML)
+                                      // Autocomplete matches per recipient field, held at App scope so the global Escape handler can
+                                      // close the dropdown before it would otherwise discard the whole draft.
+    let to_suggest = RwSignal::new(Vec::<String>::new());
+    let cc_suggest = RwSignal::new(Vec::<String>::new());
     let sending = RwSignal::new(false);
     let query = RwSignal::new(String::new());
     let search_open = RwSignal::new(false);
@@ -762,7 +767,10 @@ pub fn App() -> impl IntoView {
     let reset_recipient_inputs = move || {
         to_input.set(String::new());
         cc_input.set(String::new());
+        to_suggest.set(Vec::new());
+        cc_suggest.set(Vec::new());
         attach_paths.set(Vec::new());
+        md_on.set(false); // each new draft starts as plain text
     };
     // Open the native file picker and add the chosen files to the draft.
     let attach_files = move || {
@@ -819,6 +827,7 @@ pub fn App() -> impl IntoView {
         }
         sending.set(true);
         let atts = attach_paths.get_untracked();
+        let markdown = md_on.get_untracked();
         leptos::task::spawn_local(async move {
             match api::send_message(
                 aid,
@@ -829,6 +838,7 @@ pub fn App() -> impl IntoView {
                 d.in_reply_to,
                 d.references,
                 atts,
+                markdown,
             )
             .await
             {
@@ -966,6 +976,10 @@ pub fn App() -> impl IntoView {
             if let Ok(Some(kind)) = api::dev_compose().await {
                 if kind == "new" {
                     compose_new();
+                    // Optionally pre-fill the To input to surface the autocomplete dropdown.
+                    if let Ok(Some(prefix)) = api::dev_compose_to().await {
+                        to_input.set(prefix);
+                    }
                 } else if let Some(id) = opened {
                     // Build the reply/forward draft straight from the opened id — `open` may not be
                     // set yet, so don't route through `compose_from_open` (it reads `open`).
@@ -1007,7 +1021,15 @@ pub fn App() -> impl IntoView {
                 let typing = matches!(tag.as_str(), "INPUT" | "TEXTAREA");
                 let key = e.key();
                 if key == "Escape" {
-                    if compose.get_untracked().is_some() {
+                    // An open recipient-autocomplete dropdown swallows Escape (close it, keep the
+                    // draft) — the input's own handler can't win this race because the global
+                    // listener sits on `document` and fires before Leptos's window-delegated one.
+                    if !to_suggest.get_untracked().is_empty()
+                        || !cc_suggest.get_untracked().is_empty()
+                    {
+                        to_suggest.set(Vec::new());
+                        cc_suggest.set(Vec::new());
+                    } else if compose.get_untracked().is_some() {
                         discard_compose();
                     } else if wiz.get_untracked().is_some() {
                         wiz.set(None);
@@ -1452,8 +1474,8 @@ pub fn App() -> impl IntoView {
                             <span style="font-weight:500">{current_email}</span>
                             <span class="dot" style=move || format!("background:{}", current_color())></span>
                         </div>
-                        {recipient_field(compose, to_input, "To", "name@example.com", |d| &d.to, |d, v| d.to = v)}
-                        {recipient_field(compose, cc_input, "Cc", "", |d| &d.cc, |d, v| d.cc = v)}
+                        {recipient_field(compose, to_input, to_suggest, account, "To", "name@example.com", |d| &d.to, |d, v| d.to = v)}
+                        {recipient_field(compose, cc_input, cc_suggest, account, "Cc", "", |d| &d.cc, |d, v| d.cc = v)}
                         <div class="field-row">
                             <span class="field-label">"Subject"</span>
                             <input placeholder="Subject" prop:value=move || compose.get().map(|d| d.subject).unwrap_or_default()
@@ -1486,6 +1508,11 @@ pub fn App() -> impl IntoView {
                             </button>
                             <button class="foot-discard" title="Discard" on:click=move |_| discard_compose()>
                                 {icon(icons::TRASH)} "Discard"
+                            </button>
+                            <button class="foot-md" class:on=move || md_on.get()
+                                title="Format the message with Markdown"
+                                on:click=move |_| md_on.update(|m| *m = !*m)>
+                                {icon(icons::MARKDOWN)} "Markdown"
                             </button>
                             <span class="draft-status">"Draft"</span>
                         </div>
@@ -1755,9 +1782,12 @@ fn folder_role(name: &str) -> &'static str {
 /// A compose recipient row (To / Cc) rendered as removable chips plus an input for the next address.
 /// Committed addresses live in the draft field (`get`/`set`); `input` holds the in-progress text and
 /// becomes a chip on Enter, comma, or blur.
+#[allow(clippy::too_many_arguments)]
 fn recipient_field(
     compose: RwSignal<Option<ComposeDraft>>,
     input: RwSignal<String>,
+    suggestions: RwSignal<Vec<String>>, // autocomplete matches (held at App scope, see the Esc handler)
+    account: RwSignal<Option<i64>>,
     label: &'static str,
     placeholder: &'static str,
     get: fn(&ComposeDraft) -> &String,
@@ -1766,6 +1796,7 @@ fn recipient_field(
     let field = move || compose.get().map(|d| get(&d).clone()).unwrap_or_default();
     let commit = move || {
         let typed = input.get_untracked();
+        suggestions.set(Vec::new());
         if typed.trim().is_empty() {
             return;
         }
@@ -1778,6 +1809,43 @@ fn recipient_field(
         });
         input.set(String::new());
     };
+    // Pick a suggestion: add it as a chip and close the dropdown (bypasses the typed text entirely).
+    let select = move |addr: String| {
+        compose.update(|c| {
+            if let Some(c) = c {
+                set(c, merge_addrs(get(c), &addr));
+            }
+        });
+        input.set(String::new());
+        suggestions.set(Vec::new());
+    };
+    // Look up past senders whenever the input text changes (typed or set programmatically), dropping
+    // what's already chipped. Reads `compose`/`account` untracked so only `input` drives the effect;
+    // the last-write-wins guard (`input` unchanged) keeps a slow lookup from clobbering newer keys.
+    Effect::new(move |_| {
+        let text = input.get();
+        let Some(aid) = account.get_untracked() else {
+            suggestions.set(Vec::new());
+            return;
+        };
+        if text.trim().is_empty() {
+            suggestions.set(Vec::new());
+            return;
+        }
+        let already = split_addrs(
+            &compose
+                .get_untracked()
+                .map(|d| get(&d).clone())
+                .unwrap_or_default(),
+        );
+        leptos::task::spawn_local(async move {
+            if let Ok(cands) = api::suggest_addresses(aid, text.clone()).await {
+                if input.get_untracked() == text {
+                    suggestions.set(rank_suggestions(&cands, &already, 6));
+                }
+            }
+        });
+    });
     let remove = move |addr: String| {
         compose.update(|c| {
             if let Some(c) = c {
@@ -1791,7 +1859,7 @@ fn recipient_field(
         });
     };
     view! {
-        <div class="field-row">
+        <div class="field-row recipient">
             <span class="field-label">{label}</span>
             <For each=move || split_addrs(&field()) key=|a| a.clone() let:addr>
                 {
@@ -1809,6 +1877,8 @@ fn recipient_field(
                 prop:value=move || input.get()
                 on:input=move |e| input.set(event_target_value(&e))
                 on:keydown=move |e| {
+                    // Escape is handled by the global document handler (it closes an open dropdown
+                    // before it would discard the draft — this delegated listener fires too late).
                     let k = e.key();
                     if k == "Enter" || k == "," {
                         e.prevent_default();
@@ -1817,6 +1887,21 @@ fn recipient_field(
                 }
                 on:blur=move |_| commit()
             />
+            <Show when=move || !suggestions.get().is_empty()>
+                <ul class="suggest">
+                    <For each=move || suggestions.get() key=|a| a.clone() let:addr>
+                        {
+                            let a = addr.clone();
+                            // mousedown (not click) with preventDefault: fires before the input's
+                            // blur-commit and keeps focus, so picking a suggestion wins over the
+                            // half-typed text.
+                            view! {
+                                <li on:mousedown=move |e| { e.prevent_default(); select(a.clone()); }>{addr}</li>
+                            }
+                        }
+                    </For>
+                </ul>
+            </Show>
         </div>
     }
 }

@@ -134,6 +134,13 @@ struct SendArgs {
     in_reply_to: Option<String>,
     references: Vec<String>,
     attachments: Vec<String>,
+    markdown: bool,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SuggestArgs {
+    account_id: i64,
+    prefix: String,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -357,6 +364,7 @@ pub async fn send_message(
     in_reply_to: Option<String>,
     references: Vec<String>,
     attachments: Vec<String>,
+    markdown: bool,
 ) -> Result<(), String> {
     call(
         "send_message",
@@ -369,6 +377,7 @@ pub async fn send_message(
             in_reply_to,
             references,
             attachments,
+            markdown,
         },
     )
     .await
@@ -377,6 +386,11 @@ pub async fn send_message(
 /// Open a native file picker and return the chosen paths (empty if cancelled).
 pub async fn pick_files() -> Result<Vec<String>, String> {
     call("pick_files", &NoArgs {}).await
+}
+
+/// Distinct past-sender addresses matching `prefix`, for To/Cc autocomplete. Empty for a blank prefix.
+pub async fn suggest_addresses(account_id: i64, prefix: String) -> Result<Vec<String>, String> {
+    call("suggest_addresses", &SuggestArgs { account_id, prefix }).await
 }
 
 /// Kick a refresh of `folder`: recent mail syncs first (this resolves when it's in), then older mail
@@ -488,6 +502,11 @@ pub async fn dev_search() -> Result<Option<String>, String> {
 /// Dev/test seam — see `geleit-app::ipc::dev_trash`. Always `None` in a release build.
 pub async fn dev_trash() -> Result<Option<String>, String> {
     call("dev_trash", &NoArgs {}).await
+}
+
+/// Dev/test seam — see `geleit-app::ipc::dev_compose_to`. Always `None` in a release build.
+pub async fn dev_compose_to() -> Result<Option<String>, String> {
+    call("dev_compose_to", &NoArgs {}).await
 }
 
 /// Dev/test seam — see `geleit-app::ipc::dev_setup`. Always `false` in a release build.
