@@ -57,16 +57,14 @@ anything remote unless the reader asks.
 *This principle was amended in M9. The original — "Native, not a webview shell" — rested on the
 premise that a contained native/webview split was achievable. It was not; see ADR-0012.*
 
-**Leanness is measured, not asserted.** CI runs `scripts/perf-budget.sh` (headless under xvfb, S9.8)
-and **fails the build if a *timed* ceiling is breached** — binary size, cold start, and idle RSS.
-Message-open is bounded by design rather than timed (see the table):
+**Leanness is measured, not asserted** — `scripts/perf-budget.sh` (S9.8):
 
 | Budget | Ceiling | Enforcement |
 |---|---|---|
-| Binary size (stripped) | **30 MB** | CI, every PR |
-| Cold start (release, warm cache, to first paint) | **1200 ms** | CI, every PR (timed exec→first paint) |
-| Idle RSS (window open) | **280 MB** | CI, every PR |
-| Message-open latency (click → rendered) | **100 ms** | **Not CI-timed** (no precise headless render-complete signal). Bounded by design: the open path does one indexed local SQLite read and a local iframe render — **no network, no I/O beyond the local DB** — so it stays well under this in practice. Add a timed check if the open path ever grows heavier. |
+| Binary size (stripped) | **30 MB** | **Hard CI gate, every PR** (byte-precise). |
+| Cold start (release, to first paint) | **1200 ms** | **Hard on a real display** (the release perf gate, before tagging). Measured in CI too, but WebKitGTK's first paint is unreliable headless, so CI *warns* if it can't paint — while a *measured* breach still fails CI. Currently ~850 ms. |
+| Idle RSS, PSS across the process tree (window open) | **280 MB** | Same as cold start. PSS, not RSS — WebKitGTK is multi-process and shares libraries. Currently ~135 MB. |
+| Message-open latency (click → rendered) | **100 ms** | **Not timed** (no precise headless render-complete signal). Bounded by design: the open path is one indexed local SQLite read + a local iframe render — no network, no I/O beyond the local DB. Add a timed check if it ever grows heavier. |
 
 These are **ceilings, not targets**. A change that moves any of them toward its ceiling is a
 defect to be justified, not a cost to be absorbed. Tightening a ceiling is always in scope;

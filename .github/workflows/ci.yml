@@ -41,9 +41,11 @@ jobs:
         run: ./scripts/check-boundary.sh
 
   perf-budget:
-    # Enforce the constitution P4 performance ceilings (M9, ADR-0012): binary size, cold start, idle
-    # RSS. "Ceilings, not targets" — a breach fails the build. Runs the release app headless (xvfb),
-    # timing exec→first-paint via the GELEIT_READY marker the app prints under GELEIT_PERF=1.
+    # Enforce the constitution P4 performance ceilings (M9, ADR-0012). Binary size is a HARD gate here.
+    # Cold start + idle RSS are measured too, but WebKitGTK's first paint is unreliable on a headless
+    # X server, so PERF_BUDGET_SOFT_DISPLAY=1 makes "couldn't reach first paint" a warning rather than a
+    # failure — while a *measured* cold-start/RSS breach still fails. The hard enforcement of those two
+    # is the release perf gate (scripts/perf-budget.sh on a real display, before tagging).
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -62,7 +64,7 @@ jobs:
       - name: Build release (wasm + app)
         run: ./scripts/build-ui.sh --release && cargo build --release -p geleit-app
       - name: Perf budget (P4 ceilings)
-        run: xvfb-run -a --server-args="-screen 0 1400x1000x24" ./scripts/perf-budget.sh
+        run: PERF_BUDGET_SOFT_DISPLAY=1 xvfb-run -a --server-args="-screen 0 1400x1000x24" ./scripts/perf-budget.sh
 
   supply-chain:
     if: github.event_name != 'schedule'

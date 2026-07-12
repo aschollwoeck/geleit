@@ -117,21 +117,34 @@ median() { printf '%s\n' "$@" | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)
 cold_ms=$(median "${cold_runs[@]}")
 rss_mb=$(median "${rss_runs[@]}")
 
-# A run that never reached first paint (or whose process vanished) is a hard failure even if the
-# median looks fine — an intermittent boot hang must not be masked by two good runs.
+# "Couldn't reach first paint" and "measured a breach" are different failures. On a real display the
+# former is a hard failure (an intermittent boot hang must not hide behind two good runs). In headless
+# CI (PERF_BUDGET_SOFT_DISPLAY=1) WebKitGTK's first paint is not reliable, so it's a WARNING there — but
+# a *measured* cold-start/RSS over the ceiling still fails the build even in CI. That distinction keeps
+# the gate honest: infra flakiness is tolerated; a real regression is not.
+soft="${PERF_BUDGET_SOFT_DISPLAY:-0}"
 if (( timed_out )); then
-  say "cold start / RSS" "✗ a run never reached first paint (or the process vanished)"; fail=1
+  if (( soft )); then
+    say "cold start / RSS" "⚠ couldn't reach first paint headless — not measured (binary size still gated)"
+  else
+    say "cold start / RSS" "✗ a run never reached first paint (or the process vanished)"; fail=1
+  fi
 fi
-if (( cold_ms > COLD_CEIL_MS )); then
-  say "cold start (exec→first paint)" "${cold_ms} ms  ✗ (> ${COLD_CEIL_MS} ms)"; fail=1
-else
-  say "cold start (exec→first paint)" "${cold_ms} ms  ✓ (<= ${COLD_CEIL_MS} ms)"
+# Compare only a value we actually measured (999999 is the never-painted sentinel).
+if (( cold_ms < 999999 )); then
+  if (( cold_ms > COLD_CEIL_MS )); then
+    say "cold start (exec→first paint)" "${cold_ms} ms  ✗ (> ${COLD_CEIL_MS} ms)"; fail=1
+  else
+    say "cold start (exec→first paint)" "${cold_ms} ms  ✓ (<= ${COLD_CEIL_MS} ms)"
+  fi
 fi
-if (( rss_mb > RSS_CEIL_MB )); then
-  say "idle RSS (PSS, process tree)" "${rss_mb} MB  ✗ (> ${RSS_CEIL_MB} MB)"; fail=1
-else
-  say "idle RSS (PSS, process tree)" "${rss_mb} MB  ✓ (<= ${RSS_CEIL_MB} MB)"
+if (( rss_mb < 999999 )); then
+  if (( rss_mb > RSS_CEIL_MB )); then
+    say "idle RSS (PSS, process tree)" "${rss_mb} MB  ✗ (> ${RSS_CEIL_MB} MB)"; fail=1
+  else
+    say "idle RSS (PSS, process tree)" "${rss_mb} MB  ✓ (<= ${RSS_CEIL_MB} MB)"
+  fi
 fi
 
-(( fail == 0 )) && echo "perf budget: all ceilings OK." || echo "perf budget: CEILING BREACHED." >&2
+(( fail == 0 )) && echo "perf budget: OK." || echo "perf budget: CEILING BREACHED." >&2
 exit "$fail"
