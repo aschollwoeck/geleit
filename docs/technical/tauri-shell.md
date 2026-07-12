@@ -198,6 +198,17 @@ callback threading). Notable models:
   `api::send_message` → the `send_message` IPC → `run_send`, which renders the body with
   `message::render_markdown` (pulldown-cmark, engine-side) into a `multipart/alternative` (text + HTML).
   The raw body is always the text/plain part, so a non-HTML reader still gets readable text.
+- **Drafts** — local-only (SEND-5), over the store's existing `draft` table via four IPC commands
+  (`save_draft` / `list_drafts` / `load_draft` / `delete_draft`); `DraftContent` ↔ `ComposeDraft` and
+  the `DraftSummary` preview are pure maps in `dto.rs` (unit-tested). **Save draft** upserts the form
+  (updating the current row when one is being edited) and closes the composer. `current_draft_id` is
+  set only when a row is *resumed*, so continued editing targets the same row. A **Drafts** rail entry
+  sets `drafts_open`, which
+  makes `rows` return empty and swaps the list pane to a `list_drafts` view; clicking a row runs
+  `load_draft` back into the composer with `current_draft_id` set, so edits update the same row.
+  `send_message` now carries `draft_id`, so `run_send` deletes the draft after a successful send.
+  Server-backed drafts and draft attachments (the composer holds file *paths*, the table stores
+  *bytes*) are deliberately out of scope.
 - **List** is one keyed `<For>` over three fixed day buckets (Today/Yesterday/Earlier), so rank-ordered
   search results group correctly. Reading-pane header order is actions · sender · subject (buttons
   pinned on top). Keyboard: `c` `/` `e` `#` `r` `f` `z` `j`/`k` `Esc`.
@@ -227,6 +238,7 @@ isn't registered at all and the env var is never read:
 | `GELEIT_OPEN=<id>` | that message in the reading pane (`GELEIT_IMAGES=1` loads its remote content) |
 | `GELEIT_COMPOSE=new\|reply\|reply_all\|forward` | the composer (`reply`/`reply_all`/`forward` also need `GELEIT_OPEN`) |
 | `GELEIT_TO=<text>` | with `GELEIT_COMPOSE=new`, pre-fills the To input (surfaces the autocomplete dropdown) |
+| `GELEIT_DRAFTS=1` | the saved-Drafts list |
 | `GELEIT_UNIFIED=1` | the merged "All inboxes" view |
 | `GELEIT_SETUP=1` | the add-account wizard |
 | `GELEIT_SETTINGS=1` | the Settings window |

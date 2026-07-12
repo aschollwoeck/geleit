@@ -71,3 +71,31 @@ wired through. This slice is the missing plumbing plus two small UI affordances.
 A rich-text WYSIWYG editor or a live Markdown preview (the toggle sends Markdown; no in-app render
 pane — `pulldown-cmark` lives in the engine, and the UI reaches it only over IPC). Suggestions come
 from past **senders** only (what the store indexes today), not a separate contacts store.
+
+## Slice 4 — Drafts (save & resume)
+
+The **local-drafts store layer already exists** (SEND-5): a `draft` table + `save_draft` /
+`list_drafts` / `draft_by_id` / `delete_draft` and the `DraftContent`/`DraftRow` structs, all
+unit-tested but never wired to IPC or UI. `run_send` already takes a trailing `draft_id: Option<i64>`
+and deletes that local draft after a successful send; the IPC call currently passes `None`. This slice
+is the missing plumbing plus a Drafts view.
+
+- **Save** — a **Save draft** action in the composer footer upserts the current form via a new
+  `save_draft(account, draft_id, ComposeDraft)` IPC (`DraftContent` is a 1:1 field map of
+  `ComposeDraft`), records the returned id in a `current_draft_id` signal, and closes the composer.
+- **Resume** — a **Drafts** entry in the folder rail switches the message-list pane to a draft list
+  (`list_drafts` → a `DraftSummary` DTO: id, recipient, subject, snippet, saved-time). Clicking a
+  draft loads it (`load_draft(id)` → `ComposeDraft`) back into the composer with `current_draft_id`
+  set, so continuing to edit updates the same row and sending clears it.
+- **Delete** — each draft row has a delete affordance (`delete_draft(id)`); sending a resumed draft
+  deletes it automatically (the `draft_id` now threads through `send_message` → `run_send`).
+
+Mapping/snippet logic (`ComposeDraft` ↔ `DraftContent`, `DraftSummary` preview) lives in the pure,
+unit-tested `dto.rs`.
+
+### Out of scope
+Server-backed drafts (IMAP `APPEND` to the Drafts folder with `\Draft`, a `FolderRole::Drafts`, and
+server-copy lifecycle) — a later slice. **Attachments on a saved draft** — the `draft_attachment`
+table exists, but the composer's attachments are file *paths* while the table stores *bytes*, and the
+send path reads attachments from paths; bridging that is its own slice. A saved draft keeps text and
+recipients; re-attach files when you resume.

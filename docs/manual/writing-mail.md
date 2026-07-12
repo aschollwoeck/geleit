@@ -19,7 +19,7 @@ added the account) and saves a copy to your **Sent** folder. Sending happens in 
 the app stays responsive; if something goes wrong you get a short, plain explanation and the message
 stays open to try again. To throw a message away, choose **Discard**.
 
-![The compose window: From, To and Cc recipient chips, Subject, body, and a footer with Send, Attach, Discard, and a Markdown toggle.](images/compose.png)
+![The compose window: From, To and Cc recipient chips, Subject, body, and a footer with Send, Attach, Discard, a Markdown toggle, and Save draft.](images/compose.png)
 
 ## Replying and forwarding
 
@@ -39,6 +39,17 @@ In the compose window, choose **Attach** to pick one or more files with your sys
 Each attached file shows as a chip with its name; remove one with its **✕**. Attachments are included
 when you send. (There's a size limit of 25 MB in total, so an over-large file is turned away with a
 clear message rather than failing mid-send.)
+
+## Saving a draft
+
+Not ready to send? Choose **Save draft** in the compose footer. GeleitMail stores the message —
+recipients, subject, and body — on your device and closes the window. Open **Drafts** in the folder
+list to see everything you've saved, newest first; choose one to pick up exactly where you left off.
+Continuing to edit updates the same draft, and **sending it removes it from Drafts** automatically.
+To throw a saved draft away, hover its row and choose the trash icon.
+
+Drafts live only on this device (encrypted, like the rest of your mail) — they aren't uploaded to your
+provider. Attachments aren't part of a saved draft yet, so re-attach any files when you resume.
 
 ## Markdown formatting
 

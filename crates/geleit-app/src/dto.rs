@@ -6,8 +6,8 @@
 //!
 //! These are DTOs, not store types: the frontend never sees `geleit_store` types, so the schema can
 //! evolve without breaking the UI, and the UI cannot reach into the store even by accident.
-use geleit_store::MessageHeader;
-use serde::Serialize;
+use geleit_store::{DraftContent, DraftRow, MessageHeader};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AccountDto {
@@ -64,7 +64,7 @@ pub struct MessageBodyDto {
 
 /// A compose form, prefilled for a reply/forward or blank for a new message. Plain strings — the
 /// compose window is the app's own document, never a webview; untrusted content never enters it.
-#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ComposeDraft {
     pub to: String,
     pub cc: String,
@@ -73,6 +73,69 @@ pub struct ComposeDraft {
     /// Threading headers, carried opaquely and passed straight back to `send_message`.
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+}
+
+/// A row in the Drafts list: enough to recognise a saved draft without loading its whole body.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DraftSummary {
+    pub id: i64,
+    /// Recipient line as typed (comma-joined), or empty. Shown so drafts to different people differ.
+    pub to: String,
+    pub subject: String,
+    /// A short one-line preview of the body.
+    pub snippet: String,
+    pub updated_at: i64,
+}
+
+/// Map a compose form to the store's draft content (a 1:1 field copy — the two types are deliberately
+/// identical, kept separate so the UI DTO and the store schema can evolve independently).
+#[must_use]
+pub fn draft_content_from(d: &ComposeDraft) -> DraftContent {
+    DraftContent {
+        to: d.to.clone(),
+        cc: d.cc.clone(),
+        subject: d.subject.clone(),
+        body: d.body.clone(),
+        in_reply_to: d.in_reply_to.clone(),
+        references: d.references.clone(),
+    }
+}
+
+/// Rebuild a compose form from a stored draft's content, to resume editing it.
+#[must_use]
+pub fn compose_from_draft(c: DraftContent) -> ComposeDraft {
+    ComposeDraft {
+        to: c.to,
+        cc: c.cc,
+        subject: c.subject,
+        body: c.body,
+        in_reply_to: c.in_reply_to,
+        references: c.references,
+    }
+}
+
+/// One-line preview for a draft list row: the body with newlines flattened to spaces, trimmed, and
+/// clipped to `max` chars on a char boundary (an ellipsis marks a clip). Pure.
+#[must_use]
+pub fn draft_snippet(body: &str, max: usize) -> String {
+    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let clipped: String = flat.chars().take(max).collect();
+    format!("{}…", clipped.trim_end())
+}
+
+/// Map a stored draft row into its list summary.
+#[must_use]
+pub fn draft_summary(row: &DraftRow) -> DraftSummary {
+    DraftSummary {
+        id: row.id,
+        to: row.content.to.clone(),
+        subject: row.content.subject.clone(),
+        snippet: draft_snippet(&row.content.body, 80),
+        updated_at: row.updated_at,
+    }
 }
 
 /// Format a unix timestamp as a short human date (e.g. `12 Jul 2026`) for a reply's attribution line
@@ -253,6 +316,54 @@ pub fn resolve_folder(folders: &[String], role: FolderRole) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draft_snippet_flattens_whitespace_and_clips_on_a_boundary() {
+        assert_eq!(draft_snippet("  hello   world \n", 80), "hello world");
+        assert_eq!(draft_snippet("", 80), "");
+        // Exactly at the cap: no ellipsis.
+        assert_eq!(draft_snippet("abcde", 5), "abcde");
+        // Over the cap: clipped with an ellipsis, trailing space trimmed before it.
+        assert_eq!(draft_snippet("one two three", 4), "one…");
+        // Multibyte chars are clipped by char count, not bytes (no panic mid-char).
+        assert_eq!(draft_snippet("héllo wörld", 5), "héllo…");
+    }
+
+    #[test]
+    fn compose_and_draft_content_round_trip_identically() {
+        let d = ComposeDraft {
+            to: "a@x.io, b@y.io".to_owned(),
+            cc: "c@z.io".to_owned(),
+            subject: "Hi".to_owned(),
+            body: "Body".to_owned(),
+            in_reply_to: Some("<m1@x>".to_owned()),
+            references: vec!["<r0@x>".to_owned(), "<r1@x>".to_owned()],
+        };
+        // ComposeDraft → DraftContent → ComposeDraft is lossless.
+        assert_eq!(compose_from_draft(draft_content_from(&d)), d);
+    }
+
+    #[test]
+    fn draft_summary_carries_id_recipient_subject_and_a_snippet() {
+        let row = DraftRow {
+            id: 7,
+            content: DraftContent {
+                to: "a@x.io".to_owned(),
+                cc: String::new(),
+                subject: "Plan".to_owned(),
+                body: "Let's meet\nnext week to plan.".to_owned(),
+                in_reply_to: None,
+                references: Vec::new(),
+            },
+            updated_at: 1_700_000_000,
+        };
+        let s = draft_summary(&row);
+        assert_eq!(s.id, 7);
+        assert_eq!(s.to, "a@x.io");
+        assert_eq!(s.subject, "Plan");
+        assert_eq!(s.snippet, "Let's meet next week to plan.");
+        assert_eq!(s.updated_at, 1_700_000_000);
+    }
 
     #[test]
     fn sender_prefers_the_display_name_then_the_address() {
