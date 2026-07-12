@@ -211,6 +211,7 @@ pub async fn list_messages(
 pub async fn open_message(
     state: tauri::State<'_, AppState>,
     id: i64,
+    mark_read: bool,
 ) -> Result<MessageBodyDto, String> {
     with_store(state.inner().clone(), move |store| {
         let header = store
@@ -224,8 +225,11 @@ pub async fn open_message(
         // Opening a message marks it read (READ-7) — persisted here, not just in the UI's signal,
         // or the unread dot reappears the moment the folder is re-listed from SQLite. (Server
         // write-back of \Seen is S9.4; the *local* write belongs here and nowhere else.) A failure
-        // to record it must not stop the user reading their mail, so it is best-effort.
-        let _ = store.set_seen(id, true);
+        // to record it must not stop the user reading their mail, so it is best-effort. When the
+        // "mark as read when opened" preference is off, the read is skipped entirely.
+        if mark_read {
+            let _ = store.set_seen(id, true);
+        }
         // The HTML body is NOT returned to the frontend. It is served straight to the sandboxed
         // iframe from the `mail://` origin (see `mailproto`), so hostile markup never enters the
         // app's own document — not even as a string in a signal.

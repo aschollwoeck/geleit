@@ -312,17 +312,21 @@ pub fn App() -> impl IntoView {
     let choose_message = move |id: i64| {
         load_images.set(!block_remote.get_untracked()); // block-off ⇒ show images by default
         move_menu.set(false);
+        let mr = mark_read.get_untracked(); // "mark as read when opened" preference
         leptos::task::spawn_local(async move {
-            match api::open_message(id).await {
+            match api::open_message(id, mr).await {
                 Ok(body) => {
                     open.set(Some(body));
-                    // read this session; clears any earlier "mark unread" on the same message
-                    read_now.update(|s| {
-                        s.insert(id);
-                    });
-                    marked_unread.update(|s| {
-                        s.remove(&id);
-                    });
+                    // When the preference is on, mark it read this session and clear any earlier
+                    // "mark unread". When off, leave the unread state exactly as it was.
+                    if mr {
+                        read_now.update(|s| {
+                            s.insert(id);
+                        });
+                        marked_unread.update(|s| {
+                            s.remove(&id);
+                        });
+                    }
                 }
                 Err(e) => error.set(Some(e)),
             }
@@ -751,9 +755,11 @@ pub fn App() -> impl IntoView {
     // Dev-only screenshot seam (the commands return nothing in a release build): `GELEIT_OPEN=<id>`
     // opens a message on launch (`GELEIT_IMAGES=1` loads its remote content), `GELEIT_COMPOSE=<kind>`
     // opens the composer. Used to drive the UI into a state for a screenshot without click injection.
-    Effect::new(move |prev: Option<()>| {
-        if prev.is_some() {
-            return;
+    // Waits for boot to finish (`loaded`) so preferences like mark-as-read are already in effect.
+    Effect::new(move |ran: Option<bool>| {
+        let ran = ran.unwrap_or(false);
+        if ran || !loaded.get() {
+            return ran;
         }
         leptos::task::spawn_local(async move {
             let opened = api::dev_open_message().await.ok().flatten();
@@ -775,6 +781,7 @@ pub fn App() -> impl IntoView {
                 }
             }
         });
+        true
     });
 
     // keyboard shortcuts on the document (c compose, / search, e archive, r reply, f forward, Esc close)
