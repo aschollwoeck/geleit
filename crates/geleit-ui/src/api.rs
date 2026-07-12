@@ -84,6 +84,12 @@ struct IdArgs {
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct OpenArgs {
+    id: i64,
+    mark_read: bool,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StarArgs {
     id: i64,
     on: bool,
@@ -231,8 +237,8 @@ pub async fn list_messages(folder_id: i64, limit: i64) -> Result<Vec<Message>, S
     call("list_messages", &FolderArgs { folder_id, limit }).await
 }
 
-pub async fn open_message(id: i64) -> Result<MessageBody, String> {
-    call("open_message", &IdArgs { id }).await
+pub async fn open_message(id: i64, mark_read: bool) -> Result<MessageBody, String> {
+    call("open_message", &OpenArgs { id, mark_read }).await
 }
 
 pub async fn set_star(id: i64, on: bool) -> Result<(), String> {
