@@ -186,6 +186,7 @@ pub fn App() -> impl IntoView {
     let compose = RwSignal::new(Option::<ComposeDraft>::None);
     let to_input = RwSignal::new(String::new()); // in-progress recipient text (not yet a chip)
     let cc_input = RwSignal::new(String::new());
+    let attach_paths = RwSignal::new(Vec::<String>::new()); // files attached to the current draft
     let sending = RwSignal::new(false);
     let query = RwSignal::new(String::new());
     let search_open = RwSignal::new(false);
@@ -611,6 +612,22 @@ pub fn App() -> impl IntoView {
     let reset_recipient_inputs = move || {
         to_input.set(String::new());
         cc_input.set(String::new());
+        attach_paths.set(Vec::new());
+    };
+    // Open the native file picker and add the chosen files to the draft.
+    let attach_files = move || {
+        leptos::task::spawn_local(async move {
+            match api::pick_files().await {
+                Ok(paths) => attach_paths.update(|list| {
+                    for p in paths {
+                        if !list.contains(&p) {
+                            list.push(p);
+                        }
+                    }
+                }),
+                Err(e) => error.set(Some(e)),
+            }
+        });
     };
     let compose_new = move || {
         reset_recipient_inputs();
@@ -651,6 +668,7 @@ pub fn App() -> impl IntoView {
             return;
         }
         sending.set(true);
+        let atts = attach_paths.get_untracked();
         leptos::task::spawn_local(async move {
             match api::send_message(
                 aid,
@@ -660,6 +678,7 @@ pub fn App() -> impl IntoView {
                 d.body,
                 d.in_reply_to,
                 d.references,
+                atts,
             )
             .await
             {
@@ -1190,9 +1209,28 @@ pub fn App() -> impl IntoView {
                         </div>
                         <textarea placeholder="Write your message…" prop:value=move || compose.get().map(|d| d.body).unwrap_or_default()
                             on:input=move |e| compose.update(|c| if let Some(c) = c { c.body = event_target_value(&e); })></textarea>
+                        <Show when=move || !attach_paths.get().is_empty()>
+                            <div class="attach-row">
+                                <For each=move || attach_paths.get() key=|p| p.clone() let:path>
+                                    {
+                                        let p = path.clone();
+                                        let name = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_owned();
+                                        view! {
+                                            <span class="chip attach">
+                                                {icon(icons::CLIP)} {name}
+                                                <span class="x" on:click=move |_| attach_paths.update(|l| l.retain(|x| x != &p))>{icon(icons::CLOSE)}</span>
+                                            </span>
+                                        }
+                                    }
+                                </For>
+                            </div>
+                        </Show>
                         <div class="compose-foot">
                             <button class="btn-primary" disabled=move || sending.get() on:click=move |_| send_compose()>
                                 {move || if sending.get() { "Sending…" } else { "Send" }}
+                            </button>
+                            <button class="foot-attach" title="Attach files" on:click=move |_| attach_files()>
+                                {icon(icons::CLIP)} "Attach"
                             </button>
                             <button class="foot-discard" title="Discard" on:click=move |_| discard_compose()>
                                 {icon(icons::TRASH)} "Discard"
