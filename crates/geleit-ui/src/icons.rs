@@ -36,6 +36,8 @@ pub const UNREAD: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill
 pub const STAR: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 1.6l1.86 3.77 4.16.6-3.01 2.94.71 4.14L8 11.2 4.28 13.05l.71-4.14L1.98 5.97l4.16-.6L8 1.6Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>"#;
 /// Filled star (flagged).
 pub const STAR_FILLED: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.6l1.86 3.77 4.16.6-3.01 2.94.71 4.14L8 11.2 4.28 13.05l.71-4.14L1.98 5.97l4.16-.6L8 1.6Z"/></svg>"#;
+/// The Markdown mark (rounded rect with an "M" and a down chevron).
+pub const MARKDOWN: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="1" y="3" width="14" height="10" rx="1.6" stroke="currentColor" stroke-width="1.3"/><path d="M3.4 10.6V5.6l1.8 2.1 1.8-2.1v5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.9 5.6v5m0 0L9.5 9.1m1.4 1.5 1.4-1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 
 /// Folder icons keyed by a role/name; unknown folders get the generic folder glyph.
 pub fn folder_icon(name: &str) -> &'static str {

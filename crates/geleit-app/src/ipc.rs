@@ -674,6 +674,7 @@ pub async fn send_message(
     in_reply_to: Option<String>,
     references: Vec<String>,
     attachments: Vec<String>,
+    markdown: bool,
 ) -> Result<(), String> {
     // Append the account's signature (SEND-7). Read it up front on the store thread.
     let signature = with_store(state.inner().clone(), move |store| {
@@ -703,12 +704,28 @@ pub async fn send_message(
             in_reply_to,
             references,
             attachments,
-            false, // markdown toggle is a follow-up
-            None,  // draft persistence is a follow-up
+            markdown,
+            None, // draft persistence is a follow-up
         )
     })
     .await
     .map_err(|_| "The send task stopped unexpectedly.".to_owned())?
+}
+
+/// Distinct past-sender addresses matching a prefix, for To/Cc autocomplete (SEND-9). Read-only;
+/// capped small so the dropdown stays calm. Empty prefix returns nothing (the store handles that).
+#[tauri::command]
+pub async fn suggest_addresses(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+    prefix: String,
+) -> Result<Vec<String>, String> {
+    with_store(state.inner().clone(), move |store| {
+        store
+            .suggest_addresses(account_id, &prefix, 6)
+            .map_err(|_| "Couldn't look up addresses.".to_owned())
+    })
+    .await
 }
 
 /// Read attachment files from disk into message attachments, guessing each content type from its
@@ -932,6 +949,14 @@ pub async fn dev_search() -> Option<String> {
 #[tauri::command]
 pub async fn dev_trash() -> Option<String> {
     std::env::var("GELEIT_TRASH").ok()
+}
+
+/// Dev/test seam, debug builds only: with `GELEIT_COMPOSE=new`, `GELEIT_TO=<text>` pre-fills the To
+/// input on boot so the address-autocomplete dropdown can be screenshotted. Never in release.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_compose_to() -> Option<String> {
+    std::env::var("GELEIT_TO").ok()
 }
 
 #[cfg(test)]

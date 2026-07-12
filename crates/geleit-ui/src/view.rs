@@ -120,6 +120,19 @@ pub fn merge_addrs(existing: &str, typed: &str) -> String {
     out.join(", ")
 }
 
+/// Prepare address suggestions for the autocomplete dropdown: drop any candidate already chipped on
+/// the field (case-insensitive), preserve the store's order, and cap the list. The store already
+/// filters by prefix and returns distinct addresses, so this only removes what's redundant to offer.
+#[must_use]
+pub fn rank_suggestions(candidates: &[String], already: &[String], limit: usize) -> Vec<String> {
+    candidates
+        .iter()
+        .filter(|c| !already.iter().any(|a| a.eq_ignore_ascii_case(c)))
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +162,26 @@ mod tests {
             split_addrs(" a@x.com , b@y.com ;c@z.com,"),
             ["a@x.com", "b@y.com", "c@z.com"]
         );
+    }
+
+    #[test]
+    fn rank_suggestions_drops_already_chipped_and_caps() {
+        let cands = vec![
+            "a@x.com".to_owned(),
+            "b@y.com".to_owned(),
+            "c@z.com".to_owned(),
+        ];
+        // Nothing chipped: keep order, cap applies.
+        assert_eq!(rank_suggestions(&cands, &[], 2), ["a@x.com", "b@y.com"]);
+        // Already-chipped addresses are removed, case-insensitively.
+        assert_eq!(
+            rank_suggestions(&cands, &["A@X.COM".to_owned()], 6),
+            ["b@y.com", "c@z.com"]
+        );
+        // Every candidate already chipped → empty.
+        assert!(rank_suggestions(&cands, &cands, 6).is_empty());
+        // A zero cap yields nothing.
+        assert!(rank_suggestions(&cands, &[], 0).is_empty());
     }
 
     #[test]
