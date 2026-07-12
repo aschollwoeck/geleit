@@ -58,6 +58,10 @@ pub const ARCHIVE: &str = r#"<svg width="16" height="16" viewBox="0 0 16 16" fil
 pub const JUNK: &str = r#"<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.2" stroke="currentColor" stroke-width="1.75"/><path d="M4.5 4.5l7 7" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>"#;
 pub const DRAFTS: &str = r#"<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M9.5 2.5H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V6l-3.5-3.5Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M9.5 2.5V6H13" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>"#;
 pub const FOLDER: &str = r#"<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2.5 4.5a1 1 0 0 1 1-1h3l1.5 1.5h4.5a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-7.5Z" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/></svg>"#;
+/// Save to disk (down arrow into a tray) — the reading-pane "Save" (.eml export) action.
+pub const DOWNLOAD: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2.5v7m0 0L5.2 6.9M8 9.5l2.8-2.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 11.5v1a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>"#;
+/// Open a file from disk (document with an up arrow) — the "Open mail file…" rail action.
+pub const OPENFILE: &str = r#"<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M9 2.5H4.5a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 11V6.5m0 0L6.3 8.2M8 6.5l1.7 1.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 
 /// Settings category icons.
 pub const IC_ACCOUNTS: &str = r#"<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="5.5" r="2.5" stroke="currentColor" stroke-width="1.6"/><path d="M3.5 13c0-2.2 2-3.5 4.5-3.5s4.5 1.3 4.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>"#;

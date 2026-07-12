@@ -957,6 +957,51 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // Save the open message to disk as a .eml file (READ-10). No-op if nothing is open.
+    let save_open_eml = move || {
+        let Some(id) = open.get_untracked().map(|b| b.id) else {
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            match api::save_eml(id).await {
+                Ok(true) => toast.set(Some("Saved to disk".into())),
+                Ok(false) => {} // the user cancelled the save dialog
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
+    // Open a .eml file from disk into the local Saved folder, then switch there and open it.
+    let open_mail_file = move || {
+        acct_menu.set(false);
+        let Some(aid) = account.get() else {
+            error.set(Some(
+                "Add an account first, then open a mail file.".to_owned(),
+            ));
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            match api::open_eml_file(aid).await {
+                Ok(Some(id)) => {
+                    // The import created a local "Saved" folder — reload the rail so it shows.
+                    if let Ok(fs) = api::list_folders(aid).await {
+                        folders.set(fs);
+                    }
+                    if let Some(f) = folders
+                        .get_untracked()
+                        .into_iter()
+                        .find(|f| f.name.eq_ignore_ascii_case("Saved"))
+                    {
+                        choose_folder(f.id);
+                    }
+                    choose_message(id);
+                }
+                Ok(None) => {} // cancelled
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
     let do_refresh = move || {
         // Merged view: sync every account's INBOX, then re-list the combined inbox.
         if unified.get() {
@@ -1395,6 +1440,9 @@ pub fn App() -> impl IntoView {
                         </button>
                     </Show>
                     <div class="rail-fill"></div>
+                    <button class="rail-tool" title="Open a .eml mail file from disk" on:click=move |_| open_mail_file()>
+                        {icon(icons::OPENFILE)} "Open mail file…"
+                    </button>
                     <button class="rail-tool" on:click=move |_| toggle_theme()>
                         {icon(icons::THEME)}
                         {move || if dark.get() { "Light theme" } else { "Dark theme" }}
@@ -1562,6 +1610,7 @@ pub fn App() -> impl IntoView {
                                         <span class="act" on:click=move |_| move_menu.update(|o| *o = !*o)>{icon(icons::MOVE)} "Move"</span>
                                         <span class="act danger" on:click=move |_| { if in_trash() { trash_ask.set(Some(TrashAsk::DeleteOne(id))); } else { move_open("trash", "Deleted"); } }>{icon(icons::TRASH)} {move || if in_trash() { "Delete forever" } else { "Delete" }}</span>
                                         <span class="act" on:click=move |_| mark_unread()>{icon(icons::UNREAD)} "Unread"</span>
+                                        <span class="act" title="Save this message as a .eml file" on:click=move |_| save_open_eml()>{icon(icons::DOWNLOAD)} "Save"</span>
                                         <Show when=move || move_menu.get()>
                                             <div class="menu" style="right:0;top:42px;width:180px">
                                                 <For each=move || folders.get() key=|f| f.id let:f>

@@ -56,8 +56,9 @@ how many messages are in that thread.
 Click a message and it opens on the right, showing the subject, who it's from, the date, and the
 text of the message. The row you're reading is marked with a soft highlight and a coloured edge.
 
-The action buttons — **Star, Reply, Reply all, Forward, Archive, Move…, Delete, Unread** — sit across
-the **top** of the reading area, above the sender and subject, so they don't move as the subject wraps.
+The action buttons — **Star, Reply, Reply all, Forward, Archive, Move…, Delete, Unread, Save** — sit
+across the **top** of the reading area, above the sender and subject, so they don't move as the
+subject wraps.
 
 ![An open message in the reading area: the action buttons across the top, then the sender, then the subject.](images/reading.png)
 
@@ -88,6 +89,17 @@ When a message *did* contain remote content, you'll see a small **"Remote conten
 with a **Load images** button. Nothing remote loads until you choose to: click it and GeleitMail
 fetches that one message's images and re-shows it with them in place. (Scripts are never run, even
 then, and only that message's images are fetched.)
+
+## Saving and opening message files
+
+Choose **Save** at the top of an open message to keep a copy on your computer as a **`.eml`** file —
+the standard format any mail app can read. Pick where to put it; GeleitMail suggests a name based on
+the subject.
+
+To read a `.eml` file you already have — one you saved here, or that someone sent you — choose **Open
+mail file…** at the bottom of the folder list and pick it. GeleitMail files it under a local **Saved**
+folder and opens it, so it reads just like any other message. Saved messages stay on your device and
+aren't uploaded to your provider.
 
 ## Writing, replying, and organizing
 

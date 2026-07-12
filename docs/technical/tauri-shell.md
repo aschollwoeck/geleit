@@ -209,6 +209,15 @@ callback threading). Notable models:
   `send_message` now carries `draft_id`, so `run_send` deletes the draft after a successful send.
   Server-backed drafts and draft attachments (the composer holds file *paths*, the table stores
   *bytes*) are deliberately out of scope.
+- **Save/open .eml** (READ-10) — re-wires the surviving engine core, no network. **Save** (reading-pane
+  action) → `save_eml(id)`: `export_eml` rebuilds RFC 822 bytes from the stored header + body (faithful
+  bodies; MIME reconstructed from parts, not byte-identical), a native save dialog (`pick_save_path`,
+  zenity `--save`/kdialog) names it `<safe_filename_stem(subject)>.eml`, then writes. **Open mail
+  file…** (rail entry) → `open_eml_file(account)`: pick + read a file, `parse_eml` (mail-parser + the
+  same `mime::parse_body` as sync), `upsert_folder(SAVED_FOLDER)` + `upsert_message(uid=None)` +
+  `store_body`, return the new id; the UI reloads folders, switches to **Saved**, and opens it. HTML
+  can't be rendered ad-hoc (the reading pane serves HTML by store id over `mail://`), so an opened .eml
+  becomes a real local row. `safe_filename_stem` is a pure, unit-tested helper in `dto.rs`.
 - **List** is one keyed `<For>` over three fixed day buckets (Today/Yesterday/Earlier), so rank-ordered
   search results group correctly. Reading-pane header order is actions · sender · subject (buttons
   pinned on top). Keyboard: `c` `/` `e` `#` `r` `f` `z` `j`/`k` `Esc`.
