@@ -1,7 +1,8 @@
 # GeleitMail
 
-A native, **local-first, privacy-first** email client, written in Rust with a [Slint](https://slint.dev)
-interface. **No middleman, no telemetry, no tracking.**
+A **local-first, privacy-first** email client, written in Rust — a [Tauri](https://tauri.app) desktop
+shell with a [Leptos](https://leptos.dev) (Rust→WASM) interface. **No middleman, no telemetry, no
+tracking.**
 
 Your mail is synced to your device and stored **encrypted at rest**; the app talks only to your own
 provider's IMAP/SMTP servers. HTML mail renders in a sandbox with remote images blocked until you ask
@@ -31,10 +32,12 @@ Gmail/Outlook (OAuth) and macOS/Windows builds are planned. See the [CHANGELOG](
 
 ## Building (Linux)
 
-Needs the system libraries the UI links against (webkit2gtk 4.1, GTK 3, fontconfig, xcb/xkbcommon).
+Needs the system libraries the webview links against (webkit2gtk 4.1, GTK 3) and the
+[`wasm-bindgen` CLI](https://crates.io/crates/wasm-bindgen-cli) (matching the version in `Cargo.lock`).
 
 ```sh
-cargo build --release -p geleit-app
+./scripts/build-ui.sh --release       # compile the Leptos frontend to WASM into dist/pkg/
+cargo build --release -p geleit-app   # build the Tauri app (embeds dist/ at compile time)
 GELEIT_DB="$HOME/geleit.db" ./target/release/geleit-app
 ```
 
@@ -43,7 +46,9 @@ GitHub Release.
 
 ## Credits
 
-The user interface is built with [Slint](https://slint.dev), used under its Royalty-free license.
+The desktop shell is [Tauri](https://tauri.app) (Apache-2.0 / MIT) and the interface is
+[Leptos](https://leptos.dev) (MIT) — Rust end to end. (The UI was Slint through M8; it moved to
+Tauri + Leptos in M9, see [ADR-0012](docs/adr/0012-tauri-shell-with-leptos-ui.md).)
 
 ## License
 
