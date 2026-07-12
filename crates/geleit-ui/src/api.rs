@@ -465,6 +465,16 @@ pub async fn dev_unified() -> Result<bool, String> {
     call("dev_unified", &NoArgs {}).await
 }
 
+/// Dev/test seam — see `geleit-app::ipc::dev_settings`. Always `false` in a release build.
+pub async fn dev_settings() -> Result<bool, String> {
+    call("dev_settings", &NoArgs {}).await
+}
+
+/// Dev/test seam — see `geleit-app::ipc::dev_search`. Always `None` in a release build.
+pub async fn dev_search() -> Result<Option<String>, String> {
+    call("dev_search", &NoArgs {}).await
+}
+
 /// Dev/test seam — see `geleit-app::ipc::dev_setup`. Always `false` in a release build.
 pub async fn dev_setup() -> Result<bool, String> {
     call("dev_setup", &NoArgs {}).await

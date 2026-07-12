@@ -151,13 +151,38 @@ workarounds — `border-collapse:separate!important` (which is *actively wrong* 
   loads (once S9.2 allows them on request) cannot be correlated across sessions.
 - No Tauri plugins are enabled. There is no filesystem, shell, or HTTP capability to grant.
 
+## Frontend interactions (the "Soft daylight" client)
+
+`app.rs` is one `App()` component with one inline `view!`; signals + handlers capture directly (no
+callback threading). Notable models:
+
+- **Deferred-commit Undo (archive/delete/spam).** The action does *not* hit the server immediately:
+  the row is hidden (`pending: Option<PendingMove>`, filtered out of the list) and an "Undo" toast is
+  shown; the server move runs only when the toast window elapses. So **Undo is a pure local cancel
+  that can never lose mail**. A new action, or a confirmation toast, commits any queued move first; a
+  failed commit restores just the one affected row.
+- **Merged "All inboxes".** `store::messages_in_all_inboxes` (every account's `INBOX`, newest first,
+  each row tagged with its `account_id`) behind the `list_all_messages` / `search_all` IPC commands;
+  `MessageDto.account` carries the tag. In the merged view the folder list is hidden and opening a
+  message adopts its account (so a reply sends from the right mailbox).
+- **Read/unread** is tracked in two small session sets (`read_now`, `marked_unread`) rather than by
+  mutating the list, so a toggle doesn't clone it. `open_message(mark_read)` gates whether opening
+  persists the seen flag, honouring the General setting.
+- **Compose** — To/Cc are removable chips (`split_addrs`/`merge_addrs`, case-insensitive dedup at both
+  chip-commit and send); attachments come from a native picker (`pick_files` shells out to
+  zenity/kdialog — deliberately not an in-process GTK dialog, which would clash with the webview loop)
+  and are read + size-capped backend-side.
+- **List** is one keyed `<For>` over three fixed day buckets (Today/Yesterday/Earlier), so rank-ordered
+  search results group correctly. Reading-pane header order is actions · sender · subject (buttons
+  pinned on top). Keyboard: `c` `/` `e` `#` `r` `f` `z` `j`/`k` `Esc`.
+
 ## Testing
 
 The frontend is split so that the parts worth testing *are* testable without a browser:
 
 | | |
 |---|---|
-| `geleit-ui/src/view.rs` | Pure display logic (dates, elision). Unit + **mutation** tested on host. |
+| `geleit-ui/src/view.rs` | Pure display logic — dates, elision, `nav_index` (keyboard-nav index math), `split_addrs`/`merge_addrs` (recipient-chip parsing + case-insensitive dedup). Unit + **mutation** tested on host. |
 | `geleit-app/src/dto.rs` | Pure store→UI mapping, folder ordering. Unit + **mutation** tested. |
 | `app.rs`, `api.rs`, `ipc.rs` | View declaration and glue — excluded from mutants (survivors there are spurious), the same split as `geleit-app`'s `main.rs`/`viewmodel.rs`. |
 
@@ -167,12 +192,21 @@ like any other crate. CI *also* builds it for wasm, so a wasm-only break can't s
 
 ## Screenshot verification
 
-The build environment can't inject clicks (no `xdotool`), so a **debug-only** seam exists:
+The build environment can't inject clicks (no `xdotool`), so **debug-only** env seams drive the UI
+into a state on boot. Each `dev_*` command is `#[cfg(debug_assertions)]`, so in a release build it
+isn't registered at all and the env var is never read:
 
-```
-GELEIT_DB=/path/demo.db GELEIT_OPEN=<message id> ./target/debug/geleit-app
-```
+| Env var | Opens |
+|---|---|
+| `GELEIT_OPEN=<id>` | that message in the reading pane (`GELEIT_IMAGES=1` loads its remote content) |
+| `GELEIT_COMPOSE=new\|reply\|reply_all\|forward` | the composer (`reply`/`reply_all`/`forward` also need `GELEIT_OPEN`) |
+| `GELEIT_UNIFIED=1` | the merged "All inboxes" view |
+| `GELEIT_SETUP=1` | the add-account wizard |
+| `GELEIT_SETTINGS=1` | the Settings window |
+| `GELEIT_SEARCH=<query>` | search, opened and run |
 
-`GELEIT_OPEN` makes the UI open that message on boot, so the reading pane can be screenshot-verified.
-It is compiled out of release builds — `dev_open_message` returns `None` and the env var is never
-read. S9.2 depends on this: its whole job is rendered mail, which must be verified visually.
+The seam waits for boot to finish (`loaded`) before firing, so preferences (e.g. mark-as-read) are
+already in effect. Seed a demo DB with `cargo run -p geleit-app --example seed_demo` (`-- --dark`
+for dark). **Discipline: never screenshot against a real account, and target your *own* window by
+PID** (`pgrep -nf target/debug/geleit-app` → `wmctrl -lp`) — a maintainer's release instance may be
+running the same window title.

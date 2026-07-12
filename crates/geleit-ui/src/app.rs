@@ -889,6 +889,16 @@ pub fn App() -> impl IntoView {
                     }
                 }
             }
+            if api::dev_setup().await.unwrap_or(false) {
+                open_wizard();
+            }
+            if api::dev_settings().await.unwrap_or(false) {
+                open_settings();
+            }
+            if let Ok(Some(q)) = api::dev_search().await {
+                search_open.set(true);
+                run_search(q);
+            }
         });
         true
     });

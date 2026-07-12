@@ -125,6 +125,8 @@ fn main() {
         ipc::dev_compose,
         ipc::dev_unified,
         ipc::dev_setup,
+        ipc::dev_settings,
+        ipc::dev_search,
     ]);
     #[cfg(not(debug_assertions))]
     let builder = builder.invoke_handler(tauri::generate_handler![

@@ -12,7 +12,7 @@ no third-party services. (This is even enforced in the build, so it can't creep 
 
 ## Encrypted on this device
 
-Your local copy of mail — messages, attachments, drafts, and the search index — is **encrypted at
+Your local copy of mail — messages, attachments, and the search index — is **encrypted at
 rest**: on disk it's unreadable ciphertext. The key lives in your operating system's keychain and is
 applied automatically when GeleitMail opens, so you never type a separate passphrase. Your account
 password is kept in the keychain too, never in plain text.
@@ -24,11 +24,11 @@ Messages written in rich (HTML) formatting are shown formatted — colors, fonts
 message can't quietly fetch anything or run code.
 
 When a message contained remote content, you'll see a **"Remote content blocked"** note with a
-**Load remote images** button. Nothing remote loads until you choose it — and only for that one
+**Load images** button. Nothing remote loads until you choose it — and only for that one
 message, that one time. (Scripts are never run, even then.) This keeps "read receipts" and tracking
 pixels from firing without your say-so.
 
-![A message in the sandboxed HTML view with a "Remote content blocked — Load remote images" bar above it.](images/reading.png)
+![A message in the sandboxed HTML view with a "Remote content blocked — Load images" bar above it.](images/reading.png)
 
 ## Reading offline
 
