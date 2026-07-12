@@ -122,6 +122,7 @@ struct SendArgs {
     body: String,
     in_reply_to: Option<String>,
     references: Vec<String>,
+    attachments: Vec<String>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -318,6 +319,7 @@ pub async fn send_message(
     body: String,
     in_reply_to: Option<String>,
     references: Vec<String>,
+    attachments: Vec<String>,
 ) -> Result<(), String> {
     call(
         "send_message",
@@ -329,9 +331,15 @@ pub async fn send_message(
             body,
             in_reply_to,
             references,
+            attachments,
         },
     )
     .await
+}
+
+/// Open a native file picker and return the chosen paths (empty if cancelled).
+pub async fn pick_files() -> Result<Vec<String>, String> {
+    call("pick_files", &NoArgs {}).await
 }
 
 /// Kick a refresh of `folder`: recent mail syncs first (this resolves when it's in), then older mail

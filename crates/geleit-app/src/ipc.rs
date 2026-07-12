@@ -552,6 +552,7 @@ pub async fn send_message(
     body: String,
     in_reply_to: Option<String>,
     references: Vec<String>,
+    attachments: Vec<String>,
 ) -> Result<(), String> {
     // Append the account's signature (SEND-7). Read it up front on the store thread.
     let signature = with_store(state.inner().clone(), move |store| {
@@ -569,6 +570,7 @@ pub async fn send_message(
 
     let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
     tauri::async_runtime::spawn_blocking(move || {
+        let attachments = read_attachments(&attachments)?;
         geleit_engine::sync_actions::run_send(
             &db,
             &*secrets,
@@ -579,13 +581,90 @@ pub async fn send_message(
             &body,
             in_reply_to,
             references,
-            Vec::new(), // attachments-in-compose is a named follow-up (S9.5 spec)
-            false,      // markdown toggle is a follow-up
-            None,       // draft persistence is a follow-up
+            attachments,
+            false, // markdown toggle is a follow-up
+            None,  // draft persistence is a follow-up
         )
     })
     .await
     .map_err(|_| "The send task stopped unexpectedly.".to_owned())?
+}
+
+/// Read attachment files from disk into message attachments, guessing each content type from its
+/// name. Total size is capped so a stray huge file fails calmly instead of choking the SMTP server.
+///
+/// The paths come from the trusted app frontend (the picker), not from mail content — hostile mail
+/// is confined to the sandboxed `mail://` iframe (no scripts, no same-origin) and can't reach IPC.
+fn read_attachments(paths: &[String]) -> Result<Vec<geleit_engine::message::Attachment>, String> {
+    const MAX_TOTAL: u64 = 25 * 1024 * 1024; // 25 MB — a common provider ceiling
+    let mut total: u64 = 0;
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        // Check the size *before* reading, so an enormous file is rejected rather than pulled into
+        // memory whole (which would defeat the cap).
+        total += std::fs::metadata(p)
+            .map_err(|_| "Couldn't read an attachment file.".to_owned())?
+            .len();
+        if total > MAX_TOTAL {
+            return Err("Attachments are too large to send (25 MB max).".to_owned());
+        }
+        let data = std::fs::read(p).map_err(|_| "Couldn't read an attachment file.".to_owned())?;
+        let filename = std::path::Path::new(p)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "attachment".to_owned());
+        let content_type = geleit_engine::message::guess_content_type(&filename);
+        out.push(geleit_engine::message::Attachment {
+            filename,
+            content_type,
+            data,
+        });
+    }
+    Ok(out)
+}
+
+/// Open a native file picker (zenity, then kdialog) and return the chosen paths. Runs the desktop's
+/// own dialog as a subprocess — deliberately not an in-process GTK dialog, which clashes with the
+/// webview's event loop. Empty result = the user cancelled.
+#[tauri::command]
+pub async fn pick_files() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        // zenity: multiple selection, newline-separated. A newline in a filename (pathological on
+        // desktop, but legal on Linux) would mis-split — an acceptable edge for a file picker.
+        match std::process::Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--multiple",
+                "--separator=\n",
+                "--title=Attach files",
+            ])
+            .output()
+        {
+            Ok(o) if o.status.success() => {
+                return Ok(String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_owned)
+                    .collect());
+            }
+            Ok(_) => return Ok(Vec::new()), // ran but the user cancelled
+            Err(_) => {}                    // zenity not installed — try kdialog
+        }
+        // kdialog fallback: single file (its multi-select output isn't newline-safe).
+        match std::process::Command::new("kdialog")
+            .args(["--getopenfilename", "."])
+            .output()
+        {
+            Ok(o) if o.status.success() => {
+                let p = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+                Ok(if p.is_empty() { Vec::new() } else { vec![p] })
+            }
+            Ok(_) => Ok(Vec::new()),
+            Err(_) => Err("No file picker found — install zenity or kdialog.".to_owned()),
+        }
+    })
+    .await
+    .map_err(|_| "The file picker stopped unexpectedly.".to_owned())?
 }
 
 /// Refresh an account's folder: sync the folder list + the current folder's recent envelopes, then
@@ -700,4 +779,28 @@ pub async fn dev_compose() -> Option<String> {
 #[tauri::command]
 pub async fn dev_setup() -> bool {
     std::env::var("GELEIT_SETUP").is_ok_and(|v| v == "1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_attachments;
+
+    #[test]
+    fn read_attachments_reads_name_type_and_bytes() {
+        let dir = std::env::temp_dir().join(format!("geleit-att-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("report.pdf");
+        std::fs::write(&f, b"hello").unwrap();
+
+        let atts = read_attachments(&[f.to_string_lossy().into_owned()]).unwrap();
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].filename, "report.pdf");
+        assert_eq!(atts[0].content_type, "application/pdf");
+        assert_eq!(atts[0].data, b"hello");
+
+        // a path that doesn't exist is a calm error, not a panic
+        assert!(read_attachments(&["/no/such/geleit/file".to_owned()]).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -290,9 +290,14 @@ iframe.mail { flex: 1; width: 100%; border: 0; background: #fff; }
 :root[data-theme="dark"] .btn-primary { color: #14191B; }
 .btn-ghost { background: var(--surface); color: var(--text); border: 1px solid var(--divider); border-radius: var(--radius-md); padding: 9px 16px; font-weight: 500; font-size: 13.5px; cursor: pointer; }
 .btn-ghost:hover { border-color: var(--text-muted); }
-.foot-discard { display: inline-flex; align-items: center; gap: 6px; background: transparent; border: none; color: var(--text-muted); font-size: 13px; cursor: pointer; padding: 6px 8px; border-radius: var(--radius-sm); }
+.attach-row { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 20px 12px; }
+.chip.attach { max-width: 260px; }
+.chip.attach .ic svg { width: 13px; height: 13px; }
+.chip.attach > .ic { color: var(--text-faint); }
+.foot-attach, .foot-discard { display: inline-flex; align-items: center; gap: 6px; background: transparent; border: none; color: var(--text-muted); font-size: 13px; cursor: pointer; padding: 6px 8px; border-radius: var(--radius-sm); }
+.foot-attach:hover { color: var(--text); background: var(--surface-raised); }
 .foot-discard:hover { color: var(--danger-strong); background: var(--danger-quiet); }
-.foot-discard .ic svg { width: 15px; height: 15px; }
+.foot-attach .ic svg, .foot-discard .ic svg { width: 15px; height: 15px; }
 .draft-status { margin-left: auto; font-size: 12px; color: var(--text-faint); }
 
 /* settings */
