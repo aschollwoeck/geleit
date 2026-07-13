@@ -57,29 +57,52 @@ fn open_externally(url: &str) {
 /// must not be treated as in-app navigation.
 const OWN_HTTP_HOSTS: [&str; 3] = ["tauri.localhost", "ipc.localhost", "mail.localhost"];
 
-/// Decide what a navigation attempt is allowed to do.
+/// What a navigation attempt should do. Deciding this is **pure**, so it can be unit-tested without
+/// launching anything — see [`navigation_action`]. (It used to be fused with the side effect, and the
+/// tests really did spawn a browser and a mail client for every fixture URL. They don't now.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavAction {
+    /// Our own origin — let the webview load it.
+    Load,
+    /// A real link in a message — hand it to the system browser and cancel the in-app navigation.
+    OpenExternally,
+    /// Anything else — refuse outright.
+    Refuse,
+}
+
+/// Decide what a navigation attempt is allowed to do. **Pure** — no process is spawned here.
 ///
 /// The app itself must **never** navigate to anything but its own origins: the only page it may show
 /// is its own UI. A link in a message is a request to leave, and leaving means the *system browser*,
 /// not this window — otherwise a crafted `http://…localhost` link could load the app's own origin
 /// (with its IPC bridge) in-window, or a message could replace GeleitMail with a look-alike page.
-///
-/// Returns `true` to let the webview proceed (only for our own origins), `false` to cancel.
-fn allow_navigation(url: &url::Url) -> bool {
+fn navigation_action(url: &url::Url) -> NavAction {
     match url.scheme() {
         // Our own UI and the mail origin (custom schemes on Linux/macOS). NOT data:/blob:/about —
         // none is needed, and a top-level `data:text/html,<script>` navigation would run under an
         // opaque origin, so they stay off the allowlist as defence in depth.
-        "tauri" | "mail" => true,
+        "tauri" | "mail" => NavAction::Load,
         // On Windows the same origins appear as http://<scheme>.localhost — allow ONLY those exact
         // hosts, never an arbitrary `*.localhost`.
-        "http" | "https" if url.host_str().is_some_and(|h| OWN_HTTP_HOSTS.contains(&h)) => true,
-        "http" | "https" | "mailto" => {
+        "http" | "https" if url.host_str().is_some_and(|h| OWN_HTTP_HOSTS.contains(&h)) => {
+            NavAction::Load
+        }
+        "http" | "https" | "mailto" => NavAction::OpenExternally,
+        // anything else (javascript:, file:, data:, blob:, …) is simply refused
+        _ => NavAction::Refuse,
+    }
+}
+
+/// The webview's navigation hook: apply [`navigation_action`] and perform its side effect. Returns
+/// `true` to let the webview proceed (only for our own origins), `false` to cancel.
+fn allow_navigation(url: &url::Url) -> bool {
+    match navigation_action(url) {
+        NavAction::Load => true,
+        NavAction::OpenExternally => {
             open_externally(url.as_str()); // a real link → the system browser
             false
         }
-        // anything else (javascript:, file:, data:, blob:, …) is simply refused
-        _ => false,
+        NavAction::Refuse => false,
     }
 }
 
@@ -220,29 +243,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::allow_navigation;
+    use super::{navigation_action, NavAction};
 
-    fn nav(u: &str) -> bool {
-        allow_navigation(&url::Url::parse(u).unwrap())
+    /// Decide only — deliberately NOT `allow_navigation`, which would really spawn a browser / mail
+    /// client for every external fixture URL below. (It used to, on every `cargo test`.)
+    fn nav(u: &str) -> NavAction {
+        navigation_action(&url::Url::parse(u).unwrap())
     }
 
     #[test]
     fn our_own_origins_may_load() {
-        assert!(nav("tauri://localhost/index.html"));
-        assert!(nav("mail://localhost/42"));
-        assert!(nav("http://tauri.localhost/index.html")); // Windows
-        assert!(nav("http://mail.localhost/42")); // Windows
-        assert!(nav("http://ipc.localhost/cmd")); // Windows IPC
+        assert_eq!(nav("tauri://localhost/index.html"), NavAction::Load);
+        assert_eq!(nav("mail://localhost/42"), NavAction::Load);
+        assert_eq!(nav("http://tauri.localhost/index.html"), NavAction::Load); // Windows
+        assert_eq!(nav("http://mail.localhost/42"), NavAction::Load); // Windows
+        assert_eq!(nav("http://ipc.localhost/cmd"), NavAction::Load); // Windows IPC
     }
 
     /// A link in a message must NOT navigate the app — otherwise a message could replace GeleitMail
-    /// with a look-alike page still wearing its window frame. (These spawn a browser process in a
-    /// real run; here we only assert the navigation is refused.)
+    /// with a look-alike page still wearing its window frame. It goes to the system browser instead.
     #[test]
     fn a_remote_link_never_navigates_the_app() {
-        assert!(!nav("https://example.com/phish"));
-        assert!(!nav("http://example.com/"));
-        assert!(!nav("mailto:someone@example.com"));
+        assert_eq!(nav("https://example.com/phish"), NavAction::OpenExternally);
+        assert_eq!(nav("http://example.com/"), NavAction::OpenExternally);
+        assert_eq!(nav("mailto:someone@example.com"), NavAction::OpenExternally);
     }
 
     /// `.localhost` must not be a blanket loophole. The S9.2 review flagged this: a mail link to the
@@ -251,19 +275,32 @@ mod tests {
     /// the exact framework hosts are ours; every other loopback host goes to the browser.
     #[test]
     fn an_arbitrary_localhost_host_is_not_treated_as_ours() {
-        assert!(!nav("http://evil.localhost/"));
-        assert!(!nav("http://notmail.localhost/42"));
-        assert!(!nav("https://evil-localhost.example/"));
-        assert!(!nav("https://tauri.localhost.evil.example/"));
+        assert_eq!(nav("http://evil.localhost/"), NavAction::OpenExternally);
+        assert_eq!(
+            nav("http://notmail.localhost/42"),
+            NavAction::OpenExternally
+        );
+        assert_eq!(
+            nav("https://evil-localhost.example/"),
+            NavAction::OpenExternally
+        );
+        assert_eq!(
+            nav("https://tauri.localhost.evil.example/"),
+            NavAction::OpenExternally
+        );
     }
 
+    /// These are refused outright — not even handed to the browser.
     #[test]
     fn dangerous_schemes_are_refused_outright() {
-        assert!(!nav("file:///etc/passwd"));
-        assert!(!nav("javascript:alert(1)"));
+        assert_eq!(nav("file:///etc/passwd"), NavAction::Refuse);
+        assert_eq!(nav("javascript:alert(1)"), NavAction::Refuse);
         // data:/blob: are NOT navigable — a top-level data:text/html would run under an opaque origin
-        assert!(!nav("data:text/html,<script>alert(1)</script>"));
-        assert!(!nav("blob:https://example.com/uuid"));
-        assert!(!nav("about:blank"));
+        assert_eq!(
+            nav("data:text/html,<script>alert(1)</script>"),
+            NavAction::Refuse
+        );
+        assert_eq!(nav("blob:https://example.com/uuid"), NavAction::Refuse);
+        assert_eq!(nav("about:blank"), NavAction::Refuse);
     }
 }
