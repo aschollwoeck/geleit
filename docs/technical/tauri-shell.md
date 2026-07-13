@@ -288,6 +288,13 @@ The frontend is split so that the parts worth testing *are* testable without a b
 | `geleit-app/src/dto.rs` | Pure store→UI mapping, folder ordering. Unit + **mutation** tested. |
 | `app.rs`, `api.rs`, `ipc.rs` | View declaration and glue — excluded from mutants (survivors there are spurious), the same split as `geleit-app`'s `main.rs`/`viewmodel.rs`. |
 
+**A test must never perform a side effect on the developer's machine.** `allow_navigation` used to
+*decide* and *act* in one function, so the navigation tests genuinely ran `xdg-open` on every fixture
+URL — every `cargo test` opened a browser tab (and `mailto:` a mail client), and every `cargo mutants`
+run did it once per mutant. The decision is now the pure `navigation_action` → `NavAction`, which is
+what the tests assert; the side effect lives in the thin `allow_navigation` wrapper the webview calls.
+Keep that shape: if a function both chooses and does, the choosing is what you test.
+
 `geleit-ui` compiles for the **host** as well as wasm (`crate-type = ["cdylib", "rlib"]`, wasm
 entrypoint behind `cfg(target_arch = "wasm32")`) — that is what lets clippy and `cargo test` cover it
 like any other crate. CI *also* builds it for wasm, so a wasm-only break can't slip through.
