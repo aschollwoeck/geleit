@@ -60,6 +60,8 @@ pub const DRAFTS: &str = r#"<svg width="16" height="16" viewBox="0 0 16 16" fill
 pub const FOLDER: &str = r#"<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2.5 4.5a1 1 0 0 1 1-1h3l1.5 1.5h4.5a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-7.5Z" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/></svg>"#;
 /// Save to disk (down arrow into a tray) — the reading-pane "Save" (.eml export) action.
 pub const DOWNLOAD: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2.5v7m0 0L5.2 6.9M8 9.5l2.8-2.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 11.5v1a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>"#;
+/// Open envelope (flap down) — the bulk "Mark read" action, paired with UNREAD (a sealed envelope).
+pub const MAILOPEN: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M2.5 6.5 8 3l5.5 3.5v5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="m2.5 6.5 5.5 3.5 5.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 /// Horizontal three-dot "more options" glyph — the per-folder Rename/Delete menu trigger.
 pub const MORE: &str = r#"<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="4" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="12" cy="8" r="1.4"/></svg>"#;
 /// Open a file from disk (document with an up arrow) — the "Open mail file…" rail action.

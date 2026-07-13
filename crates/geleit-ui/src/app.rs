@@ -6,8 +6,8 @@ use crate::api::{
 };
 use crate::icons::{self, icon};
 use crate::view::{
-    all_selected, elide, format_date, is_protected_folder, merge_addrs, rank_suggestions,
-    split_addrs,
+    all_selected, elide, format_date, is_protected_folder, merge_addrs, range_ids,
+    rank_suggestions, split_addrs,
 };
 use leptos::either::Either;
 use leptos::prelude::*;
@@ -198,7 +198,8 @@ pub fn App() -> impl IntoView {
     let read_now = RwSignal::new(HashSet::<i64>::new());
     let marked_unread = RwSignal::new(HashSet::<i64>::new());
     let selected = RwSignal::new(HashSet::<i64>::new()); // messages picked for a bulk action
-                                                         // Only the newest request may write the list (guards against a stale folder/search reply clobbering).
+    let select_anchor = RwSignal::new(Option::<i64>::None); // last-toggled row, for shift-click ranges
+                                                            // Only the newest request may write the list (guards against a stale folder/search reply clobbering).
     let request = RwSignal::new(0u64);
     // ---- reading ----
     let load_images = RwSignal::new(false); // PRIV-2: per message
@@ -559,6 +560,7 @@ pub fn App() -> impl IntoView {
         commit_pending(); // flush any earlier pending move before starting this one
         open.set(None);
         selected.set(HashSet::new());
+        select_anchor.set(None);
         let toast_text = format!("{} {verb}", ids.len());
         pending.set(Some(PendingMove { ids, role }));
         toast.set(Some(toast_text));
@@ -572,6 +574,7 @@ pub fn App() -> impl IntoView {
             return;
         }
         selected.set(HashSet::new());
+        select_anchor.set(None);
         for id in &ids {
             marked_unread.update(|s| {
                 s.insert(*id);
@@ -591,13 +594,62 @@ pub fn App() -> impl IntoView {
         toast.set(Some(toast_text));
     };
 
-    // Toggle one message's membership in the multi-select set.
-    let toggle_select = move |id: i64| {
+    // Mark every selected message read — immediate per-message write-back (the mirror of bulk unread).
+    let bulk_mark_read = move || {
+        let ids: Vec<i64> = selected.get_untracked().into_iter().collect();
+        if ids.is_empty() {
+            return;
+        }
+        selected.set(HashSet::new());
+        select_anchor.set(None);
+        for id in &ids {
+            read_now.update(|s| {
+                s.insert(*id);
+            });
+            marked_unread.update(|s| {
+                s.remove(id);
+            });
+        }
+        let toast_text = format!("{} marked read", ids.len());
+        for id in ids {
+            leptos::task::spawn_local(async move {
+                if let Err(e) = api::set_read(id).await {
+                    error.set(Some(e));
+                }
+            });
+        }
+        toast.set(Some(toast_text));
+    };
+
+    // Click a row's checkbox: shift-click extends a range from the anchor (last plain click); a plain
+    // click toggles the one row and becomes the new anchor.
+    let select_click = move |id: i64, shift: bool| {
+        if shift {
+            if let Some(anchor) = select_anchor.get_untracked() {
+                // Range over the *visible* order: the list re-buckets into Today/Yesterday/Earlier
+                // (and search returns rank order, not date order), so raw `messages` order would pick
+                // the wrong span. Mirror the `rows()` bucketing and drop any pending-hidden rows.
+                let hidden = pending.get_untracked().map(|p| p.ids).unwrap_or_default();
+                let msgs = messages.get_untracked();
+                let mut ordered: Vec<i64> = Vec::new();
+                for bucket in ["Today", "Yesterday", "Earlier"] {
+                    for m in &msgs {
+                        if !hidden.contains(&m.id) && day_bucket(m.date) == bucket {
+                            ordered.push(m.id);
+                        }
+                    }
+                }
+                let range = range_ids(&ordered, anchor, id);
+                selected.update(|s| s.extend(range));
+                return;
+            }
+        }
         selected.update(|s| {
             if !s.remove(&id) {
                 s.insert(id);
             }
         });
+        select_anchor.set(Some(id));
     };
 
     // Keyboard list navigation (j/k / arrows): open the message `delta` steps from the current one,
@@ -632,6 +684,7 @@ pub fn App() -> impl IntoView {
     let run_search = move |q: String| {
         query.set(q.clone());
         selected.set(HashSet::new()); // the visible set changes under search — drop the selection
+        select_anchor.set(None);
         let is_unified = unified.get();
         // Per-account search needs a selected account; the merged view searches across all.
         if !is_unified && account.get().is_none() {
@@ -1692,6 +1745,7 @@ pub fn App() -> impl IntoView {
                             class:on=move || all_selected(&messages.get().iter().map(|m| m.id).collect::<Vec<_>>(), &selected.get())
                             on:click=move |_| {
                                 let ids: Vec<i64> = messages.get_untracked().iter().map(|m| m.id).collect();
+                                select_anchor.set(None);
                                 if all_selected(&ids, &selected.get_untracked()) {
                                     selected.set(HashSet::new());
                                 } else {
@@ -1703,8 +1757,9 @@ pub fn App() -> impl IntoView {
                         <span class="bulk-count">{move || format!("{} selected", selected.get().len())}</span>
                         <span class="icon-btn" title="Archive" on:click=move |_| bulk_move("archive", "archived")>{icon(icons::ARCHIVE)}</span>
                         <span class="icon-btn danger" title="Delete" on:click=move |_| bulk_move("trash", "deleted")>{icon(icons::TRASH)}</span>
+                        <span class="icon-btn" title="Mark read" on:click=move |_| bulk_mark_read()>{icon(icons::MAILOPEN)}</span>
                         <span class="icon-btn" title="Mark unread" on:click=move |_| bulk_mark_unread()>{icon(icons::UNREAD)}</span>
-                        <span class="icon-btn" title="Clear selection" on:click=move |_| selected.set(HashSet::new())>{icon(icons::CLOSE)}</span>
+                        <span class="icon-btn" title="Clear selection" on:click=move |_| { selected.set(HashSet::new()); select_anchor.set(None); }>{icon(icons::CLOSE)}</span>
                     </div>
                 </Show>
                 <Show when=move || refreshing.get() || catchup.get().is_some()>
@@ -1793,7 +1848,7 @@ pub fn App() -> impl IntoView {
                                         <span class="guide"></span>
                                         <span class="rowcheck" class:on=move || selected.with(|s| s.contains(&id))
                                             title="Select"
-                                            on:click=move |e| { e.stop_propagation(); toggle_select(id); }>
+                                            on:click=move |e| { e.stop_propagation(); select_click(id, e.shift_key()); }>
                                             <Show when=move || selected.with(|s| s.contains(&id))>{icon(icons::CHECK)}</Show>
                                         </span>
                                         <div class="row-top">
