@@ -558,6 +558,7 @@ mod tests {
                 references: Vec::new(),
             },
             updated_at: 1_700_000_000,
+            server_folder: None,
         };
         let s = draft_summary(&row);
         assert_eq!(s.id, 7);

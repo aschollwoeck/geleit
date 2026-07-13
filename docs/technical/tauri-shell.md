@@ -198,7 +198,8 @@ callback threading). Notable models:
   `api::send_message` → the `send_message` IPC → `run_send`, which renders the body with
   `message::render_markdown` (pulldown-cmark, engine-side) into a `multipart/alternative` (text + HTML).
   The raw body is always the text/plain part, so a non-HTML reader still gets readable text.
-- **Drafts** — local-only (SEND-5), over the store's existing `draft` table via four IPC commands
+- **Drafts** — local **by default** (SEND-5; see server-backed drafts below), over the store's
+  existing `draft` table via four IPC commands
   (`save_draft` / `list_drafts` / `load_draft` / `delete_draft`); `DraftContent` ↔ `ComposeDraft` and
   the `DraftSummary` preview are pure maps in `dto.rs` (unit-tested). **Save draft** upserts the form
   (updating the current row when one is being edited) and closes the composer. `current_draft_id` is
@@ -210,8 +211,26 @@ callback threading). Notable models:
   **Attachments** ride along: `save_draft` reads the composer's attachment *paths* into bytes and
   `replace_draft_attachments`; `load_draft` returns a `ResumedDraft` whose bytes are materialised back
   to per-draft temp files (`materialize_draft_attachments`, unit-tested, sanitised names in numbered
-  sub-dirs so the chip basename stays clean) so send / re-save use the normal path-based flow. Only
-  **server-backed drafts** (IMAP `APPEND` to the Drafts folder) remain out of scope.
+  sub-dirs so the chip basename stays clean) so send / re-save use the normal path-based flow.
+- **Server-backed drafts** (SEND-5) — **opt-in, default off** (P2: an unsent draft is the most private
+  thing in the mailbox, so it stays local + encrypted unless you ask otherwise). The `sync_drafts`
+  bool setting (Settings → Privacy) gates it; with it off no draft byte ever reaches the network.
+  When on, `save_draft` — *after* the local save, which is always the source of truth — mirrors the
+  draft to the account's Drafts folder (`drafts_folder`: exact name, then a substring fallback, so
+  `INBOX.Drafts` / `[Gmail]/Drafts` resolve; no such folder → stay local).
+  **The copy is identified by a stable per-draft `Message-ID`** (`message::draft_message_id`, pure +
+  tested), *not* by a UID — our IMAP client doesn't surface `APPENDUID`, and a UID would go stale on a
+  UIDVALIDITY reset. So `imap::sync_draft` does the whole edit in one session: search
+  `DRAFT HEADER Message-ID`, expunge whatever it finds (**self-healing** — this also sweeps up an
+  orphan a previous failure left behind), then `APPEND` the new bytes with `\Draft`. `build_draft`
+  (unlike `build`) allows a draft with no recipients. `expunge_draft` removes the copy on send
+  (`run_send`), on discard (`delete_draft`), and — via `purge_server_drafts` — when the setting is
+  switched **off**, so turning it off takes the drafts back off the server instead of merely stopping
+  new uploads. The `DRAFT` search key means we can only ever expunge a draft, never real mail. Store
+  migration 13 records just the **folder** (`server_folder`); every server step is **best-effort** and,
+  on failure, leaves the recorded folder alone — forgetting it would strand unsent content on the
+  server. Live-tested against Dovecot (`live_append_find_and_expunge_a_server_draft`: save → exactly
+  one copy → re-save replaces it → expunge is idempotent).
 - **Save/open .eml** (READ-10) — re-wires the surviving engine core, no network. **Save** (reading-pane
   action) → `save_eml(id)`: `export_eml` rebuilds RFC 822 bytes from the stored header + body (faithful
   bodies; MIME reconstructed from parts, not byte-identical), a native save dialog (`pick_save_path`,
@@ -290,7 +309,7 @@ isn't registered at all and the env var is never read:
 | `GELEIT_FOLDER=new\|menu` | the New-folder dialog, or the first user folder's ⋯ (Rename/Delete) menu |
 | `GELEIT_UNIFIED=1` | the merged "All inboxes" view |
 | `GELEIT_SETUP=1` | the add-account wizard |
-| `GELEIT_SETTINGS=1` | the Settings window |
+| `GELEIT_SETTINGS=1\|<tab>` | the Settings window (`=privacy` etc. opens that tab) |
 | `GELEIT_SEARCH=<query>` | search, opened and run |
 | `GELEIT_TRASH=empty\|delete` | the irreversible-delete confirm dialog (Empty Trash / Delete forever) |
 

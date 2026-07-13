@@ -241,6 +241,7 @@ pub fn App() -> impl IntoView {
     let dark = RwSignal::new(document_is_dark());
     // settings-backed prefs
     let block_remote = RwSignal::new(true);
+    let sync_drafts = RwSignal::new(false); // opt-in: mirror drafts to the server (default OFF, P2)
     let mark_read = RwSignal::new(true);
     let notify = RwSignal::new(false);
     let sig_text = RwSignal::new(String::new());
@@ -307,6 +308,13 @@ pub fn App() -> impl IntoView {
                     .ok()
                     .flatten()
                     .unwrap_or(true),
+            );
+            sync_drafts.set(
+                api::get_bool_setting("sync_drafts")
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false), // drafts stay on this device unless you ask otherwise
             );
             mark_read.set(
                 api::get_bool_setting("mark_read")
@@ -806,6 +814,24 @@ pub fn App() -> impl IntoView {
         block_remote.set(next);
         leptos::task::spawn_local(async move {
             let _ = api::set_bool_setting("block_remote", next).await;
+        });
+    };
+    let toggle_sync_drafts = move || {
+        let next = !sync_drafts.get();
+        sync_drafts.set(next);
+        let aid = account.get();
+        leptos::task::spawn_local(async move {
+            let _ = api::set_bool_setting("sync_drafts", next).await;
+            // Turning it OFF takes the drafts back off the server — not just "stop uploading new
+            // ones", which would leave unsent content sitting there.
+            if !next {
+                if let Some(aid) = aid {
+                    match api::purge_server_drafts(aid).await {
+                        Ok(()) => toast.set(Some("Drafts removed from your provider".into())),
+                        Err(e) => error.set(Some(e)),
+                    }
+                }
+            }
         });
     };
     let toggle_mark = move || {
@@ -1350,8 +1376,11 @@ pub fn App() -> impl IntoView {
             if api::dev_setup().await.unwrap_or(false) {
                 open_wizard();
             }
-            if api::dev_settings().await.unwrap_or(false) {
+            if let Ok(Some(tab)) = api::dev_settings().await {
                 open_settings();
+                if tab != "1" {
+                    settings_tab.set(tab); // e.g. GELEIT_SETTINGS=privacy
+                }
             }
             if let Ok(Some(q)) = api::dev_search().await {
                 search_open.set(true);
@@ -2112,6 +2141,10 @@ pub fn App() -> impl IntoView {
                                     <div class="setting-row">
                                         <div><div class="setting-name">"Block remote images"</div><div class="setting-desc">"Stops senders knowing you opened their mail."</div></div>
                                         <div class="toggle" class:on=move || block_remote.get() on:click=move |_| toggle_block()><span class="knob"></span></div>
+                                    </div>
+                                    <div class="setting-row">
+                                        <div><div class="setting-name">"Sync drafts to your provider"</div><div class="setting-desc">"Off by default: drafts stay on this device, encrypted. Turn on to also keep them in your provider's Drafts folder, so other mail apps can see them."</div></div>
+                                        <div class="toggle" class:on=move || sync_drafts.get() on:click=move |_| toggle_sync_drafts()><span class="knob"></span></div>
                                     </div>
                                     <div class="privacy-note">
                                         <span style="color:var(--success)">{icon(icons::CHECK)}</span>

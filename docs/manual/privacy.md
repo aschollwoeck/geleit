@@ -17,6 +17,21 @@ rest**: on disk it's unreadable ciphertext. The key lives in your operating syst
 applied automatically when GeleitMail opens, so you never type a separate passphrase. Your account
 password is kept in the keychain too, never in plain text.
 
+## Drafts stay on your device
+
+An unsent draft is often the most private thing in your mailbox, so GeleitMail keeps drafts **on this
+device only**, encrypted like the rest of your mail. Nothing you haven't sent is uploaded to your
+provider.
+
+If you want your drafts on your other devices, you can choose to share them: turn on **Sync drafts to
+your provider** in **Settings → Privacy**. It's **off by default**, and while it's off no draft ever
+leaves your machine.
+
+Be clear about the trade you're making when you turn it on: a synced draft is stored on your
+provider's server like any other mail there, so your provider — and anyone who can get into your
+account — can read it, even though you never sent it. Turning the setting back off removes those
+copies from the server again.
+
 ## Remote content is blocked by default
 
 Messages written in rich (HTML) formatting are shown formatted — colors, fonts, layout, links — in a

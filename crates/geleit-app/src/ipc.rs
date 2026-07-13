@@ -833,7 +833,10 @@ pub async fn send_message(
 }
 
 /// Save (or update) a local draft (SEND-5). Returns the draft's id so the composer can keep editing
-/// the same row. Local-only and encrypted at rest; never touches the server.
+/// the same row. The local copy is encrypted at rest and is always the source of truth. When the
+/// opt-in **"Sync drafts to server"** setting is on (default off, SEND-5), a copy is also appended to
+/// the account's Drafts folder so other mail clients see it — best-effort: a server failure never
+/// fails the local save.
 #[tauri::command]
 pub async fn save_draft(
     state: tauri::State<'_, AppState>,
@@ -842,7 +845,9 @@ pub async fn save_draft(
     draft: ComposeDraft,
     attachments: Vec<String>,
 ) -> Result<i64, String> {
-    with_store(state.inner().clone(), move |store| {
+    let st = state.inner().clone();
+    // Local save first (the source of truth), gathering what a server copy would need.
+    let (id, plan) = with_store(st.clone(), move |store| {
         // Read the attachment files (blocking) on this worker thread; their bytes are stored with the
         // draft so a resumed draft keeps its files. Size-capped like the send path.
         let atts = read_draft_attachments(&attachments)?;
@@ -852,10 +857,126 @@ pub async fn save_draft(
         store
             .replace_draft_attachments(id, &atts)
             .map_err(|_| "Couldn't save the draft's attachments.".to_owned())?;
-        Ok(id)
+        Ok((id, server_draft_plan(store, account_id, id, &draft, &atts)))
     })
-    .await
+    .await?;
+    // Then, only if the opt-in setting is on and a Drafts folder exists, mirror it to the server.
+    if let Some(plan) = plan {
+        let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+        let ServerDraftPlan {
+            folder,
+            message_id,
+            bytes,
+        } = plan;
+        let (folder2, mid) = (folder.clone(), message_id);
+        let synced = tauri::async_runtime::spawn_blocking(move || {
+            geleit_engine::sync_actions::run_sync_draft(
+                &db, &*secrets, account_id, &folder2, &mid, &bytes,
+            )
+        })
+        .await
+        .map_err(|_| "The draft task stopped unexpectedly.".to_owned())?;
+        // Best-effort: the draft is saved locally either way. Only record the folder once the copy is
+        // actually there — and on failure leave whatever was recorded ALONE, so an existing copy is
+        // never forgotten (forgetting it would strand unsent content on the server for good).
+        if synced.is_ok() {
+            let _ = with_store(st, move |store| {
+                store
+                    .set_draft_server_folder(id, Some(folder.as_str()))
+                    .map_err(|_| "Couldn't record the draft's server copy.".to_owned())
+            })
+            .await;
+        }
+    }
+    Ok(id)
 }
+
+/// What a server copy of a draft needs: which folder, the stable Message-ID that identifies the copy,
+/// and the RFC 5322 bytes.
+struct ServerDraftPlan {
+    folder: String,
+    message_id: String,
+    bytes: Vec<u8>,
+}
+
+/// Decide whether draft `id` should be mirrored to the server, and build what that needs. `None` when
+/// the opt-in setting is off, the account has no Drafts folder, or the bytes can't be built — in all
+/// of which cases the draft simply stays local (the default, privacy-preserving behaviour).
+fn server_draft_plan(
+    store: &Store,
+    account_id: i64,
+    id: i64,
+    draft: &ComposeDraft,
+    atts: &[geleit_store::DraftAttachment],
+) -> Option<ServerDraftPlan> {
+    if !sync_drafts_on(store) {
+        return None;
+    }
+    let folder = drafts_folder(store, account_id)?;
+    let account = store.account_by_id(account_id).ok()??;
+    let message_id = geleit_engine::message::draft_message_id(account_id, id);
+    let d = geleit_engine::message::Draft {
+        from_name: account.display_name.clone(),
+        from_addr: account.email,
+        to: geleit_engine::sync_actions::parse_addrs(&draft.to),
+        cc: geleit_engine::sync_actions::parse_addrs(&draft.cc),
+        subject: draft.subject.clone(),
+        body_text: draft.body.clone(),
+        in_reply_to: draft.in_reply_to.clone(),
+        references: draft.references.clone(),
+        attachments: atts
+            .iter()
+            .map(|a| geleit_engine::message::Attachment {
+                filename: a
+                    .filename
+                    .clone()
+                    .unwrap_or_else(|| "attachment".to_owned()),
+                content_type: a.content_type.clone(),
+                data: a.data.clone(),
+            })
+            .collect(),
+        html_body: None,
+    };
+    let bytes = geleit_engine::message::build_draft(&d, &message_id).ok()?;
+    Some(ServerDraftPlan {
+        folder,
+        message_id,
+        bytes,
+    })
+}
+
+/// Whether the opt-in "sync drafts to the server" setting is on. Absent = **off** (the default).
+fn sync_drafts_on(store: &Store) -> bool {
+    store
+        .get_setting(SYNC_DRAFTS_SETTING)
+        .ok()
+        .flatten()
+        .is_some_and(|v| v == "1" || v == "true")
+}
+
+/// The account's Drafts folder, by name — exact match first, then a substring (so `INBOX.Drafts` or
+/// `[Gmail]/Drafts` still resolve), mirroring how Sent is found. `None` → the draft stays local
+/// rather than inventing a folder.
+fn drafts_folder(store: &Store, account_id: i64) -> Option<String> {
+    let names: Vec<String> = store
+        .folders_for_account(account_id)
+        .ok()?
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    names
+        .iter()
+        .find(|n| n.eq_ignore_ascii_case("drafts"))
+        .or_else(|| {
+            names
+                .iter()
+                .find(|n| n.to_ascii_lowercase().contains("draft"))
+        })
+        .cloned()
+}
+
+/// The opt-in setting key for mirroring drafts to the server's Drafts folder (default off, P2).
+const SYNC_DRAFTS_SETTING: &str = "sync_drafts";
 
 /// Read attachment files into draft-attachment rows (bytes + name/type). Reuses the send-path reader
 /// and its 25 MB cap, then maps to the store's draft type.
@@ -943,12 +1064,72 @@ fn materialize_draft_attachments(
 /// Delete a saved draft (idempotent). Used by the draft-list delete affordance.
 #[tauri::command]
 pub async fn delete_draft(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
-    with_store(state.inner().clone(), move |store| {
+    let st = state.inner().clone();
+    // Note where any server copy lives (opt-in "sync drafts") before dropping the row that records it.
+    let server = with_store(st.clone(), move |store| {
+        let folder = store
+            .draft_by_id(id)
+            .ok()
+            .flatten()
+            .and_then(|r| r.server_folder);
+        let account = store.account_for_draft(id).ok().flatten();
         store
             .delete_draft(id)
-            .map_err(|_| "Couldn't delete the draft.".to_owned())
+            .map_err(|_| "Couldn't delete the draft.".to_owned())?;
+        Ok(folder.zip(account))
     })
-    .await
+    .await?;
+    // Best-effort: the local draft is already gone; a failed server cleanup must not error the UI.
+    if let Some((folder, account_id)) = server {
+        let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+        let mid = geleit_engine::message::draft_message_id(account_id, id);
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            geleit_engine::sync_actions::run_expunge_server_draft(
+                &db, &*secrets, account_id, &folder, &mid,
+            )
+        })
+        .await;
+    }
+    Ok(())
+}
+
+/// Sweep every server copy of this account's drafts away (SEND-5) — called when the opt-in "sync
+/// drafts" setting is switched **off**, so turning it off actually takes the drafts back off the
+/// server rather than just stopping new uploads. Best-effort per draft; the local drafts are
+/// untouched.
+#[tauri::command]
+pub async fn purge_server_drafts(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+) -> Result<(), String> {
+    let st = state.inner().clone();
+    let copies = with_store(st.clone(), move |store| {
+        store
+            .drafts_with_server_copies(account_id)
+            .map_err(|_| "Couldn't read your drafts.".to_owned())
+    })
+    .await?;
+    for (draft_id, folder) in copies {
+        let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+        let mid = geleit_engine::message::draft_message_id(account_id, draft_id);
+        let gone = tauri::async_runtime::spawn_blocking(move || {
+            geleit_engine::sync_actions::run_expunge_server_draft(
+                &db, &*secrets, account_id, &folder, &mid,
+            )
+        })
+        .await
+        .map_err(|_| "The draft task stopped unexpectedly.".to_owned())?;
+        // Only forget the copy once it's actually gone — otherwise it would be stranded there.
+        if gone.is_ok() {
+            let _ = with_store(st.clone(), move |store| {
+                store
+                    .set_draft_server_folder(draft_id, None)
+                    .map_err(|_| "Couldn't update the draft.".to_owned())
+            })
+            .await;
+        }
+    }
+    Ok(())
 }
 
 /// Distinct past-sender addresses matching a prefix, for To/Cc autocomplete (SEND-9). Read-only;
@@ -1372,12 +1553,23 @@ pub async fn dev_setup() -> bool {
     std::env::var("GELEIT_SETUP").is_ok_and(|v| v == "1")
 }
 
-/// Dev/test seam, debug builds only: `GELEIT_SETTINGS=1` opens the Settings window on boot. Never in
-/// release.
+/// Dev/test seam, debug builds only: `GELEIT_SETTINGS=1` opens the Settings window on boot, or
+/// `GELEIT_SETTINGS=<tab>` (accounts|general|appearance|privacy|notifications) opens it on that tab.
+/// Never in release.
 #[cfg(debug_assertions)]
 #[tauri::command]
-pub async fn dev_settings() -> bool {
-    std::env::var("GELEIT_SETTINGS").is_ok_and(|v| v == "1")
+pub async fn dev_settings() -> Option<String> {
+    const TABS: [&str; 6] = [
+        "1",
+        "accounts",
+        "general",
+        "appearance",
+        "privacy",
+        "notifications",
+    ];
+    std::env::var("GELEIT_SETTINGS")
+        .ok()
+        .filter(|v| TABS.contains(&v.as_str()))
 }
 
 /// Dev/test seam, debug builds only: `GELEIT_SEARCH=<query>` opens search and runs it on boot. Never

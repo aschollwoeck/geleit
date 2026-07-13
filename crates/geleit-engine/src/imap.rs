@@ -367,21 +367,90 @@ where
     Ok(())
 }
 
-/// Append a (sent) message to `folder` — e.g. saving an outgoing message to Sent (SEND-8) — marked
-/// `\Seen`. `message` is the full RFC 5322 bytes. The mailbox must already exist on the server.
+/// Append a message to `folder` with the given IMAP `flags` (a parenthesised list, e.g. `(\Seen)`
+/// for a Sent-save, `(\Draft)` for a draft). `message` is the full RFC 5322 bytes. The mailbox must
+/// already exist on the server.
 pub async fn append_message(
     config: &ImapConfig,
     secrets: &dyn SecretStore,
     folder: &str,
+    flags: &str,
     message: &[u8],
 ) -> Result<(), ImapError> {
     let mut session = connect(config, secrets).await?;
-    let result = session
-        .append(folder, Some("(\\Seen)"), None, message)
-        .await;
+    let result = session.append(folder, Some(flags), None, message).await;
     let _ = session.logout().await; // best-effort
     result?;
     Ok(())
+}
+
+/// Save a draft's copy to `folder` (SEND-5): expunge whatever copies of this draft are already there
+/// (matched by the stable `message_id` we stamp — this also cleans up an orphan a previous failure
+/// left behind), then `APPEND` the new bytes flagged `\Draft`. One session for the whole exchange.
+///
+/// IMAP has no update-in-place, so replace-then-append *is* the edit. `APPENDUID` isn't surfaced by
+/// our client, which is exactly why the copy is identified by its Message-ID rather than a UID.
+pub async fn sync_draft(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    message_id: &str,
+    bytes: &[u8],
+) -> Result<(), ImapError> {
+    let mut session = connect(config, secrets).await?;
+    let result = async {
+        session.select(folder).await?;
+        expunge_draft_copies(&mut session, message_id).await?;
+        session
+            .append(folder, Some("(\\Draft)"), None, bytes)
+            .await?;
+        Ok(())
+    }
+    .await;
+    let _ = session.logout().await; // best-effort
+    result
+}
+
+/// Remove a draft's copy from `folder` (SEND-5) — on send, discard, or when the sync setting is
+/// turned off. Idempotent: no copy there is success.
+pub async fn expunge_draft(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    message_id: &str,
+) -> Result<(), ImapError> {
+    let mut session = connect(config, secrets).await?;
+    let result = async {
+        session.select(folder).await?;
+        expunge_draft_copies(&mut session, message_id).await
+    }
+    .await;
+    let _ = session.logout().await; // best-effort
+    result
+}
+
+/// Expunge every `\Draft`-flagged message in the selected folder carrying `message_id`. The `DRAFT`
+/// search key is a safety belt: even if a Message-ID somehow collided, we can only ever expunge a
+/// draft — never real mail.
+async fn expunge_draft_copies(
+    session: &mut ImapSession,
+    message_id: &str,
+) -> Result<(), ImapError> {
+    // Quote-escape so an odd Message-ID can't break out of the search string.
+    let escaped = message_id.replace('\\', "\\\\").replace('"', "\\\"");
+    let uids = session
+        .uid_search(format!("DRAFT HEADER Message-ID \"{escaped}\""))
+        .await?;
+    if uids.is_empty() {
+        return Ok(());
+    }
+    let set = uids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    drain(session.uid_store(set.clone(), "+FLAGS (\\Deleted)").await).await?;
+    drain(session.uid_expunge(set).await).await
 }
 
 /// Remove a stored IMAP password (e.g. on account removal, SEC-3). Idempotent — deleting an absent
@@ -856,7 +925,7 @@ mod tests {
         };
         let msg =
             b"From: geleittest@localhost\r\nTo: x@localhost\r\nSubject: Append test\r\n\r\nHi.\r\n";
-        append_message(&cfg, &secrets, "INBOX", msg)
+        append_message(&cfg, &secrets, "INBOX", "(\\Seen)", msg)
             .await
             .expect("append accepted");
     }
@@ -1054,6 +1123,112 @@ mod tests {
             .expect("delete");
         let after_delete = list_folders(&cfg, &secrets).await.expect("list");
         assert!(!after_delete.iter().any(|f| f == "GeleitTmpB"), "deleted");
+    }
+
+    /// Server-backed drafts (SEND-5, opt-in): append a `\Draft` message to a Drafts folder, find its
+    /// UID by the Message-ID we stamped (APPENDUID isn't surfaced), then expunge it — the full
+    /// save / re-save / discard lifecycle. Needs Dovecot + `--features dangerous-tls`.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn live_append_find_and_expunge_a_server_draft() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        // Dovecot may not have a Drafts folder out of the box — make sure one exists.
+        let _ = create_folder(&cfg, &secrets, "Drafts").await;
+
+        let mid = "<geleit-draft-live-test@geleit.local>";
+        let draft = |body: &str| {
+            format!(
+                "Message-ID: {mid}\r\nFrom: geleittest@localhost\r\n\
+                 Subject: Geleit SEND-5 server draft\r\n\r\n{body}\r\n"
+            )
+        };
+        // Clean slate, then save the draft to the server.
+        expunge_draft(&cfg, &secrets, "Drafts", mid)
+            .await
+            .expect("clean");
+        sync_draft(
+            &cfg,
+            &secrets,
+            "Drafts",
+            mid,
+            draft("First version.").as_bytes(),
+        )
+        .await
+        .expect("sync");
+
+        // Exactly one copy, flagged \Draft, carrying the first body.
+        let one = fetch_draft_bodies(&cfg, &secrets, "Drafts", mid).await;
+        assert_eq!(one.len(), 1, "one copy after the first save");
+        assert!(one[0].contains("First version."), "body: {}", one[0]);
+
+        // A re-save REPLACES it (IMAP has no update-in-place) — still exactly one copy, new body.
+        sync_draft(
+            &cfg,
+            &secrets,
+            "Drafts",
+            mid,
+            draft("Edited version.").as_bytes(),
+        )
+        .await
+        .expect("re-sync");
+        let again = fetch_draft_bodies(&cfg, &secrets, "Drafts", mid).await;
+        assert_eq!(again.len(), 1, "a re-save must not leave a duplicate");
+        assert!(again[0].contains("Edited version."), "body: {}", again[0]);
+
+        // Sending / discarding removes it, and doing so twice is fine.
+        expunge_draft(&cfg, &secrets, "Drafts", mid)
+            .await
+            .expect("expunge");
+        expunge_draft(&cfg, &secrets, "Drafts", mid)
+            .await
+            .expect("expunge is idempotent");
+        assert!(
+            fetch_draft_bodies(&cfg, &secrets, "Drafts", mid)
+                .await
+                .is_empty(),
+            "the copy should be gone"
+        );
+    }
+
+    /// The raw bodies of every `\Draft` message in `folder` carrying `message_id` — proves both that
+    /// the copy is there AND that the `\Draft` flag stuck (the search key requires it).
+    #[cfg(feature = "dangerous-tls")]
+    async fn fetch_draft_bodies(
+        cfg: &ImapConfig,
+        secrets: &dyn SecretStore,
+        folder: &str,
+        message_id: &str,
+    ) -> Vec<String> {
+        let mut session = connect(cfg, secrets).await.expect("connect");
+        session.select(folder).await.expect("select");
+        let uids = session
+            .uid_search(format!("DRAFT HEADER Message-ID \"{message_id}\""))
+            .await
+            .expect("search");
+        let mut out = Vec::new();
+        for uid in uids {
+            let mut fetches = session
+                .uid_fetch(uid.to_string(), "(BODY.PEEK[])")
+                .await
+                .expect("fetch");
+            while let Some(f) = fetches.next().await {
+                if let Some(body) = f.expect("fetch row").body() {
+                    out.push(String::from_utf8_lossy(body).into_owned());
+                }
+            }
+        }
+        let _ = session.logout().await;
+        out
     }
 
     /// Incremental sync: a new message appears, a re-sync is idempotent (no dupes), and a message

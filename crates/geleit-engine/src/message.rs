@@ -193,14 +193,39 @@ fn references_chain(orig: &Original) -> Vec<String> {
 
 /// Build the RFC 5322 bytes for `draft`, or a calm error if it's missing a sender/recipient.
 pub fn build(draft: &Draft) -> Result<Vec<u8>, String> {
-    if draft.from_addr.trim().is_empty() {
-        return Err("The message needs a sender address.".to_owned());
-    }
     if draft.to.is_empty() && draft.cc.is_empty() {
         return Err("Add at least one recipient.".to_owned());
     }
+    build_inner(draft, None)
+}
+
+/// Build the RFC 5322 bytes for an **unsent draft** (SEND-5, server-backed drafts): unlike [`build`]
+/// it does **not** require recipients — a half-written draft legitimately has none yet — and it
+/// stamps `message_id` so the appended server copy can be found again by `HEADER Message-ID` (IMAP's
+/// `APPENDUID` isn't surfaced by our client).
+pub fn build_draft(draft: &Draft, message_id: &str) -> Result<Vec<u8>, String> {
+    build_inner(draft, Some(message_id))
+}
+
+/// The **stable** Message-ID stamped on a draft's server copy (SEND-5). Stable per draft — *not* per
+/// save — so every copy of the same draft carries it: a re-save finds and expunges whatever is there
+/// (even an orphan left by an earlier failure) before appending the new one, and a send/discard can
+/// clean up without a stored UID. That sidesteps IMAP's missing `APPENDUID`, UID-validity resets, and
+/// duplicate copies in one stroke. Pure.
+#[must_use]
+pub fn draft_message_id(account_id: i64, draft_id: i64) -> String {
+    format!("<geleit-draft-{account_id}-{draft_id}@geleit.local>")
+}
+
+fn build_inner(draft: &Draft, message_id: Option<&str>) -> Result<Vec<u8>, String> {
+    if draft.from_addr.trim().is_empty() {
+        return Err("The message needs a sender address.".to_owned());
+    }
 
     let mut builder = MessageBuilder::new();
+    if let Some(mid) = message_id {
+        builder = builder.message_id(mid);
+    }
     builder = match draft
         .from_name
         .as_deref()
@@ -210,7 +235,9 @@ pub fn build(draft: &Draft) -> Result<Vec<u8>, String> {
         Some(name) => builder.from((name, draft.from_addr.as_str())),
         None => builder.from(draft.from_addr.as_str()),
     };
-    builder = builder.to(addresses(&draft.to));
+    if !draft.to.is_empty() {
+        builder = builder.to(addresses(&draft.to));
+    }
     if !draft.cc.is_empty() {
         builder = builder.cc(addresses(&draft.cc));
     }
@@ -527,6 +554,46 @@ mod tests {
         let mut cc_only = sample();
         cc_only.to.clear();
         assert!(build(&cc_only).is_ok(), "a Cc-only message should build");
+    }
+
+    #[test]
+    fn build_draft_allows_no_recipients_and_stamps_the_message_id() {
+        // A half-written draft has no recipients yet — `build` refuses it, `build_draft` must not.
+        let mut empty = sample();
+        empty.to.clear();
+        empty.cc.clear();
+        assert!(
+            build(&empty).is_err(),
+            "the send path still needs a recipient"
+        );
+        let mid = "<geleit-draft-1-1700000000@geleit.local>";
+        let bytes = build_draft(&empty, mid).expect("a recipient-less draft should build");
+        let raw = String::from_utf8_lossy(&bytes);
+        // The Message-ID is stamped — it's how the appended server copy is found again.
+        assert!(raw.contains(mid), "message-id missing: {raw}");
+        // No recipients → no empty To: header to confuse a server.
+        assert!(!raw.contains("\r\nTo: \r\n"), "empty To header: {raw}");
+        // A sender is still required (we can't append a message from nobody).
+        let mut no_from = empty.clone();
+        no_from.from_addr = String::new();
+        assert!(build_draft(&no_from, mid).is_err());
+        // With recipients it behaves like a normal build (plus the Message-ID).
+        let with = build_draft(&sample(), mid).expect("build");
+        let raw = String::from_utf8_lossy(&with);
+        assert!(raw.contains("bob@test.local") && raw.contains(mid));
+    }
+
+    #[test]
+    fn draft_message_id_is_stable_per_draft_and_unique_across_accounts() {
+        // Stable: the SAME draft always gets the same id, so a re-save can find (and replace) the
+        // copy it left on the server last time.
+        assert_eq!(draft_message_id(1, 7), draft_message_id(1, 7));
+        // Distinct per draft, and per account (two accounts on one server must not collide).
+        assert_ne!(draft_message_id(1, 7), draft_message_id(1, 8));
+        assert_ne!(draft_message_id(1, 7), draft_message_id(2, 7));
+        // Angle-bracketed, as a Message-ID must be.
+        let mid = draft_message_id(1, 7);
+        assert!(mid.starts_with('<') && mid.ends_with('>'), "{mid}");
     }
 
     #[test]

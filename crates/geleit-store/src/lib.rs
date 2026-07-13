@@ -163,6 +163,13 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     );
     ",
+    // 13 — which server folder holds a copy of this draft, when the opt-in "sync drafts" setting is
+    // on (SEND-5). NULL = local-only (the default). Only the folder is stored: the copy itself is
+    // identified by the stable Message-ID we stamp on it, so a re-save/send/discard finds and
+    // expunges it by search — no UID to go stale when a mailbox's UIDVALIDITY resets.
+    "
+    ALTER TABLE draft ADD COLUMN server_folder TEXT;
+    ",
 ];
 
 /// A parsed search query (SEARCH-1/4): an FTS5 `MATCH` string (`None` when there are no full-text
@@ -334,6 +341,9 @@ pub struct DraftRow {
     pub id: i64,
     pub content: DraftContent,
     pub updated_at: i64,
+    /// The server folder holding a copy of this draft, when the opt-in "sync drafts" setting put one
+    /// there. `None` = local-only (the default). The copy itself is found by its Message-ID.
+    pub server_folder: Option<String>,
 }
 
 /// An attachment saved with a draft (SEND-4/5): the file bytes plus its name/type.
@@ -669,7 +679,8 @@ impl Store {
     /// All drafts for an account, newest-saved first.
     pub fn list_drafts(&self, account_id: i64) -> Result<Vec<DraftRow>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, to_addrs, cc_addrs, subject, body, in_reply_to, reference_ids, updated_at \
+            "SELECT id, to_addrs, cc_addrs, subject, body, in_reply_to, reference_ids, updated_at, \
+             server_folder \
              FROM draft WHERE account_id = ?1 ORDER BY updated_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([account_id], Self::draft_from_row)?;
@@ -682,7 +693,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT id, to_addrs, cc_addrs, subject, body, in_reply_to, reference_ids, \
-                 updated_at FROM draft WHERE id = ?1",
+                 updated_at, server_folder FROM draft WHERE id = ?1",
                 [id],
                 Self::draft_from_row,
             )
@@ -750,7 +761,47 @@ impl Store {
                     .unwrap_or_default(),
             },
             updated_at: r.get(7)?,
+            server_folder: r.get(8)?,
         })
+    }
+
+    /// The account a draft belongs to, or `None` if it's gone. Needed to reach the right server.
+    pub fn account_for_draft(&self, draft_id: i64) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT account_id FROM draft WHERE id = ?1",
+                [draft_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Every draft of `account_id` that has a copy on the server, as `(draft_id, folder)` — for
+    /// sweeping those copies away when the "sync drafts" setting is turned off (SEND-5).
+    pub fn drafts_with_server_copies(
+        &self,
+        account_id: i64,
+    ) -> Result<Vec<(i64, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, server_folder FROM draft \
+             WHERE account_id = ?1 AND server_folder IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([account_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Record (or clear, with `None`) the server folder holding this draft's copy (SEND-5).
+    pub fn set_draft_server_folder(
+        &self,
+        draft_id: i64,
+        folder: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE draft SET server_folder = ?2 WHERE id = ?1",
+            (draft_id, folder),
+        )?;
+        Ok(())
     }
 
     /// Read an app-wide setting (APP-4), or `None` if unset.
@@ -1875,6 +1926,71 @@ mod tests {
         .unwrap();
         s.delete_draft(id).unwrap();
         assert!(s.draft_attachments(id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn draft_server_folder_is_recorded_cleared_and_survives_a_resave() {
+        let s = Store::open_in_memory().unwrap();
+        // Two accounts, and the draft on the *second* — so `account_for_draft` can't pass by
+        // returning a hard-coded first id.
+        let other = s.add_account("first@example.com", None).unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let c = DraftContent {
+            subject: "Hi".into(),
+            ..Default::default()
+        };
+        let id = s.save_draft(acc, None, &c).unwrap();
+        // A fresh draft is local-only, and knows which account it belongs to.
+        assert_eq!(s.draft_by_id(id).unwrap().unwrap().server_folder, None);
+        assert_eq!(s.account_for_draft(id).unwrap(), Some(acc));
+        assert_eq!(s.account_for_draft(9_999).unwrap(), None); // no such draft
+
+        s.set_draft_server_folder(id, Some("Drafts")).unwrap();
+        assert_eq!(
+            s.draft_by_id(id).unwrap().unwrap().server_folder.as_deref(),
+            Some("Drafts")
+        );
+        // Re-saving the content must not clobber the recorded server folder.
+        let c2 = DraftContent {
+            subject: "Hi again".into(),
+            ..Default::default()
+        };
+        s.save_draft(acc, Some(id), &c2).unwrap();
+        let row = s.draft_by_id(id).unwrap().unwrap();
+        assert_eq!(row.content.subject, "Hi again");
+        assert_eq!(row.server_folder.as_deref(), Some("Drafts"));
+        // It also shows up on the list rows, and clearing works.
+        assert_eq!(
+            s.list_drafts(acc).unwrap()[0].server_folder,
+            row.server_folder
+        );
+
+        // The sweep list (used when "sync drafts" is switched off) names exactly the drafts that have
+        // a copy on the server — not the local-only ones, and not another account's.
+        let local_only = s.save_draft(acc, None, &c).unwrap();
+        let others = s.save_draft(other, None, &c).unwrap();
+        s.set_draft_server_folder(others, Some("INBOX.Drafts"))
+            .unwrap();
+        assert_eq!(
+            s.drafts_with_server_copies(acc).unwrap(),
+            vec![(id, "Drafts".to_owned())],
+            "only this account's synced draft"
+        );
+        assert_eq!(
+            s.drafts_with_server_copies(other).unwrap(),
+            vec![(others, "INBOX.Drafts".to_owned())]
+        );
+        assert!(s
+            .draft_by_id(local_only)
+            .unwrap()
+            .unwrap()
+            .server_folder
+            .is_none());
+
+        s.set_draft_server_folder(id, None).unwrap();
+        assert_eq!(s.draft_by_id(id).unwrap().unwrap().server_folder, None);
+        // Cleared → it drops off the sweep list.
+        assert!(s.drafts_with_server_copies(acc).unwrap().is_empty());
     }
 
     #[test]
