@@ -4,14 +4,14 @@
 //! search, transport, and auth subsystems. It depends on [`geleit_core`] and must never
 //! depend on UI code (constitution P4, ADR-0003).
 
-mod envelope;
+pub mod envelope;
 pub mod imap;
 pub mod localstore;
 pub mod message;
 mod mime;
 pub mod safehtml;
 pub mod smtp;
-mod sync;
+pub mod sync;
 pub mod sync_actions;
 pub mod thread;
 

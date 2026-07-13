@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crate::sync::Arrived;
 use futures::StreamExt;
 use geleit_platform::secret::{SecretError, SecretStore};
 use geleit_store::{NewMessage, Store, StoreError};
@@ -48,6 +49,24 @@ pub enum ImapError {
     Secret(#[from] SecretError),
     #[error("store error: {0}")]
     Store(#[from] StoreError),
+}
+
+/// What one incremental sync of a folder turned up (NOTIF-1).
+#[derive(Debug, Clone, Default)]
+pub struct SyncOutcome {
+    /// Messages that were not in our store before this sync, with what a notification would need.
+    pub arrived: Vec<Arrived>,
+    /// Whether the folder was in a known-good state *before* this sync. When false, `arrived` is the
+    /// whole recent window rather than genuine news — see [`crate::sync::notifiable`].
+    pub primed: bool,
+}
+
+impl SyncOutcome {
+    /// The arrivals worth telling the user about — unseen, and only from a primed folder.
+    #[must_use]
+    pub fn worth_announcing(&self) -> Vec<&Arrived> {
+        crate::sync::notifiable(&self.arrived, self.primed)
+    }
 }
 
 /// The `service` key under which IMAP passwords are stored in the [`SecretStore`].
@@ -511,7 +530,8 @@ pub async fn sync_bodies(
 /// Incrementally sync one folder: reconcile local vs. server UIDs, delete what's gone on the
 /// server, and fetch envelopes+bodies for **new** UIDs (the most-recent `limit`; older backfill is
 /// S2.4). A UIDVALIDITY change clears the folder first (the server's UIDs are no longer valid).
-/// Returns how many new messages were stored. (Server→local flag changes are M6, with write-back.)
+/// Returns a [`SyncOutcome`]: which messages arrived, and whether the folder was primed (i.e.
+/// whether those arrivals are genuinely news — see [`crate::sync::should_announce`]). (Server→local flag changes are M6, with write-back.)
 pub async fn sync_folder_incremental(
     config: &ImapConfig,
     secrets: &dyn SecretStore,
@@ -519,19 +539,28 @@ pub async fn sync_folder_incremental(
     account_id: i64,
     folder: &str,
     limit: u32,
-) -> Result<usize, ImapError> {
+) -> Result<SyncOutcome, ImapError> {
     let folder_id = store.upsert_folder(account_id, folder)?;
     let mut session = connect(config, secrets).await?;
     let mailbox = session.select(folder).await?;
 
-    // UIDVALIDITY: if it changed since last sync, our stored UIDs are meaningless — drop them.
+    // Has this folder ever completed a sync? Only then does "absent from our store" mean "new mail"
+    // rather than "we have never looked" — the whole decision lives in `sync::should_announce`.
+    let was_primed = store.folder_primed(folder_id)?;
+
+    // UIDVALIDITY: if it changed since last sync, our stored UIDs are meaningless — drop them. That
+    // also makes every message look new again, so the folder must be primed afresh.
+    let mut uidvalidity_changed = false;
     if let Some(validity) = mailbox.uid_validity {
         let validity = i64::from(validity);
         if matches!(store.folder_uidvalidity(folder_id)?, Some(prev) if prev != validity) {
             store.clear_folder(folder_id)?;
+            store.set_folder_primed(folder_id, false)?;
+            uidvalidity_changed = true;
         }
         store.set_folder_uidvalidity(folder_id, validity)?;
     }
+    let primed = crate::sync::should_announce(was_primed, uidvalidity_changed);
 
     // Reconcile local vs. the server's current UID set.
     let server: Vec<u32> = session.uid_search("ALL").await?.into_iter().collect();
@@ -550,8 +579,9 @@ pub async fn sync_folder_incremental(
     let mut new_uids = plan.new;
     new_uids.sort_unstable();
     let recent_new = &new_uids[new_uids.len().saturating_sub(limit as usize)..];
+    let mut arrived = Vec::new();
     if !recent_new.is_empty() {
-        fetch_envelopes_for(
+        arrived = fetch_envelopes_for(
             &mut session,
             store,
             account_id,
@@ -562,20 +592,30 @@ pub async fn sync_folder_incremental(
     }
     // Bodies for any recent message still lacking one — covers the just-fetched envelopes AND
     // retries a body fetch an earlier sync left incomplete, so it self-heals (P6).
+    //
+    // Deliberately **best-effort**: the envelopes are already committed, so failing here with `?`
+    // would throw away `arrived` — and those UIDs are now local, so no later sync would ever call
+    // them new again. The mail would sit in the inbox, silently, never announced. A missing body is
+    // the far smaller problem, and `uids_without_body` retries it on the next sync anyway.
     let need_bodies = store.uids_without_body(folder_id, limit)?;
     if !need_bodies.is_empty() {
-        fetch_bodies_for(
+        let _ = fetch_bodies_for(
             &mut session,
             store,
             account_id,
             folder_id,
             &uid_set(&need_bodies),
         )
-        .await?;
+        .await;
     }
 
+    // The folder has now completed a sync — from here on, "absent from our store" really does mean
+    // new mail. Set even when the folder was empty, so the FIRST message into an empty inbox is
+    // announced (inferring primed-ness from "has messages" would have swallowed it).
+    store.set_folder_primed(folder_id, true)?;
+
     let _ = session.logout().await; // best-effort
-    Ok(recent_new.len())
+    Ok(SyncOutcome { arrived, primed })
 }
 
 /// Progressively fetch the rest of a folder, newest-first, in `batch_size` chunks (envelopes+bodies
@@ -642,18 +682,30 @@ async fn fetch_envelopes_for(
     account_id: i64,
     folder_id: i64,
     uid_set: &str,
-) -> Result<(), ImapError> {
+) -> Result<Vec<Arrived>, ImapError> {
     let mut fetches = session
         .uid_fetch(uid_set, "(UID ENVELOPE FLAGS INTERNALDATE)")
         .await?;
+    let mut arrived = Vec::new();
     while let Some(fetch) = fetches.next().await {
         let msg = fetch_to_new_message(&fetch?);
-        if msg.uid.is_none() {
+        let Some(uid) = msg.uid else {
             continue;
-        }
+        };
+        // These UIDs came from the reconcile plan, so each one really is new to us. Record what a
+        // notification would need before the envelope is consumed by the store.
+        arrived.push(Arrived {
+            uid: uid as u32,
+            from: crate::envelope::display_sender(
+                msg.from_name.as_deref(),
+                msg.from_addr.as_deref(),
+            ),
+            subject: msg.subject.clone().unwrap_or_default(),
+            seen: msg.seen,
+        });
         store.upsert_message(account_id, folder_id, &msg)?;
     }
-    Ok(())
+    Ok(arrived)
 }
 
 /// `uid_fetch` bodies for `uid_set` (BODY.PEEK[] — doesn't set `\Seen`), parse, and store them by UID.
@@ -1229,6 +1281,95 @@ mod tests {
         }
         let _ = session.logout().await;
         out
+    }
+
+    /// New-mail detection (NOTIF-1): the FIRST sync of a folder primes it and announces nothing (or a
+    /// new account would notify about its whole inbox); after that, an arriving message is announced,
+    /// one already `\Seen` on the server is not, and a re-sync announces nothing again.
+    /// Needs Dovecot + `--features dangerous-tls`.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn live_new_mail_is_detected_and_first_sync_is_silent() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        // Its OWN mailbox, not the shared INBOX: sibling live tests append there, and their arrivals
+        // would land in this test's counts (and this test's appends would break theirs). Hermetic.
+        let folder = format!("GeleitNotif{}", std::process::id());
+        let _ = delete_folder(&cfg, &secrets, &folder).await; // leftovers from a failed run
+        create_folder(&cfg, &secrets, &folder)
+            .await
+            .expect("create");
+
+        let raw = |subject: &str| {
+            format!("Subject: {subject}\r\nFrom: Alice <alice@example.com>\r\n\r\nBody.\r\n")
+        };
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("geleittest@localhost", None).unwrap();
+
+        // 1) FIRST sync of a folder — primes it, announces NOTHING. (Even though the folder is empty:
+        //    priming is a recorded fact about "have we ever looked", not a guess from the contents.)
+        let first = sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("first sync");
+        assert!(!first.primed, "a folder we've never synced isn't primed");
+        assert!(
+            first.worth_announcing().is_empty(),
+            "the first sync must never notify — it would announce the whole folder"
+        );
+
+        // 2) A new UNSEEN message arrives → announced, with its sender and subject. Note this also
+        //    covers the empty-folder case: the very first message must still be news.
+        let subject = "Geleit NOTIF new mail";
+        append_message(&cfg, &secrets, &folder, "()", raw(subject).as_bytes())
+            .await
+            .expect("append new");
+        let second = sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("second sync");
+        assert!(second.primed, "the folder is primed now");
+        let news = second.worth_announcing();
+        assert_eq!(news.len(), 1, "arrived: {:?}", second.arrived);
+        assert_eq!(news[0].subject, subject);
+        assert_eq!(news[0].from, "Alice"); // display name, not the bare address
+
+        // 3) A message already read in another client (\Seen on the server) is NOT news.
+        append_message(
+            &cfg,
+            &secrets,
+            &folder,
+            "(\\Seen)",
+            raw("Geleit NOTIF already read").as_bytes(),
+        )
+        .await
+        .expect("append seen");
+        let third = sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("third sync");
+        assert_eq!(third.arrived.len(), 1, "it did arrive…");
+        assert!(
+            third.worth_announcing().is_empty(),
+            "…but it was already read elsewhere, so it isn't news"
+        );
+
+        // 4) A sync with nothing new announces nothing.
+        let fourth = sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("fourth sync");
+        assert!(fourth.arrived.is_empty());
+        assert!(fourth.worth_announcing().is_empty());
+
+        delete_folder(&cfg, &secrets, &folder)
+            .await
+            .expect("clean up");
     }
 
     /// Incremental sync: a new message appears, a re-sync is idempotent (no dupes), and a message

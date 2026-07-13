@@ -192,7 +192,7 @@ pub fn run_refresh(
     secrets: &dyn SecretStore,
     account_id: i64,
     folder: &str,
-) -> Result<(), String> {
+) -> Result<imap::SyncOutcome, String> {
     let store = open_store(db_path, secrets)?;
     let settings = store
         .imap_settings(account_id)
@@ -203,9 +203,9 @@ pub fn run_refresh(
     runtime()?
         .block_on(async {
             imap::sync_folders(&config, secrets, &store, account_id).await?;
-            imap::sync_folder_incremental(&config, secrets, &store, account_id, folder, 200)
-                .await?;
-            Ok::<(), imap::ImapError>(())
+            // The outcome carries WHICH messages arrived (and whether the folder was primed), so the
+            // caller can tell the user about them (NOTIF-1). It used to be discarded.
+            imap::sync_folder_incremental(&config, secrets, &store, account_id, folder, 200).await
         })
         .map_err(|_| "Couldn't refresh — check your connection and try again.".to_owned())
 }

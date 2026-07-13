@@ -349,12 +349,12 @@ pub fn compose_draft_from(
 }
 
 /// Sender as the list should show it: display name, else the address, else a calm placeholder.
-/// Pure — unit-tested.
+///
+/// Delegates to the engine's definition rather than repeating it, so the message list and a new-mail
+/// notification (raised host-side, from `engine::envelope`) can never drift apart.
 #[must_use]
 pub fn display_sender(from_name: Option<&str>, from_addr: Option<&str>) -> String {
-    let name = from_name.map(str::trim).filter(|s| !s.is_empty());
-    let addr = from_addr.map(str::trim).filter(|s| !s.is_empty());
-    name.or(addr).unwrap_or("(unknown sender)").to_owned()
+    geleit_engine::envelope::display_sender(from_name, from_addr)
 }
 
 /// A message with no subject still needs a readable row. Pure — unit-tested.
