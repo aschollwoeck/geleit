@@ -48,12 +48,13 @@ else, deleting only moves mail to Trash, so you have a safety net until you choo
 ## Acting on several messages at once
 
 To handle a batch of mail together, **hover a message row** and a checkbox appears on the left —
-choose it to select that message. Once anything is selected, a small bar appears above the list
-showing how many you've picked, with actions for all of them:
+choose it to select that message. To pick a whole run at once, select one message, then **Shift-click**
+another: everything between them is selected. Once anything is selected, a small bar appears above the
+list showing how many you've picked, with actions for all of them:
 
 - **Archive** — move them all to Archive.
 - **Delete** — move them all to Trash.
-- **Mark unread** — bring back their unread dots.
+- **Mark read** / **Mark unread** — clear or bring back their unread dots.
 - **Clear** (the ✕) — deselect everything.
 
 The checkbox at the far left of that bar **selects (or clears) every message in the list** at once.

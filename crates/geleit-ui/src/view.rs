@@ -157,6 +157,23 @@ pub fn is_protected_folder(name: &str) -> bool {
     )
 }
 
+/// The ids in `ordered` between `anchor` and `target` inclusive, for shift-click range selection.
+/// Order-agnostic (anchor may be before or after target); an id not present, or both the same, yields
+/// just the ones found. Pure.
+#[must_use]
+pub fn range_ids(ordered: &[i64], anchor: i64, target: i64) -> Vec<i64> {
+    let a = ordered.iter().position(|id| *id == anchor);
+    let b = ordered.iter().position(|id| *id == target);
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            ordered[lo..=hi].to_vec()
+        }
+        // If the anchor is gone (e.g. the list changed), fall back to just the target.
+        _ => b.map(|b| vec![ordered[b]]).unwrap_or_default(),
+    }
+}
+
 /// Whether every id in `ids` is present in the selection `set` — the state of a "select all" box
 /// over the currently-listed messages. Empty `ids` is not "all selected" (nothing to select). Pure.
 #[must_use]
@@ -193,6 +210,19 @@ mod tests {
             split_addrs(" a@x.com , b@y.com ;c@z.com,"),
             ["a@x.com", "b@y.com", "c@z.com"]
         );
+    }
+
+    #[test]
+    fn range_ids_spans_inclusive_in_either_direction() {
+        let ordered = [10, 20, 30, 40, 50];
+        assert_eq!(range_ids(&ordered, 20, 40), [20, 30, 40]); // forward
+        assert_eq!(range_ids(&ordered, 40, 20), [20, 30, 40]); // reverse → same span
+        assert_eq!(range_ids(&ordered, 30, 30), [30]); // single
+        assert_eq!(range_ids(&ordered, 10, 50), [10, 20, 30, 40, 50]); // whole
+                                                                       // Anchor missing → falls back to just the target.
+        assert_eq!(range_ids(&ordered, 99, 30), [30]);
+        // Both missing → empty.
+        assert!(range_ids(&ordered, 99, 88).is_empty());
     }
 
     #[test]

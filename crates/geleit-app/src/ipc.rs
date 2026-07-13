@@ -353,17 +353,30 @@ pub async fn set_star(state: tauri::State<'_, AppState>, id: i64, on: bool) -> R
     Ok(())
 }
 
+/// Mark a message read (READ-7, for bulk mark-read). Optimistic local write + server write-back.
+#[tauri::command]
+pub async fn set_read(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    set_seen_and_writeback(state, id, true, "Couldn't mark read.").await
+}
+
 /// Mark a message unread again (READ-7). Optimistic local write + server write-back.
 #[tauri::command]
 pub async fn set_unread(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    set_seen_and_writeback(state, id, false, "Couldn't mark unread.").await
+}
+
+/// Shared body for `set_read`/`set_unread`: persist the seen flag locally, then write it back to the
+/// server (`\Seen`) on a worker, targeting the message's real folder.
+async fn set_seen_and_writeback(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    seen: bool,
+    err: &'static str,
+) -> Result<(), String> {
     let st = state.inner().clone();
     let loc = with_store(st.clone(), move |store| {
-        store
-            .set_seen(id, false)
-            .map_err(|_| "Couldn't mark unread.".to_owned())?;
-        store
-            .message_location(id)
-            .map_err(|_| "Couldn't mark unread.".to_owned())
+        store.set_seen(id, seen).map_err(|_| err.to_owned())?;
+        store.message_location(id).map_err(|_| err.to_owned())
     })
     .await?;
     if let Some((folder, uid)) = loc {
@@ -374,7 +387,7 @@ pub async fn set_unread(state: tauri::State<'_, AppState>, id: i64) -> Result<()
                 account_of(db, secrets, id)?,
                 &folder,
                 uid as u32,
-                false,
+                seen,
             )
         });
     }

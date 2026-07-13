@@ -244,11 +244,14 @@ callback threading). Notable models:
 - **Multi-select bulk actions** (ORG-7) — pure UI reusing the per-message commands, no new IPC. A
   `selected: HashSet<i64>` (mirrors `read_now`/`marked_unread`) drives a hover-revealed per-row
   checkbox and a bulk bar (Archive / Delete / Mark unread / Clear + a select-all box backed by the pure
-  `all_selected` in `view.rs`). Bulk Archive/Delete reuse the deferred-Undo machinery, generalized from
-  a single `PendingMove{id}` to `PendingMove{ids}`: `rows()` hides the whole set, one "N archived · Undo"
-  toast shows, and on commit the server moves loop `move_to_role` per id, re-inserting only the rows
-  that fail. Mark-unread is an immediate `set_unread` loop. Selection clears on folder/account/view/
-  search change.
+  `all_selected` in `view.rs`). **Shift-click** extends a range from the last plain-clicked row (the
+  `select_anchor`) via the pure `range_ids(ordered, anchor, target)` helper over the current message
+  order. Bulk Archive/Delete reuse the deferred-Undo machinery, generalized from a single
+  `PendingMove{id}` to `PendingMove{ids}`: `rows()` hides the whole set, one "N archived · Undo" toast
+  shows, and on commit the server moves loop `move_to_role` per id, re-inserting only the rows that
+  fail. Mark read / Mark unread are immediate `set_read`/`set_unread` loops (both share
+  `set_seen_and_writeback` — local seen flag + `\Seen` write-back). Selection clears on
+  folder/account/view/search change.
 - **List** is one keyed `<For>` over three fixed day buckets (Today/Yesterday/Earlier), so rank-ordered
   search results group correctly. Reading-pane header order is actions · sender · subject (buttons
   pinned on top). Keyboard: `c` `/` `e` `#` `r` `f` `z` `j`/`k` `Esc`.

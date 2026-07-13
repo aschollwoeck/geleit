@@ -326,6 +326,11 @@ pub async fn set_unread(id: i64) -> Result<(), String> {
     call("set_unread", &IdArgs { id }).await
 }
 
+/// Mark a message read (server + local) — for bulk mark-read.
+pub async fn set_read(id: i64) -> Result<(), String> {
+    call("set_read", &IdArgs { id }).await
+}
+
 /// Move a message to a role folder: "archive" | "trash" | "spam" | "inbox". Returns whether it acted
 /// (false = the account has no such folder).
 pub async fn move_to_role(id: i64, role: &str) -> Result<bool, String> {
