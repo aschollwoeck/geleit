@@ -49,6 +49,13 @@ pub struct ComposeDraft {
     pub references: Vec<String>,
 }
 
+/// A resumed draft: the form + the on-disk paths its saved attachments were materialised to.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct ResumedDraft {
+    pub draft: ComposeDraft,
+    pub attachments: Vec<String>,
+}
+
 /// A row in the Drafts list (mirrors `geleit-app::dto::DraftSummary`).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct DraftSummary {
@@ -182,6 +189,7 @@ struct SaveDraftArgs {
     account_id: i64,
     draft_id: Option<i64>,
     draft: ComposeDraft,
+    attachments: Vec<String>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -474,11 +482,13 @@ pub async fn send_message(
     .await
 }
 
-/// Save (or update) a local draft; returns its id so the composer keeps editing the same row.
+/// Save (or update) a local draft (with its attachment file paths); returns its id so the composer
+/// keeps editing the same row.
 pub async fn save_draft(
     account_id: i64,
     draft_id: Option<i64>,
     draft: ComposeDraft,
+    attachments: Vec<String>,
 ) -> Result<i64, String> {
     call(
         "save_draft",
@@ -486,6 +496,7 @@ pub async fn save_draft(
             account_id,
             draft_id,
             draft,
+            attachments,
         },
     )
     .await
@@ -496,8 +507,8 @@ pub async fn list_drafts(account_id: i64) -> Result<Vec<DraftSummary>, String> {
     call("list_drafts", &AccountArgs { account_id }).await
 }
 
-/// Load a draft's content back into a compose form (`None` if it's gone).
-pub async fn load_draft(id: i64) -> Result<Option<ComposeDraft>, String> {
+/// Load a draft back into a compose form + its attachment paths (`None` if it's gone).
+pub async fn load_draft(id: i64) -> Result<Option<ResumedDraft>, String> {
     call("load_draft", &IdArgs { id }).await
 }
 
@@ -651,6 +662,11 @@ pub async fn dev_compose_to() -> Result<Option<String>, String> {
 /// Dev/test seam — see `geleit-app::ipc::dev_drafts`. Always `false` in a release build.
 pub async fn dev_drafts() -> Result<bool, String> {
     call("dev_drafts", &NoArgs {}).await
+}
+
+/// Dev/test seam — see `geleit-app::ipc::dev_resume`. Always `false` in a release build.
+pub async fn dev_resume() -> Result<bool, String> {
+    call("dev_resume", &NoArgs {}).await
 }
 
 /// Dev/test seam — see `geleit-app::ipc::dev_select`. Always `None` in a release build.
