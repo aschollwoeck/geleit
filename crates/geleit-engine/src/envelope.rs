@@ -39,6 +39,19 @@ pub(crate) fn address_parts(
     (from_name, from_addr)
 }
 
+/// How to name a sender: the display name if the envelope carried one, else the bare address, else a
+/// calm placeholder. Pure.
+///
+/// The one definition — `geleit-app`'s `dto::display_sender` delegates here, so the message list and
+/// a new-mail notification can never drift apart. It lives in the engine because a notification is
+/// raised by the host worker, long before any DTO exists.
+#[must_use]
+pub fn display_sender(from_name: Option<&str>, from_addr: Option<&str>) -> String {
+    let name = from_name.map(str::trim).filter(|s| !s.is_empty());
+    let addr = from_addr.map(str::trim).filter(|s| !s.is_empty());
+    name.or(addr).unwrap_or("(unknown sender)").to_owned()
+}
+
 /// The trailing (newest) sequence-number window of size `min(limit, exists)`, as inclusive 1-based
 /// bounds `(start, end)`, or `None` when there is nothing to fetch. IMAP sequence numbers are
 /// arrival-ordered, so the high end is the newest message.
@@ -52,7 +65,19 @@ pub(crate) fn recent_window(exists: u32, limit: u32) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{address_parts, decode_header, recent_window};
+    use super::{address_parts, decode_header, display_sender, recent_window};
+
+    #[test]
+    fn display_sender_prefers_the_name_then_the_address() {
+        assert_eq!(display_sender(Some("Alice"), Some("a@x.io")), "Alice");
+        assert_eq!(display_sender(None, Some("a@x.io")), "a@x.io");
+        // A whitespace-only display name must not win over a real address (nor render as blank).
+        assert_eq!(display_sender(Some("   "), Some("a@x.io")), "a@x.io");
+        assert_eq!(display_sender(Some("  Alice  "), None), "Alice"); // trimmed
+                                                                      // Nothing usable → a calm placeholder, never an empty string.
+        assert_eq!(display_sender(None, None), "(unknown sender)");
+        assert_eq!(display_sender(Some(" "), Some(" ")), "(unknown sender)");
+    }
 
     #[test]
     fn recent_window_bounds() {

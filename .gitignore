@@ -40,3 +40,8 @@ crates/geleit-app/gen/schemas/
 
 # wasm-bindgen output for the M9 cold-start spike (generated from ui/src)
 spikes/wasm-coldstart/ui/pkg/
+
+# SQLite database + its WAL sidecars (the dev default writes ./geleit.db)
+*.db
+*.db-wal
+*.db-shm

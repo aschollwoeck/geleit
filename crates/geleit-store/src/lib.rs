@@ -170,6 +170,14 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE draft ADD COLUMN server_folder TEXT;
     ",
+    // 14 — has this folder ever completed a sync? (NOTIF-1.) Until it has, "not in our store" means
+    // "we have never looked", not "new mail" — so the first sync of a folder must announce nothing,
+    // or a new account would fire a notification per message in its inbox. Set only after a sync
+    // *finishes*, so a sync that dies half-way doesn't leave the folder falsely primed; cleared again
+    // if the server resets UIDVALIDITY (which makes every message look new once more).
+    "
+    ALTER TABLE folder ADD COLUMN primed INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
 
 /// A parsed search query (SEARCH-1/4): an FTS5 `MATCH` string (`None` when there are no full-text
@@ -453,7 +461,24 @@ impl Store {
     }
 
     fn init(conn: Connection) -> Result<Self, StoreError> {
-        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        // `foreign_keys` — SQLite defaults it OFF, and the schema leans on ON DELETE CASCADE.
+        //
+        // `journal_mode = WAL` + `busy_timeout` — the app runs **more than one connection to this
+        // file**: the IPC commands hold one, and the engine's workers (refresh, backfill, the
+        // background scheduler) each open their own via `open_store`. Under the default rollback
+        // journal a reader and a writer collide, and with `busy_timeout = 0` the loser fails
+        // *immediately* with SQLITE_BUSY rather than waiting its turn. WAL lets readers proceed while
+        // one writer works; the timeout makes a second writer queue instead of erroring. Without both,
+        // a background sync landing while the user scrolls is a coin-flip failure.
+        //
+        // WAL is persisted in the database file, so this is a no-op on later opens. It is skipped for
+        // `:memory:` (which has no WAL) — `execute_batch` would just report the mode back, but being
+        // explicit keeps the in-memory test path identical to production apart from the journal.
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA journal_mode = WAL;
+             PRAGMA busy_timeout = 5000;",
+        )?;
         let mut store = Self { conn };
         store.migrate()?;
         store.backfill_search_index()?;
@@ -1160,6 +1185,26 @@ impl Store {
     }
 
     /// Set a folder's IMAP UIDVALIDITY.
+    /// Whether this folder has ever completed a sync (NOTIF-1). Until it has, everything in it looks
+    /// "new", so nothing in it is worth announcing — see `sync::should_announce`.
+    pub fn folder_primed(&self, folder_id: i64) -> Result<bool, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT primed FROM folder WHERE id = ?1",
+            [folder_id],
+            |r| r.get::<_, i64>(0),
+        )? != 0)
+    }
+
+    /// Record that a folder has completed a sync — or, with `false`, that it must be primed again
+    /// (the server reset UIDVALIDITY, so every message looks new once more).
+    pub fn set_folder_primed(&self, folder_id: i64, primed: bool) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE folder SET primed = ?2 WHERE id = ?1",
+            (folder_id, i64::from(primed)),
+        )?;
+        Ok(())
+    }
+
     pub fn set_folder_uidvalidity(
         &self,
         folder_id: i64,
@@ -2782,6 +2827,115 @@ mod tests {
         };
         s.update_smtp_settings(acc, &implicit).unwrap();
         assert_eq!(s.smtp_settings(acc).unwrap(), Some(implicit));
+    }
+
+    #[test]
+    fn folder_priming_is_a_recorded_fact_defaulting_to_not_primed() {
+        // "Primed" = this folder has completed a sync at least once. Until then, everything in it
+        // looks new and must NOT be announced (a new account would notify about its whole inbox).
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@x.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let other = s.upsert_folder(acc, "Work").unwrap();
+
+        // A folder we've never synced starts unprimed — the default matters, it's the safe one.
+        assert!(!s.folder_primed(inbox).unwrap());
+
+        s.set_folder_primed(inbox, true).unwrap();
+        assert!(s.folder_primed(inbox).unwrap());
+        assert!(!s.folder_primed(other).unwrap(), "priming is per folder");
+
+        // A UIDVALIDITY reset un-primes it: every message looks new again, so we must go quiet again.
+        s.set_folder_primed(inbox, false).unwrap();
+        assert!(!s.folder_primed(inbox).unwrap());
+
+        // Re-upserting the folder (every sync does) must not silently reset the flag.
+        s.set_folder_primed(inbox, true).unwrap();
+        assert_eq!(s.upsert_folder(acc, "INBOX").unwrap(), inbox);
+        assert!(
+            s.folder_primed(inbox).unwrap(),
+            "upsert_folder must not un-prime"
+        );
+    }
+
+    #[test]
+    fn a_second_connection_can_write_while_the_first_reads() {
+        // The app really does run several connections to one file (IPC + the engine's workers, which
+        // open their own). Before WAL + busy_timeout this failed instantly with SQLITE_BUSY.
+        let path =
+            std::env::temp_dir().join(format!("geleit-concurrent-{}.db", std::process::id()));
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+        {
+            let a = Store::open(path).unwrap();
+            let acc = a.add_account("a@x.com", None).unwrap();
+            let inbox = a.upsert_folder(acc, "INBOX").unwrap();
+
+            // Both pragmas are on. WAL is a property of the *file*, so a second connection inherits
+            // it; busy_timeout is per-connection, so every connection must set it — assert on both.
+            // (Under WAL a reader never blocks a writer, so the scenario below can't exercise the
+            // timeout; without this assert, dropping `busy_timeout` would go unnoticed. The timeout
+            // is what saves writer-vs-writer, which two syncing accounts will do routinely.)
+            let mode: String = a
+                .conn
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(mode.to_lowercase(), "wal", "journal mode");
+            let timeout: i64 = a
+                .conn
+                .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(timeout, 5000, "busy_timeout (connection A)");
+
+            // Seed a row so the cursor below has something to stop on: an exhausted statement
+            // finalizes and drops its read lock, which would make this test prove nothing.
+            a.upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            // Hold a read transaction OPEN on connection A — a live statement parked mid-iteration,
+            // so the shared lock is genuinely held while we write from elsewhere.
+            let mut stmt = a.conn.prepare("SELECT id FROM message").unwrap();
+            let mut rows = stmt.query([]).unwrap();
+            assert!(
+                rows.next().unwrap().is_some(),
+                "cursor must be parked on a row"
+            );
+
+            // …while connection B writes. Under the old rollback journal this was SQLITE_BUSY.
+            let b = Store::open(path).unwrap();
+            let mode_b: String = b
+                .conn
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(mode_b.to_lowercase(), "wal", "the file's mode, seen from B");
+            let timeout_b: i64 = b
+                .conn
+                .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(timeout_b, 5000, "busy_timeout (connection B)");
+            b.upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(2),
+                    subject: Some("while you were reading".into()),
+                    ..Default::default()
+                },
+            )
+            .expect("a concurrent write must not fail with SQLITE_BUSY");
+            assert_eq!(b.messages_in_folder(inbox, 10).unwrap().len(), 2);
+        }
+        // WAL leaves `-wal` / `-shm` sidecars next to the database — clean them up too.
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{path}{suffix}"));
+        }
     }
 
     #[test]
