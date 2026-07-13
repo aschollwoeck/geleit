@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.1.2 — feature parity restored, and then some — 2026-07-13
+
+The v0.1.1 rebuild got the rendering and the design right, but it had quietly left several v0.1.0
+features behind. They are all back — and the three that had shipped half-finished are now finished.
+Everything below is local-first and private by default, as ever: no telemetry, no HTTP client, and
+your mail encrypted on disk.
+
+### Reading
+- **Attachments** are listed on an open message (name + size), and you can **save one to disk** — it's
+  fetched from your provider on demand, since attachment bytes aren't kept locally.
+- **Save a message as `.eml`**, and **open a `.eml` file** from disk to read it (it lands in a local
+  *Saved* folder). Handy for keeping — or sending someone — a copy of a message.
+
+### Organizing
+- **Star** a message to find it again; starred rows show a ★.
+- **Empty Trash** and **Delete forever** — both irreversible, so both ask first.
+- **Folders you make yourself:** create, rename, and delete them. Renaming keeps the messages;
+  deleting a folder deletes the mail in it (after a confirmation). Your standard folders are left
+  alone.
+- **Act on several messages at once:** hover a row for a checkbox, **Shift-click** to take a whole
+  run, then Archive, Delete, or Mark read / unread the lot — with a single **Undo**.
+- **Esc** closes the search box.
+
+### Writing
+- **Drafts**: save a half-written message and pick it up later — **attachments included**. Sending or
+  discarding a draft clears it.
+- **Markdown**: turn it on in the compose footer to send *bold*, lists, links and tables. A plain-text
+  version always goes along, so nobody gets a wall of markup.
+- **Address suggestions** as you type a recipient, drawn from people you've had mail from.
+
+### Privacy
+- **Drafts stay on this device by default**, encrypted like the rest of your mail — nothing you
+  haven't sent is uploaded. If you *want* them on your phone or webmail, the new
+  **Settings → Privacy → "Sync drafts to your provider"** keeps them in your provider's Drafts folder
+  too. It's **off** unless you turn it on, and turning it back off takes those copies off the server
+  again.
+
 ## v0.1.1 — Tauri + Leptos rebuild & the "Soft daylight" design — 2026-07-12
 
 The reading pane *is* the product, and no Rust-native path rendered real mail correctly — so the UI
