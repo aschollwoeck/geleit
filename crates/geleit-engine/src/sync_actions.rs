@@ -613,7 +613,7 @@ mod tests {
     #[test]
     #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
     fn live_setup_creates_and_syncs_an_account() {
-        let path = std::env::temp_dir().join("geleit-s96-setup-test.db");
+        let path = std::env::temp_dir().join(format!("geleit-s96-setup-{}.db", std::process::id()));
         let path = path.to_str().unwrap();
         let _ = std::fs::remove_file(path);
 
@@ -657,7 +657,8 @@ mod tests {
     #[test]
     #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
     fn live_refresh_then_backfill_streams_progress() {
-        let path = std::env::temp_dir().join("geleit-s94-refresh-test.db");
+        let path =
+            std::env::temp_dir().join(format!("geleit-s94-refresh-{}.db", std::process::id()));
         let path = path.to_str().unwrap();
         let _ = std::fs::remove_file(path);
 

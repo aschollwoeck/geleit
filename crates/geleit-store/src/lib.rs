@@ -2786,7 +2786,8 @@ mod tests {
 
     #[test]
     fn encryption_roundtrips_and_rejects_wrong_key_and_plaintext() {
-        let path = std::env::temp_dir().join("geleit-encryption-test.db");
+        let path =
+            std::env::temp_dir().join(format!("geleit-encryption-{}.db", std::process::id()));
         let path = path.to_str().unwrap();
         let _ = std::fs::remove_file(path);
         let key = [7u8; 32];
