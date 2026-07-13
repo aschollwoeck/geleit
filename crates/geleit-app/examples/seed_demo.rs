@@ -120,31 +120,47 @@ fn main() {
         false,
     )
     .unwrap();
-    // A couple of saved drafts so the Drafts overlay has content to show.
-    use geleit_store::DraftContent;
-    for (to, subject, body) in [
-        (
-            "alice@example.com",
-            "Re: Lunch on Thursday?",
-            "Thursday at noon works for me — see you then!",
-        ),
+    // A couple of saved drafts so the Drafts overlay has content to show. The first carries a saved
+    // attachment (bytes) so resuming it exercises the attachments-in-drafts round-trip.
+    use geleit_store::{DraftAttachment, DraftContent};
+    for (to, subject, body, attach) in [
         (
             "team@work.example",
             "Sprint notes",
             "Quick recap of what we shipped this sprint…",
+            false,
+        ),
+        // Saved last → newest → what GELEIT_RESUME reopens; carries the attachment.
+        (
+            "alice@example.com",
+            "Re: Lunch on Thursday?",
+            "Thursday at noon works for me — see you then!",
+            true,
         ),
     ] {
-        s.save_draft(
-            acc,
-            None,
-            &DraftContent {
-                to: to.to_owned(),
-                subject: subject.to_owned(),
-                body: body.to_owned(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let did = s
+            .save_draft(
+                acc,
+                None,
+                &DraftContent {
+                    to: to.to_owned(),
+                    subject: subject.to_owned(),
+                    body: body.to_owned(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        if attach {
+            s.replace_draft_attachments(
+                did,
+                &[DraftAttachment {
+                    filename: Some("agenda.pdf".to_owned()),
+                    content_type: "application/pdf".to_owned(),
+                    data: b"%PDF-1.4 demo agenda".to_vec(),
+                }],
+            )
+            .unwrap();
+        }
     }
     s.set_setting("theme", if dark { "dark" } else { "light" })
         .unwrap();

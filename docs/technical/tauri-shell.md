@@ -207,8 +207,11 @@ callback threading). Notable models:
   makes `rows` return empty and swaps the list pane to a `list_drafts` view; clicking a row runs
   `load_draft` back into the composer with `current_draft_id` set, so edits update the same row.
   `send_message` now carries `draft_id`, so `run_send` deletes the draft after a successful send.
-  Server-backed drafts and draft attachments (the composer holds file *paths*, the table stores
-  *bytes*) are deliberately out of scope.
+  **Attachments** ride along: `save_draft` reads the composer's attachment *paths* into bytes and
+  `replace_draft_attachments`; `load_draft` returns a `ResumedDraft` whose bytes are materialised back
+  to per-draft temp files (`materialize_draft_attachments`, unit-tested, sanitised names in numbered
+  sub-dirs so the chip basename stays clean) so send / re-save use the normal path-based flow. Only
+  **server-backed drafts** (IMAP `APPEND` to the Drafts folder) remain out of scope.
 - **Save/open .eml** (READ-10) — re-wires the surviving engine core, no network. **Save** (reading-pane
   action) → `save_eml(id)`: `export_eml` rebuilds RFC 822 bytes from the stored header + body (faithful
   bodies; MIME reconstructed from parts, not byte-identical), a native save dialog (`pick_save_path`,
@@ -282,6 +285,7 @@ isn't registered at all and the env var is never read:
 | `GELEIT_COMPOSE=new\|reply\|reply_all\|forward` | the composer (`reply`/`reply_all`/`forward` also need `GELEIT_OPEN`) |
 | `GELEIT_TO=<text>` | with `GELEIT_COMPOSE=new`, pre-fills the To input (surfaces the autocomplete dropdown) |
 | `GELEIT_DRAFTS=1` | the saved-Drafts list |
+| `GELEIT_RESUME=1` | resumes the newest draft (composer with its content + attachments) |
 | `GELEIT_SELECT=<id,id,…>` | pre-selects those message rows (surfaces the bulk-action bar) |
 | `GELEIT_FOLDER=new\|menu` | the New-folder dialog, or the first user folder's ⋯ (Rename/Delete) menu |
 | `GELEIT_UNIFIED=1` | the merged "All inboxes" view |

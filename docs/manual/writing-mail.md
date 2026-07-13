@@ -43,13 +43,14 @@ clear message rather than failing mid-send.)
 ## Saving a draft
 
 Not ready to send? Choose **Save draft** in the compose footer. GeleitMail stores the message —
-recipients, subject, and body — on your device and closes the window. Open **Drafts** in the folder
-list to see everything you've saved, newest first; choose one to pick up exactly where you left off.
-Continuing to edit updates the same draft, and **sending it removes it from Drafts** automatically.
-To throw a saved draft away, hover its row and choose the trash icon.
+recipients, subject, body, **and any attachments** — on your device and closes the window. Open
+**Drafts** in the folder list to see everything you've saved, newest first; choose one to pick up
+exactly where you left off, attachments and all. Continuing to edit updates the same draft, and
+**sending it removes it from Drafts** automatically. To throw a saved draft away, hover its row and
+choose the trash icon.
 
 Drafts live only on this device (encrypted, like the rest of your mail) — they aren't uploaded to your
-provider. Attachments aren't part of a saved draft yet, so re-attach any files when you resume.
+provider.
 
 ## Markdown formatting
 

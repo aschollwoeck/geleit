@@ -25,7 +25,7 @@ use crate::dto::{
     compose_from_draft, display_sender, display_subject, draft_content_from, draft_summary,
     folder_rank, human_size, is_protected_folder, safe_attachment_filename, safe_filename_stem,
     validate_folder_name, AccountDto, AttachmentDto, ComposeDraft, DraftSummary, FolderDto,
-    MessageBodyDto, MessageDto,
+    MessageBodyDto, MessageDto, ResumedDraft,
 };
 
 /// What the shell needs to reach the encrypted store. Cheap to clone into a blocking task.
@@ -840,13 +840,34 @@ pub async fn save_draft(
     account_id: i64,
     draft_id: Option<i64>,
     draft: ComposeDraft,
+    attachments: Vec<String>,
 ) -> Result<i64, String> {
     with_store(state.inner().clone(), move |store| {
-        store
+        // Read the attachment files (blocking) on this worker thread; their bytes are stored with the
+        // draft so a resumed draft keeps its files. Size-capped like the send path.
+        let atts = read_draft_attachments(&attachments)?;
+        let id = store
             .save_draft(account_id, draft_id, &draft_content_from(&draft))
-            .map_err(|_| "Couldn't save the draft.".to_owned())
+            .map_err(|_| "Couldn't save the draft.".to_owned())?;
+        store
+            .replace_draft_attachments(id, &atts)
+            .map_err(|_| "Couldn't save the draft's attachments.".to_owned())?;
+        Ok(id)
     })
     .await
+}
+
+/// Read attachment files into draft-attachment rows (bytes + name/type). Reuses the send-path reader
+/// and its 25 MB cap, then maps to the store's draft type.
+fn read_draft_attachments(paths: &[String]) -> Result<Vec<geleit_store::DraftAttachment>, String> {
+    Ok(read_attachments(paths)?
+        .into_iter()
+        .map(|a| geleit_store::DraftAttachment {
+            filename: Some(a.filename),
+            content_type: a.content_type,
+            data: a.data,
+        })
+        .collect())
 }
 
 /// Every saved draft for an account, newest first, as list summaries.
@@ -864,19 +885,59 @@ pub async fn list_drafts(
     .await
 }
 
-/// Load a draft's full content back into a compose form, to resume editing. `None` if it's gone.
+/// Load a draft's full content back into a compose form, to resume editing. `None` if it's gone. Its
+/// saved attachments are materialised to temp files and their paths returned, so the composer can
+/// send / re-save them through the normal path-based flow. Best-effort on attachments (a file that
+/// can't be written is skipped rather than failing the resume).
 #[tauri::command]
 pub async fn load_draft(
     state: tauri::State<'_, AppState>,
     id: i64,
-) -> Result<Option<ComposeDraft>, String> {
+) -> Result<Option<ResumedDraft>, String> {
     with_store(state.inner().clone(), move |store| {
-        store
+        let Some(row) = store
             .draft_by_id(id)
-            .map(|row| row.map(|r| compose_from_draft(r.content)))
-            .map_err(|_| "Couldn't open the draft.".to_owned())
+            .map_err(|_| "Couldn't open the draft.".to_owned())?
+        else {
+            return Ok(None);
+        };
+        let saved = store.draft_attachments(id).unwrap_or_default();
+        let attachments = materialize_draft_attachments(id, &saved);
+        Ok(Some(ResumedDraft {
+            draft: compose_from_draft(row.content),
+            attachments,
+        }))
     })
     .await
+}
+
+/// Write a draft's saved attachments to a per-draft temp dir so the composer can send / re-save them
+/// through the normal path-based flow; returns the paths written. Best-effort — a file that can't be
+/// written is skipped. Each attachment gets its own numbered sub-dir so same-named files stay distinct
+/// while the **basename stays clean** (what the composer chip shows); the name is sanitised so a
+/// hostile stored filename can't escape the temp dir.
+fn materialize_draft_attachments(
+    draft_id: i64,
+    atts: &[geleit_store::DraftAttachment],
+) -> Vec<String> {
+    let base = std::env::temp_dir().join(format!("geleit-draft-{draft_id}"));
+    let mut paths = Vec::new();
+    for (i, a) in atts.iter().enumerate() {
+        let name = a
+            .filename
+            .as_deref()
+            .map(safe_attachment_filename)
+            .unwrap_or_else(|| format!("attachment-{}", i + 1));
+        let dir = base.join(i.to_string());
+        if std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        let path = dir.join(&name);
+        if std::fs::write(&path, &a.data).is_ok() {
+            paths.push(path.to_string_lossy().into_owned());
+        }
+    }
+    paths
 }
 
 /// Delete a saved draft (idempotent). Used by the draft-list delete affordance.
@@ -1350,6 +1411,14 @@ pub async fn dev_drafts() -> bool {
     std::env::var("GELEIT_DRAFTS").is_ok_and(|v| v == "1")
 }
 
+/// Dev/test seam, debug builds only: `GELEIT_RESUME=1` resumes the newest draft on boot (opens the
+/// composer with its content + materialised attachments). Never in release.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_resume() -> bool {
+    std::env::var("GELEIT_RESUME").is_ok_and(|v| v == "1")
+}
+
 /// Dev/test seam, debug builds only: `GELEIT_SELECT=<id,id,…>` pre-selects those message rows on boot
 /// so the multi-select bulk bar can be screenshotted. Never in release.
 #[cfg(debug_assertions)]
@@ -1368,7 +1437,45 @@ pub async fn dev_folder() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::read_attachments;
+    use super::{materialize_draft_attachments, read_attachments};
+    use geleit_store::DraftAttachment;
+
+    #[test]
+    fn materialize_draft_attachments_writes_files_and_returns_paths() {
+        let atts = vec![
+            DraftAttachment {
+                filename: Some("notes.txt".to_owned()),
+                content_type: "text/plain".to_owned(),
+                data: b"hello".to_vec(),
+            },
+            // A hostile / missing name: must be sanitised, never escape the temp dir.
+            DraftAttachment {
+                filename: Some("../../escape.txt".to_owned()),
+                content_type: "text/plain".to_owned(),
+                data: b"world".to_vec(),
+            },
+            DraftAttachment {
+                filename: None,
+                content_type: "application/octet-stream".to_owned(),
+                data: b"anon".to_vec(),
+            },
+        ];
+        // Use a process-unique draft id so parallel test runs don't collide.
+        let draft_id = 900_000 + (std::process::id() as i64 % 1000);
+        let paths = materialize_draft_attachments(draft_id, &atts);
+        assert_eq!(paths.len(), 3);
+        // Bytes round-trip, and every path stays inside the per-draft temp dir (no traversal).
+        let dir = std::env::temp_dir().join(format!("geleit-draft-{draft_id}"));
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"hello");
+        assert_eq!(std::fs::read(&paths[1]).unwrap(), b"world");
+        assert_eq!(std::fs::read(&paths[2]).unwrap(), b"anon");
+        for p in &paths {
+            assert!(std::path::Path::new(p).starts_with(&dir), "escaped: {p}");
+        }
+        // No attachments → no paths (and no dir work).
+        assert!(materialize_draft_attachments(draft_id, &[]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn read_attachments_reads_name_type_and_bytes() {

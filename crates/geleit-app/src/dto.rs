@@ -181,6 +181,14 @@ pub struct ComposeDraft {
     pub references: Vec<String>,
 }
 
+/// A resumed draft: the compose form plus the on-disk paths its saved attachments were materialised
+/// to (so send / re-save read them through the normal path-based flow, like freshly-picked files).
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct ResumedDraft {
+    pub draft: ComposeDraft,
+    pub attachments: Vec<String>,
+}
+
 /// A row in the Drafts list: enough to recognise a saved draft without loading its whole body.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DraftSummary {

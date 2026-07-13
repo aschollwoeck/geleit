@@ -144,6 +144,7 @@ fn main() {
         ipc::dev_trash,
         ipc::dev_compose_to,
         ipc::dev_drafts,
+        ipc::dev_resume,
         ipc::dev_select,
         ipc::dev_folder,
     ]);

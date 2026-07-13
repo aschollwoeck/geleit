@@ -3,6 +3,7 @@
 //! document — it is confined to a sandboxed `mail://` iframe (ADR-0012).
 use crate::api::{
     self, Account, AccountForm, ComposeDraft, DraftSummary, Folder, Message, MessageBody,
+    ResumedDraft,
 };
 use crate::icons::{self, icon};
 use crate::view::{
@@ -1045,11 +1046,13 @@ pub fn App() -> impl IntoView {
             reset_recipient_inputs();
             return;
         }
+        // Capture the attachment paths BEFORE the reset clears them, so they're stored with the draft.
+        let atts = attach_paths.get_untracked();
         compose.set(None);
         reset_recipient_inputs();
         let showing_drafts = drafts_open.get_untracked();
         leptos::task::spawn_local(async move {
-            match api::save_draft(aid, existing, d).await {
+            match api::save_draft(aid, existing, d, atts).await {
                 Ok(_) => {
                     toast.set(Some("Draft saved".into()));
                     // Keep the drafts list current if it's the pane on screen.
@@ -1068,9 +1071,10 @@ pub fn App() -> impl IntoView {
     let resume_draft = move |id: i64| {
         leptos::task::spawn_local(async move {
             match api::load_draft(id).await {
-                Ok(Some(d)) => {
-                    reset_recipient_inputs();
-                    compose.set(Some(d));
+                Ok(Some(ResumedDraft { draft, attachments })) => {
+                    reset_recipient_inputs(); // clears attach_paths + current_draft_id first
+                    compose.set(Some(draft));
+                    attach_paths.set(attachments);
                     current_draft_id.set(Some(id));
                 }
                 Ok(None) => {
@@ -1362,6 +1366,15 @@ pub fn App() -> impl IntoView {
             }
             if api::dev_drafts().await.unwrap_or(false) {
                 open_drafts();
+            }
+            if api::dev_resume().await.unwrap_or(false) {
+                if let Some(aid) = account.get_untracked() {
+                    if let Ok(list) = api::list_drafts(aid).await {
+                        if let Some(first) = list.first() {
+                            resume_draft(first.id);
+                        }
+                    }
+                }
             }
             if let Ok(Some(ids)) = api::dev_select().await {
                 let set: HashSet<i64> = ids
