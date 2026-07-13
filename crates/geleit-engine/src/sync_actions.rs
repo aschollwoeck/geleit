@@ -341,13 +341,21 @@ pub fn run_send(
             .map(|f| f.name)
             .find(|n| n.eq_ignore_ascii_case("sent") || n.to_ascii_lowercase().contains("sent"))
     });
+    // If this draft has a copy on the server (opt-in "sync drafts"), remove it once the mail is away.
+    let server_draft = draft_id.and_then(|id| {
+        let folder = store.draft_by_id(id).ok().flatten()?.server_folder?;
+        Some((folder, message::draft_message_id(account.id, id)))
+    });
     let imap_config = to_config(&imap);
     runtime()?.block_on(async {
         smtp::send(&settings, &password, &envelope, &bytes).await?;
-        // Best-effort: the message is already sent; failing to save a Sent copy must not report
-        // failure (it would mislead the person into resending).
+        // Best-effort from here: the message is already sent; a failed Sent-save or draft cleanup
+        // must not report failure (it would mislead the person into resending).
         if let Some(folder) = sent_folder {
-            let _ = imap::append_message(&imap_config, secrets, &folder, &bytes).await;
+            let _ = imap::append_message(&imap_config, secrets, &folder, "(\\Seen)", &bytes).await;
+        }
+        if let Some((folder, mid)) = server_draft {
+            let _ = imap::expunge_draft(&imap_config, secrets, &folder, &mid).await;
         }
         Ok::<(), String>(())
     })?;
@@ -356,6 +364,40 @@ pub fn run_send(
         let _ = store.delete_draft(id);
     }
     Ok(())
+}
+
+/// Save a draft's copy to the server's Drafts folder (SEND-5, opt-in): replaces whatever copy of this
+/// draft is there (matched by its stable Message-ID) with fresh `\Draft` bytes, in one session.
+/// Blocking + network: **worker.**
+pub fn run_sync_draft(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    folder: &str,
+    message_id: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let config = account_imap(db_path, secrets, account_id)?;
+    runtime()?
+        .block_on(imap::sync_draft(
+            &config, secrets, folder, message_id, bytes,
+        ))
+        .map_err(|_| "Couldn't save the draft to the server.".to_owned())
+}
+
+/// Remove a draft's copy from the server (SEND-5, opt-in) — on send, discard, or when the setting is
+/// switched off. Idempotent. Blocking + network: **worker.**
+pub fn run_expunge_server_draft(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    folder: &str,
+    message_id: &str,
+) -> Result<(), String> {
+    let config = account_imap(db_path, secrets, account_id)?;
+    runtime()?
+        .block_on(imap::expunge_draft(&config, secrets, folder, message_id))
+        .map_err(|_| "Couldn't remove the draft from the server.".to_owned())
 }
 
 /// Validate raw Add-account form fields into `(email, ImapSettings)`. Pure — unit-tested. (Email

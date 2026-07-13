@@ -52,6 +52,13 @@ choose the trash icon.
 Drafts live only on this device (encrypted, like the rest of your mail) — they aren't uploaded to your
 provider.
 
+If you'd rather see your drafts in other mail apps too, turn on **Sync drafts to your provider** in
+**Settings → Privacy**. It's **off by default**: with it on, each draft you save is also kept in your
+provider's **Drafts** folder, so your phone or webmail can see it. Editing a saved draft updates the
+copy there, and sending or deleting it removes the copy. Turn the setting back **off** and GeleitMail
+takes those copies off your provider again, leaving your drafts here. (If your account has no Drafts
+folder, GeleitMail simply keeps the draft on this device.)
+
 ## Markdown formatting
 
 Turn on **Markdown** in the compose footer to write with light formatting — `**bold**`, `*italic*`,

@@ -512,6 +512,12 @@ pub async fn load_draft(id: i64) -> Result<Option<ResumedDraft>, String> {
     call("load_draft", &IdArgs { id }).await
 }
 
+/// Take every server copy of this account's drafts back off the server — when "sync drafts" is
+/// switched off. Local drafts are untouched.
+pub async fn purge_server_drafts(account_id: i64) -> Result<(), String> {
+    call("purge_server_drafts", &AccountArgs { account_id }).await
+}
+
 /// Delete a saved draft (idempotent).
 pub async fn delete_draft(id: i64) -> Result<(), String> {
     call("delete_draft", &IdArgs { id }).await
@@ -639,8 +645,8 @@ pub async fn dev_unified() -> Result<bool, String> {
     call("dev_unified", &NoArgs {}).await
 }
 
-/// Dev/test seam — see `geleit-app::ipc::dev_settings`. Always `false` in a release build.
-pub async fn dev_settings() -> Result<bool, String> {
+/// Dev/test seam — see `geleit-app::ipc::dev_settings`. Always `None` in a release build.
+pub async fn dev_settings() -> Result<Option<String>, String> {
     call("dev_settings", &NoArgs {}).await
 }
 
