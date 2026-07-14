@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use crate::sync::Arrived;
+use async_imap::types::NameAttribute;
 use futures::StreamExt;
+use geleit_core::FolderRole;
 use geleit_platform::secret::{SecretError, SecretStore};
 use geleit_store::{NewMessage, Store, StoreError};
 use rustls::pki_types::ServerName;
@@ -105,17 +107,57 @@ async fn connect(config: &ImapConfig, secrets: &dyn SecretStore) -> Result<ImapS
         .map_err(|(err, _client)| ImapError::from(err))
 }
 
-/// Connect, list folders, and log out. Returns the folder names.
+/// A folder as the server presents it: its name, and what the server says it is **for**.
+pub type FolderListing = (String, Option<FolderRole>);
+
+/// What role the server declared for a folder, from its LIST attributes (RFC 6154 SPECIAL-USE). Pure.
+///
+/// This is the whole point of the feature: the *name* of a folder is in the user's language, but
+/// `\Drafts` is not.
+///
+/// A mailbox may carry **several** special uses (RFC 6154 §2; Dovecot's `special_use` takes a list), so
+/// the choice goes through [`geleit_core::pick_role`], which applies a fixed priority — otherwise
+/// `(\Sent \Archive)` and `(\Archive \Sent)` would name different folders for "where sent mail goes",
+/// depending on nothing but the order the server felt like sending.
+///
+/// `\All` (Gmail's "All Mail") is deliberately **not** an archive: archiving there is a no-op — every
+/// message is already in it — so treating it as one would make Archive silently do nothing.
+/// `\Flagged` is a saved search, not a folder we ever move mail into.
+#[must_use]
+pub fn special_use_role(attributes: &[NameAttribute<'_>]) -> Option<FolderRole> {
+    let roles: Vec<FolderRole> = attributes
+        .iter()
+        .filter_map(|a| match a {
+            NameAttribute::Drafts => Some(FolderRole::Drafts),
+            NameAttribute::Sent => Some(FolderRole::Sent),
+            NameAttribute::Trash => Some(FolderRole::Trash),
+            NameAttribute::Junk => Some(FolderRole::Junk),
+            NameAttribute::Archive => Some(FolderRole::Archive),
+            _ => None,
+        })
+        .collect();
+    geleit_core::pick_role(&roles)
+}
+
+/// Connect, list folders, and log out. Returns each folder's name and the role the server gave it.
 pub async fn list_folders(
     config: &ImapConfig,
     secrets: &dyn SecretStore,
-) -> Result<Vec<String>, ImapError> {
+) -> Result<Vec<FolderListing>, ImapError> {
     let mut session = connect(config, secrets).await?;
     let mut folders = Vec::new();
     {
         let mut names = session.list(Some(""), Some("*")).await?;
         while let Some(name) = names.next().await {
-            folders.push(name?.name().to_string());
+            let name = name?;
+            let role = special_use_role(name.attributes());
+            // IMAP reserves the name INBOX itself (RFC 3501), and servers rarely bother to flag it.
+            let role = role.or_else(|| {
+                name.name()
+                    .eq_ignore_ascii_case("inbox")
+                    .then_some(FolderRole::Inbox)
+            });
+            folders.push((name.name().to_string(), role));
         }
     }
     let _ = session.logout().await; // best-effort: we already have the folders
@@ -747,17 +789,22 @@ async fn fetch_bodies_for(
     Ok(())
 }
 
-/// Upsert the given folder names into the store under `account_id` (idempotent). Pure — no network.
+/// Upsert the listed folders — names **and the roles the server gave them** — under `account_id`
+/// (idempotent). Pure — no network.
+///
+/// The role is rewritten every time, because the server owns it: mark a different folder as Drafts in
+/// webmail and the next listing must move the role with it.
 pub fn persist_folders(
     store: &Store,
     account_id: i64,
-    folders: &[String],
+    folders: &[FolderListing],
 ) -> Result<(), StoreError> {
-    for name in folders {
-        store.upsert_folder(account_id, name)?;
+    for (name, role) in folders {
+        store.upsert_folder_with_role(account_id, name, role.map(FolderRole::key))?;
     }
     // Reconcile: drop local folders the server no longer lists (rename/delete, ORG-6).
-    store.prune_folders(account_id, folders)?;
+    let names: Vec<String> = folders.iter().map(|(n, _)| n.clone()).collect();
+    store.prune_folders(account_id, &names)?;
     Ok(())
 }
 
@@ -928,15 +975,127 @@ mod tests {
     fn persist_folders_is_idempotent_and_scoped() {
         let store = Store::open_in_memory().unwrap();
         let acc = store.add_account("a@example.com", None).unwrap();
-        persist_folders(&store, acc, &["INBOX".to_owned(), "Sent".to_owned()]).unwrap();
+        let listing = |names: &[(&str, Option<FolderRole>)]| -> Vec<super::FolderListing> {
+            names.iter().map(|(n, r)| ((*n).to_owned(), *r)).collect()
+        };
+        persist_folders(
+            &store,
+            acc,
+            &listing(&[("INBOX", Some(FolderRole::Inbox)), ("Sent", None)]),
+        )
+        .unwrap();
         // re-sync with an extra folder: existing ones are no-ops, new one is added
         persist_folders(
             &store,
             acc,
-            &["INBOX".to_owned(), "Sent".to_owned(), "Archive".to_owned()],
+            &listing(&[
+                ("INBOX", Some(FolderRole::Inbox)),
+                ("Sent", None),
+                ("Archive", None),
+            ]),
         )
         .unwrap();
         assert_eq!(store.folders_for_account(acc).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_folders_role_is_the_servers_to_change() {
+        // The server owns the role: mark a different folder as Drafts in webmail, and the next listing
+        // must move the role with it — including *off* the folder that used to hold it. (An account
+        // synced before this feature existed has no roles at all until its next listing, which is why
+        // the name fallback stays.)
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("a@example.com", None).unwrap();
+        let role_of = |name: &str| {
+            store
+                .folders_for_account(acc)
+                .unwrap()
+                .into_iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .role
+        };
+
+        persist_folders(
+            &store,
+            acc,
+            &[
+                ("Entwürfe".to_owned(), Some(FolderRole::Drafts)),
+                ("Alte Entwürfe".to_owned(), None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(role_of("Entwürfe").as_deref(), Some("drafts"));
+        assert_eq!(role_of("Alte Entwürfe"), None);
+
+        persist_folders(
+            &store,
+            acc,
+            &[
+                ("Entwürfe".to_owned(), None),
+                ("Alte Entwürfe".to_owned(), Some(FolderRole::Drafts)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            role_of("Entwürfe"),
+            None,
+            "the role moved away with the flag"
+        );
+        assert_eq!(role_of("Alte Entwürfe").as_deref(), Some("drafts"));
+    }
+
+    #[test]
+    fn syncing_a_folders_mail_never_blanks_the_role_the_listing_gave_it() {
+        // `upsert_folder` is what every *message* sync calls — it knows a name and nothing else. If it
+        // wrote a NULL role, the first sync after a listing would wipe the roles and the app would fall
+        // back to English names again, silently.
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("a@example.com", None).unwrap();
+        persist_folders(
+            &store,
+            acc,
+            &[("Papierkorb".to_owned(), Some(FolderRole::Trash))],
+        )
+        .unwrap();
+        store.upsert_folder(acc, "Papierkorb").unwrap();
+        assert_eq!(
+            store.folders_for_account(acc).unwrap()[0].role.as_deref(),
+            Some("trash")
+        );
+    }
+
+    #[test]
+    fn the_special_use_attributes_are_read_off_the_listing() {
+        use async_imap::types::NameAttribute as A;
+        // What a real LIST line looks like: housekeeping attributes alongside the special use.
+        assert_eq!(
+            super::special_use_role(&[A::NoInferiors, A::Unmarked, A::Drafts]),
+            Some(FolderRole::Drafts)
+        );
+        assert_eq!(super::special_use_role(&[A::Sent]), Some(FolderRole::Sent));
+        assert_eq!(
+            super::special_use_role(&[A::Trash]),
+            Some(FolderRole::Trash)
+        );
+        assert_eq!(super::special_use_role(&[A::Junk]), Some(FolderRole::Junk));
+        assert_eq!(
+            super::special_use_role(&[A::Archive]),
+            Some(FolderRole::Archive)
+        );
+        // An ordinary folder has no role…
+        assert_eq!(super::special_use_role(&[A::NoSelect]), None);
+        assert_eq!(super::special_use_role(&[]), None);
+        // A folder with two special uses resolves the same way whichever order the server sent them —
+        // otherwise "where does sent mail go" would depend on nothing but the server's mood.
+        assert_eq!(
+            super::special_use_role(&[A::Sent, A::Archive]),
+            super::special_use_role(&[A::Archive, A::Sent])
+        );
+        // …and neither `\All` (Gmail's "All Mail": archiving into it is a no-op, since everything is
+        // already there) nor `\Flagged` (a saved search) is a folder we may move mail into.
+        assert_eq!(super::special_use_role(&[A::All]), None);
+        assert_eq!(super::special_use_role(&[A::Flagged]), None);
     }
 
     /// Live test against the local Dovecot (`geleittest`/`testpass123`). Needs the `dangerous-tls`
@@ -957,7 +1116,10 @@ mod tests {
             allow_invalid_certs: true,
         };
         let folders = list_folders(&cfg, &secrets).await.expect("connect + list");
-        assert!(folders.iter().any(|f| f == "INBOX"), "folders: {folders:?}");
+        assert!(
+            folders.iter().any(|(n, _)| n == "INBOX"),
+            "folders: {folders:?}"
+        );
     }
 
     /// Append a message to INBOX (proxy for Sent) and confirm it's accepted (SEND-8).
@@ -1159,7 +1321,7 @@ mod tests {
             .expect("create");
         let after_create = list_folders(&cfg, &secrets).await.expect("list");
         assert!(
-            after_create.iter().any(|f| f == "GeleitTmpA"),
+            after_create.iter().any(|(n, _)| n == "GeleitTmpA"),
             "created folder should list: {after_create:?}"
         );
 
@@ -1167,14 +1329,23 @@ mod tests {
             .await
             .expect("rename");
         let after_rename = list_folders(&cfg, &secrets).await.expect("list");
-        assert!(after_rename.iter().any(|f| f == "GeleitTmpB"), "renamed");
-        assert!(!after_rename.iter().any(|f| f == "GeleitTmpA"), "old gone");
+        assert!(
+            after_rename.iter().any(|(n, _)| n == "GeleitTmpB"),
+            "renamed"
+        );
+        assert!(
+            !after_rename.iter().any(|(n, _)| n == "GeleitTmpA"),
+            "old gone"
+        );
 
         delete_folder(&cfg, &secrets, "GeleitTmpB")
             .await
             .expect("delete");
         let after_delete = list_folders(&cfg, &secrets).await.expect("list");
-        assert!(!after_delete.iter().any(|f| f == "GeleitTmpB"), "deleted");
+        assert!(
+            !after_delete.iter().any(|(n, _)| n == "GeleitTmpB"),
+            "deleted"
+        );
     }
 
     /// Server-backed drafts (SEND-5, opt-in): append a `\Draft` message to a Drafts folder, find its
@@ -1281,6 +1452,61 @@ mod tests {
         }
         let _ = session.logout().await;
         out
+    }
+
+    /// The server tells us what its folders are *for* — and we keep it (RFC 6154 SPECIAL-USE).
+    ///
+    /// The pure tests build the `NameAttribute`s themselves, so they cannot see whether a real server
+    /// sends them or whether `async-imap` surfaces them. This does: Dovecot flags its Drafts folder
+    /// `\Drafts`, and after a folder sync the store must say so — that flag is what makes the app work
+    /// on a provider whose folders are named in a language we don't read.
+    /// Needs Dovecot + `--features dangerous-tls`.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn the_server_tells_us_which_folder_is_the_drafts_folder() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let _ = create_folder(&cfg, &secrets, "Drafts").await; // Dovecot flags this one \Drafts
+
+        let listing = list_folders(&cfg, &secrets).await.expect("list");
+        let drafts = listing
+            .iter()
+            .find(|(name, _)| name.as_str() == "Drafts")
+            .expect("a Drafts folder");
+        assert_eq!(
+            drafts.1,
+            Some(FolderRole::Drafts),
+            "the server sends \\Drafts on LIST; if this fails, the whole feature is inert"
+        );
+        // INBOX is the one folder IMAP names itself, and servers rarely flag it.
+        let inbox = listing
+            .iter()
+            .find(|(n, _)| n.as_str() == "INBOX")
+            .expect("INBOX");
+        assert_eq!(inbox.1, Some(FolderRole::Inbox));
+
+        // …and the role survives into the store, which is where every caller reads it from.
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("geleittest@localhost", None).unwrap();
+        sync_folders(&cfg, &secrets, &store, acc)
+            .await
+            .expect("sync");
+        let stored = store
+            .folders_for_account(acc)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.name == "Drafts")
+            .expect("Drafts in the store");
+        assert_eq!(stored.role.as_deref(), Some("drafts"));
     }
 
     /// The hinge of the merged Drafts list: a draft we upload must come back through a **real sync**

@@ -133,20 +133,54 @@ pub fn rank_suggestions(candidates: &[String], already: &[String], limit: usize)
         .collect()
 }
 
+/// Is this folder the account's Trash — by the server's own `\Trash` flag, else by name?
+#[must_use]
+pub fn is_trash_folder(name: &str, role: Option<&str>) -> bool {
+    // Whether the open folder is the Trash decides two things the user cannot recover from getting
+    // wrong: whether **Delete** means "delete forever", and whether **Empty Trash** is offered at all.
+    // It used to be a substring match on the English name, so in a `Papierkorb` neither appeared —
+    // Delete tried to move the mail to the Trash it was already in, and told the user their account had
+    // no Trash folder.
+    if let Some(role) = role {
+        return role == "trash";
+    }
+    matches!(
+        name.trim().to_lowercase().as_str(),
+        "trash" | "deleted" | "deleted items" | "bin"
+    )
+}
+
 /// Whether a folder is a well-known special folder that can't be renamed or deleted (ORG-6) — used to
 /// hide the Rename/Delete affordances. Mirror of `geleit-app::dto::is_protected_folder` (the two
 /// crates can't share code); the IPC command re-checks the authoritative copy.
 #[must_use]
-pub fn is_protected_folder(name: &str) -> bool {
+pub fn is_protected_folder(name: &str, role: Option<&str>) -> bool {
+    // A folder the server marked with a role is a special folder in any language. The names below are
+    // the fallback for servers that don't advertise SPECIAL-USE, plus GeleitMail's own local `Saved`.
+    if role.is_some_and(|r| {
+        matches!(
+            r,
+            "inbox" | "drafts" | "sent" | "archive" | "junk" | "trash"
+        )
+    }) {
+        return true;
+    }
+    // These names must match the ones `geleit_core::FolderRole::matches_name` accepts (the frontend
+    // can't depend on our crates — constitution P4 — so this is a deliberate, tested mirror). This list
+    // decides what the rail *offers*; that one decides what the app *uses*. If they drift, the app ends
+    // up filing mail into a folder the rail lets the user delete.
     matches!(
         name.trim().to_lowercase().as_str(),
         "inbox"
+            | "drafts"
             | "sent"
             | "sent items"
             | "sent mail"
-            | "drafts"
-            | "draft"
+            | "sent messages"
+            | "sentitems"
+            | "sentmail"
             | "archive"
+            | "archives"
             | "trash"
             | "deleted"
             | "deleted items"
@@ -226,12 +260,34 @@ mod tests {
     }
 
     #[test]
+    fn the_bin_is_the_bin_whatever_your_provider_calls_it() {
+        // What this decides: whether Delete means "delete forever", and whether Empty Trash is offered.
+        // By name (a server that says nothing)…
+        assert!(is_trash_folder("Trash", None));
+        assert!(is_trash_folder("Deleted Items", None));
+        assert!(is_trash_folder("bin", None));
+        assert!(!is_trash_folder("Archive", None));
+        // …and by the server's own flag, which is the only thing that can read `Papierkorb`.
+        assert!(is_trash_folder("Papierkorb", Some("trash")));
+        assert!(!is_trash_folder("Papierkorb", Some("archive")));
+        // The server's word wins outright: a folder *called* Trash that the server flagged as the
+        // archive is not the bin, and offering "delete forever" in it would be a lie.
+        assert!(!is_trash_folder("Trash", Some("archive")));
+    }
+
+    #[test]
     fn is_protected_folder_guards_special_but_not_user_folders() {
-        assert!(is_protected_folder("Inbox"));
-        assert!(is_protected_folder("trash"));
-        assert!(is_protected_folder(" Saved "));
-        assert!(!is_protected_folder("Work"));
-        assert!(!is_protected_folder("Receipts"));
+        assert!(is_protected_folder("Inbox", None));
+        assert!(is_protected_folder("trash", None));
+        assert!(is_protected_folder(" Saved ", None));
+        assert!(!is_protected_folder("Work", None));
+        assert!(!is_protected_folder("Receipts", None));
+        // …and the point of the roles: a special folder is special in any language. `Entwürfe` matches
+        // no name we know, so without the server's flag the user could rename or delete their own
+        // Drafts folder — and a folder the server calls `Work` with no role stays theirs to rename.
+        assert!(is_protected_folder("Entwürfe", Some("drafts")));
+        assert!(is_protected_folder("Papierkorb", Some("trash")));
+        assert!(!is_protected_folder("Work", Some("nonsense")));
     }
 
     #[test]

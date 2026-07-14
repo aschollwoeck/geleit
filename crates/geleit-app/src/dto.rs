@@ -6,6 +6,7 @@
 //!
 //! These are DTOs, not store types: the frontend never sees `geleit_store` types, so the schema can
 //! evolve without breaking the UI, and the UI cannot reach into the store even by accident.
+pub use geleit_core::FolderRole;
 use geleit_store::{DraftContent, DraftRow, MessageHeader};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,11 @@ pub struct FolderDto {
     pub name: String,
     /// Unread count for this folder (0 when none) — shown in the rail.
     pub unread: i64,
+    /// What the server says this folder is **for** (`drafts`, `sent`, `trash`, `archive`, `junk`,
+    /// `inbox`), or `None` if it didn't say. The rail needs it: `Entwürfe` is a drafts folder, and it
+    /// must get the drafts icon and the same protection from renaming as one — neither of which can be
+    /// worked out from a name in a language we don't read.
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -106,24 +112,11 @@ pub fn human_size(bytes: i64) -> String {
 /// UI mirrors this in `view::is_protected_folder`; this copy is the authority the IPC commands
 /// re-check, so a rename/delete of a protected folder is refused even if the UI is bypassed.
 #[must_use]
-pub fn is_protected_folder(name: &str) -> bool {
-    matches!(
-        name.trim().to_lowercase().as_str(),
-        "inbox"
-            | "sent"
-            | "sent items"
-            | "sent mail"
-            | "drafts"
-            | "draft"
-            | "archive"
-            | "trash"
-            | "deleted"
-            | "deleted items"
-            | "bin"
-            | "spam"
-            | "junk"
-            | "saved"
-    )
+pub fn is_protected_folder(name: &str, role: Option<&str>) -> bool {
+    // One question, one answer: does this folder hold a role — because the server said so, or because
+    // its name says so? A second list of names here is how the app ends up archiving into a folder the
+    // rail lets the user delete. GeleitMail's own local `Saved` is the only addition.
+    FolderRole::of(name, role).is_some() || name.trim().eq_ignore_ascii_case("saved")
 }
 
 /// Validate a user-entered folder name (ORG-6): trims surrounding whitespace and rejects an empty
@@ -303,38 +296,6 @@ pub fn draft_summary(row: &DraftRow) -> DraftSummary {
     }
 }
 
-/// The last segment of an IMAP folder path: `INBOX.Drafts` → `Drafts`, `[Gmail]/Drafts` → `Drafts`.
-/// Servers use either separator, and which one is server configuration we don't otherwise care about.
-fn folder_leaf(name: &str) -> &str {
-    name.rsplit(['/', '.']).next().unwrap_or(name)
-}
-
-/// Which folder is the provider's Drafts folder, if it keeps one?
-///
-/// The whole name first, then the **last segment** of the path — so `INBOX.Drafts` and `[Gmail]/Drafts`
-/// resolve, while `INBOX.Alte Drafts` does not. A plain `contains("draft")` was wrong in a way that
-/// mattered: on a namespaced server it would take whichever draft-ish folder sorted first, so an old
-/// archive called `INBOX.Alte Drafts` would win over `INBOX.Drafts` — and since the picked folder is
-/// *hidden from the rail* and its contents are listed as drafts, that folder's ordinary mail would
-/// become resumable, expungeable "drafts" while the real Drafts folder stayed in the rail, still
-/// duplicated. So: never guess. If nothing is a Drafts folder by name, the provider keeps none.
-///
-/// This is the **single** answer to that question: the folder it names is the one drafts are mirrored
-/// to, the one the Drafts list reads, and the one hidden from the rail (because the Drafts entry *is*
-/// it). Two different answers would put the folder back in the rail beside its own contents.
-#[must_use]
-pub fn pick_drafts_folder(names: &[String]) -> Option<String> {
-    names
-        .iter()
-        .find(|n| n.eq_ignore_ascii_case("drafts"))
-        .or_else(|| {
-            names
-                .iter()
-                .find(|n| folder_leaf(n).eq_ignore_ascii_case("drafts"))
-        })
-        .cloned()
-}
-
 /// The Drafts list: this device's drafts and the provider's, in one list, newest first.
 ///
 /// **The de-duplication is the point.** With "sync drafts" on, every local draft *already has* a copy
@@ -503,7 +464,19 @@ pub fn with_thread_counts(headers: &[MessageHeader], dtos: &mut [MessageDto]) {
 /// everything else alphabetically. Pure — unit-tested. (Mirrors the ordering the Slint app used, so
 /// the migration doesn't silently reshuffle the user's rail.)
 #[must_use]
-pub fn folder_rank(name: &str) -> u8 {
+pub fn folder_rank(name: &str, role: Option<&str>) -> u8 {
+    // The server's own word first: a rail that files `Papierkorb` under P, between the user's own
+    // folders, has understood nothing about it.
+    if let Some(role) = role.and_then(FolderRole::from_key) {
+        return match role {
+            FolderRole::Inbox => 0,
+            FolderRole::Drafts => 1,
+            FolderRole::Sent => 2,
+            FolderRole::Archive => 3,
+            FolderRole::Junk => 4,
+            FolderRole::Trash => 5,
+        };
+    }
     match name.to_ascii_lowercase().as_str() {
         "inbox" => 0,
         "drafts" => 1,
@@ -516,34 +489,21 @@ pub fn folder_rank(name: &str) -> u8 {
     }
 }
 
-/// A well-known destination for a move action. Kept as a role, not a folder name, because a server
-/// may call its junk folder "Spam" or "Junk", its trash "Trash" or "Deleted", etc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FolderRole {
-    Inbox,
-    Archive,
-    Trash,
-    Spam,
-}
-
-impl FolderRole {
-    fn matches(self, name: &str) -> bool {
-        let n = name.to_ascii_lowercase();
-        match self {
-            FolderRole::Inbox => n == "inbox",
-            FolderRole::Archive => n == "archive",
-            FolderRole::Trash => n == "trash" || n == "deleted",
-            FolderRole::Spam => n == "spam" || n == "junk",
-        }
-    }
-}
-
-/// Pick the actual folder name for a role from the account's folders. Pure — unit-tested. Returns
-/// `None` if the account has no such folder (the caller then declines the action rather than
-/// inventing a destination — inventing one risks moving mail somewhere the server won't accept).
+/// Which of an account's folders holds a role — the server's `\Drafts`/`\Sent`/… flag first, then the
+/// English name. See [`geleit_core::pick_folder`], which is the single answer to that question for the
+/// whole app (the engine asks it too, for the Sent folder a message is saved into).
 #[must_use]
-pub fn resolve_folder(folders: &[String], role: FolderRole) -> Option<&str> {
-    folders.iter().find(|f| role.matches(f)).map(String::as_str)
+pub fn resolve_folder(folders: &[geleit_store::Folder], role: FolderRole) -> Option<String> {
+    let pairs: Vec<(String, Option<FolderRole>)> = folders
+        .iter()
+        .map(|f| {
+            (
+                f.name.clone(),
+                f.role.as_deref().and_then(FolderRole::from_key),
+            )
+        })
+        .collect();
+    geleit_core::pick_folder(&pairs, role).map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -555,11 +515,17 @@ mod tests {
         for n in [
             "Inbox", "INBOX", "Sent", "Drafts", "Trash", "Archive", "Junk", " Saved ",
         ] {
-            assert!(is_protected_folder(n), "{n} should be protected");
+            assert!(is_protected_folder(n, None), "{n} should be protected");
         }
         for n in ["Work", "Receipts", "Sent-2024", "Projects", ""] {
-            assert!(!is_protected_folder(n), "{n} should be editable");
+            assert!(!is_protected_folder(n, None), "{n} should be editable");
         }
+        // The server's word makes a folder special in any language — without it, a German user could
+        // rename or delete their own Drafts folder, and the app would then find neither.
+        assert!(is_protected_folder("Entwürfe", Some("drafts")));
+        assert!(is_protected_folder("Papierkorb", Some("trash")));
+        // A role we don't understand is not a role. (And an ordinary folder stays the user's.)
+        assert!(!is_protected_folder("Work", Some("flagged")));
     }
 
     #[test]
@@ -807,50 +773,6 @@ mod tests {
     }
 
     #[test]
-    fn the_drafts_folder_is_the_exact_name_first_then_a_namespaced_one() {
-        let names = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-
-        // Exact wins even when another folder merely contains the word — and even when it comes first.
-        assert_eq!(
-            pick_drafts_folder(&names(&["Drafts.Old", "INBOX", "Drafts"])),
-            Some("Drafts".to_owned())
-        );
-        assert_eq!(
-            pick_drafts_folder(&names(&["INBOX", "drafts"])),
-            Some("drafts".to_owned()),
-            "the name is matched case-insensitively"
-        );
-        // Namespaced forms, which is how most servers actually present it — matched on the LAST
-        // segment, with either separator.
-        assert_eq!(
-            pick_drafts_folder(&names(&["INBOX", "INBOX.Drafts"])),
-            Some("INBOX.Drafts".to_owned())
-        );
-        assert_eq!(
-            pick_drafts_folder(&names(&["[Gmail]/Drafts"])),
-            Some("[Gmail]/Drafts".to_owned())
-        );
-
-        // The one that matters: a folder that merely *contains* "draft" must never win. It sorts
-        // first, so a substring match would pick it — and the picked folder is hidden from the rail and
-        // has its contents listed as drafts, so an old archive would become a set of resumable,
-        // expungeable "drafts" while the real Drafts folder stayed in the rail, still duplicated.
-        assert_eq!(
-            pick_drafts_folder(&names(&["INBOX", "INBOX.Alte Drafts", "INBOX.Drafts"])),
-            Some("INBOX.Drafts".to_owned())
-        );
-        assert_eq!(
-            pick_drafts_folder(&names(&["INBOX", "Draft ideas"])),
-            None,
-            "a user folder that happens to say 'draft' is not the Drafts folder"
-        );
-
-        // A provider that keeps none: the drafts live on this device, and nothing is hidden.
-        assert_eq!(pick_drafts_folder(&names(&["INBOX", "Sent"])), None);
-        assert_eq!(pick_drafts_folder(&[]), None);
-    }
-
-    #[test]
     fn sender_prefers_the_display_name_then_the_address() {
         assert_eq!(display_sender(Some("Ada"), Some("a@x.io")), "Ada");
         assert_eq!(display_sender(None, Some("a@x.io")), "a@x.io");
@@ -880,7 +802,7 @@ mod tests {
             "Saved",
             "Zzz custom",
         ];
-        let ranks: Vec<u8> = order.iter().map(|n| folder_rank(n)).collect();
+        let ranks: Vec<u8> = order.iter().map(|n| folder_rank(n, None)).collect();
         assert!(
             ranks.windows(2).all(|w| w[0] < w[1]),
             "ranks must be strictly increasing across {order:?}, got {ranks:?}"
@@ -890,8 +812,29 @@ mod tests {
     /// The aliases really are aliases — Junk *is* Spam, Deleted *is* Trash.
     #[test]
     fn folder_aliases_share_their_rank() {
-        assert_eq!(folder_rank("Junk"), folder_rank("Spam"));
-        assert_eq!(folder_rank("Deleted"), folder_rank("Trash"));
+        assert_eq!(folder_rank("Junk", None), folder_rank("Spam", None));
+        assert_eq!(folder_rank("Deleted", None), folder_rank("Trash", None));
+    }
+
+    #[test]
+    fn the_rail_sorts_by_what_the_server_says_a_folder_is_for() {
+        // `Papierkorb` matches no name we know: without the role it would rank as an ordinary folder
+        // and sit among the user's own, halfway down the rail.
+        assert_eq!(
+            folder_rank("Papierkorb", Some("trash")),
+            folder_rank("Trash", None)
+        );
+        assert_eq!(
+            folder_rank("Entwürfe", Some("drafts")),
+            folder_rank("Drafts", None)
+        );
+        assert!(folder_rank("Gesendet", Some("sent")) < folder_rank("Zzz custom", None));
+        // The server's word beats the name, so a folder *called* Trash but flagged as the archive
+        // sorts as an archive.
+        assert_eq!(
+            folder_rank("Trash", Some("archive")),
+            folder_rank("Archive", None)
+        );
     }
 
     #[test]
@@ -1024,38 +967,79 @@ mod tests {
         }
     }
 
+    fn folder(id: i64, name: &str, role: Option<&str>) -> geleit_store::Folder {
+        geleit_store::Folder {
+            id,
+            account_id: 1,
+            name: name.to_owned(),
+            role: role.map(str::to_owned),
+        }
+    }
+
     #[test]
-    fn resolve_folder_finds_the_role_by_its_server_specific_name() {
-        let folders: Vec<String> = ["INBOX", "Archive", "Junk", "Deleted"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(resolve_folder(&folders, FolderRole::Inbox), Some("INBOX"));
+    fn resolve_folder_takes_the_servers_word_then_falls_back_to_the_name() {
+        // A German provider: nothing is called "Junk" or "Deleted", so only the roles find them.
+        let gmx = [
+            folder(1, "INBOX", Some("inbox")),
+            folder(2, "Papierkorb", Some("trash")),
+            folder(3, "Spam", Some("junk")),
+        ];
         assert_eq!(
-            resolve_folder(&folders, FolderRole::Archive),
+            resolve_folder(&gmx, FolderRole::Trash).as_deref(),
+            Some("Papierkorb")
+        );
+        assert_eq!(
+            resolve_folder(&gmx, FolderRole::Junk).as_deref(),
+            Some("Spam")
+        );
+        assert_eq!(
+            resolve_folder(&gmx, FolderRole::Archive),
+            None,
+            "it has none"
+        );
+
+        // A server that says nothing (or an account not re-listed since this landed): the English
+        // names still work, exactly as before.
+        let plain = [
+            folder(1, "INBOX", None),
+            folder(2, "Archive", None),
+            folder(3, "Junk", None),
+            folder(4, "Deleted", None),
+        ];
+        assert_eq!(
+            resolve_folder(&plain, FolderRole::Inbox).as_deref(),
+            Some("INBOX")
+        );
+        assert_eq!(
+            resolve_folder(&plain, FolderRole::Archive).as_deref(),
             Some("Archive")
         );
-        // the account calls it "Junk" / "Deleted" — the role still resolves
-        assert_eq!(resolve_folder(&folders, FolderRole::Spam), Some("Junk"));
-        assert_eq!(resolve_folder(&folders, FolderRole::Trash), Some("Deleted"));
+        assert_eq!(
+            resolve_folder(&plain, FolderRole::Junk).as_deref(),
+            Some("Junk")
+        );
+        assert_eq!(
+            resolve_folder(&plain, FolderRole::Trash).as_deref(),
+            Some("Deleted")
+        );
     }
 
     #[test]
     fn resolve_folder_declines_when_the_account_has_no_such_folder() {
-        let folders = vec!["INBOX".to_string(), "Sent".to_string()];
-        // no Archive/Trash/Spam → None, so the caller declines rather than inventing a destination
+        let folders = [folder(1, "INBOX", Some("inbox")), folder(2, "Sent", None)];
+        // no Archive/Trash/Junk → None, so the caller declines rather than inventing a destination
         assert_eq!(resolve_folder(&folders, FolderRole::Archive), None);
         assert_eq!(resolve_folder(&folders, FolderRole::Trash), None);
-        assert_eq!(resolve_folder(&folders, FolderRole::Spam), None);
+        assert_eq!(resolve_folder(&folders, FolderRole::Junk), None);
     }
 
     #[test]
     fn inbox_ranks_first_and_unknown_folders_last() {
-        assert_eq!(folder_rank("INBOX"), 0);
-        assert!(folder_rank("Inbox") < folder_rank("Sent"));
-        assert!(folder_rank("Sent") < folder_rank("Trash"));
-        assert!(folder_rank("Trash") < folder_rank("Some custom folder"));
+        assert_eq!(folder_rank("INBOX", None), 0);
+        assert!(folder_rank("Inbox", None) < folder_rank("Sent", None));
+        assert!(folder_rank("Sent", None) < folder_rank("Trash", None));
+        assert!(folder_rank("Trash", None) < folder_rank("Some custom folder", None));
         // case-insensitive, and Junk is Spam
-        assert_eq!(folder_rank("junk"), folder_rank("Spam"));
+        assert_eq!(folder_rank("junk", None), folder_rank("Spam", None));
     }
 }

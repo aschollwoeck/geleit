@@ -128,8 +128,7 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 - **S4.8** ✅ Save sent mail to Sent via IMAP APPEND (SEND-8).
 - **S4.12** ✅ Address autocomplete from history — To field (SEND-9).
 
-> **Follow-ups (backlog):** outbox + retry / offline-send (SEND-10); SPECIAL-USE Sent detection;
-> persist attachments in drafts; Cc autocomplete; in-process file-picker (rfd/portal). The webview
+> **Follow-ups (backlog):** outbox + retry / offline-send (SEND-10); Cc autocomplete; in-process file-picker (rfd/portal). The webview
 > uses Slint's **software renderer** to coexist with webkit's GL (X11; PR #53). Sending verified
 > end-to-end by the in-process SMTP sink; live IMAP APPEND has an `#[ignore]` test.
 

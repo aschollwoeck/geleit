@@ -197,6 +197,16 @@ const MIGRATIONS: &[&str] = &[
     UPDATE draft SET msgid = '<geleit-draft-' || account_id || '-' || id || '@geleit.local>'
       WHERE msgid = '';
     ",
+    // 16 — what a folder is *for*, as the server itself says (RFC 6154 SPECIAL-USE: `\Drafts`,
+    // `\Sent`, `\Trash`, `\Archive`, `\Junk` on the LIST response).
+    //
+    // Until now every special folder was found by matching the English word — so on a provider that
+    // localizes them (GMX's `Entwürfe`, `Gesendet`, `Papierkorb`) GeleitMail found *none* of them: sent
+    // mail was saved nowhere, Archive and Junk declined to work, and drafts never merged. NULL = the
+    // server didn't say (or we haven't re-listed since this landed), and the name match still applies.
+    "
+    ALTER TABLE folder ADD COLUMN role TEXT;
+    ",
 ];
 
 /// A parsed search query (SEARCH-1/4): an FTS5 `MATCH` string (`None` when there are no full-text
@@ -250,7 +260,19 @@ fn is_local_folder(name: &str) -> bool {
 /// Sort rank for a folder name (lower = earlier). Inbox first, then the common special folders in a
 /// conventional order, then everything else (same rank → ordered by name). Matches provider variants
 /// loosely (e.g. "Deleted Items" → trash, "Junk Email" → junk).
-fn folder_rank(name: &str) -> u8 {
+fn folder_rank(name: &str, role: Option<&str>) -> u8 {
+    // The server's own word first, so a provider that calls its bin `Papierkorb` still gets it sorted
+    // with the special folders rather than filed under P with the user's own.
+    if let Some(role) = role.and_then(geleit_core::FolderRole::from_key) {
+        return match role {
+            geleit_core::FolderRole::Inbox => 0,
+            geleit_core::FolderRole::Drafts => 1,
+            geleit_core::FolderRole::Sent => 2,
+            geleit_core::FolderRole::Archive => 3,
+            geleit_core::FolderRole::Junk => 4,
+            geleit_core::FolderRole::Trash => 5,
+        };
+    }
     let n = name.to_lowercase();
     match n.as_str() {
         "inbox" => 0,
@@ -391,6 +413,10 @@ pub struct Folder {
     pub id: i64,
     pub account_id: i64,
     pub name: String,
+    /// What the folder is **for**, as the server declared it (RFC 6154 SPECIAL-USE): `drafts`, `sent`,
+    /// `trash`, `archive`, `junk`, `inbox`. `None` = the server didn't say, and the folder's *name* is
+    /// all we have to go on. See `geleit_core::FolderRole`.
+    pub role: Option<String>,
 }
 
 /// A message envelope to insert/update. `date` is unix seconds; `uid` is the IMAP UID.
@@ -981,6 +1007,34 @@ impl Store {
         )?)
     }
 
+    /// Upsert a folder **with the role the server gave it** (RFC 6154 SPECIAL-USE). Used by the folder
+    /// listing, which is the only place that knows the roles.
+    ///
+    /// The role is refreshed on every listing, because the server is its authority: a user who marks a
+    /// different folder as their Drafts folder in webmail must see that here on the next sync. Passing
+    /// `None` therefore *clears* it — [`Self::upsert_folder`] (which every other caller uses, knowing
+    /// only a name) deliberately leaves it alone, so syncing a folder can't blank its role.
+    ///
+    /// # Errors
+    /// The upsert failing (a corrupt or unreadable database).
+    pub fn upsert_folder_with_role(
+        &self,
+        account_id: i64,
+        name: &str,
+        role: Option<&str>,
+    ) -> Result<i64, StoreError> {
+        self.conn.execute(
+            "INSERT INTO folder (account_id, name, role) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(account_id, name) DO UPDATE SET role = excluded.role",
+            (account_id, name, role),
+        )?;
+        Ok(self.conn.query_row(
+            "SELECT id FROM folder WHERE account_id = ?1 AND name = ?2",
+            (account_id, name),
+            |r| r.get(0),
+        )?)
+    }
+
     /// Remove this account's folders whose name is **not** in `keep` (their messages cascade). Used
     /// to reconcile the local folder list with the server after folder create/rename/delete (ORG-6).
     pub fn prune_folders(&self, account_id: i64, keep: &[String]) -> Result<(), StoreError> {
@@ -1004,18 +1058,19 @@ impl Store {
     pub fn folders_for_account(&self, account_id: i64) -> Result<Vec<Folder>, StoreError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, account_id, name FROM folder WHERE account_id = ?1")?;
+            .prepare("SELECT id, account_id, name, role FROM folder WHERE account_id = ?1")?;
         let rows = stmt.query_map([account_id], |r| {
             Ok(Folder {
                 id: r.get(0)?,
                 account_id: r.get(1)?,
                 name: r.get(2)?,
+                role: r.get(3)?,
             })
         })?;
         let mut folders = rows.collect::<Result<Vec<_>, _>>()?;
         folders.sort_by(|a, b| {
-            folder_rank(&a.name)
-                .cmp(&folder_rank(&b.name))
+            folder_rank(&a.name, a.role.as_deref())
+                .cmp(&folder_rank(&b.name, b.role.as_deref()))
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         Ok(folders)
@@ -1828,6 +1883,67 @@ mod tests {
         let msgs = s.messages_in_folder(fld, 50).unwrap();
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].seen);
+    }
+
+    #[test]
+    fn a_localized_special_folder_sorts_with_the_specials_not_among_the_users_own() {
+        // Without the role, `Papierkorb` matches no name we know: it ranks as an ordinary folder and
+        // sits under P, halfway down the rail, among the user's own. The order also decides which
+        // folder wins if two ever carry the same role, so it isn't only cosmetic.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        for (name, role) in [
+            ("Arbeit", None),
+            ("Papierkorb", Some("trash")),
+            ("Gesendet", Some("sent")),
+            ("INBOX", Some("inbox")),
+            ("Entwürfe", Some("drafts")),
+            ("Archiv", Some("archive")),
+        ] {
+            s.upsert_folder_with_role(acc, name, role).unwrap();
+        }
+        let names: Vec<String> = s
+            .folders_for_account(acc)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "INBOX",
+                "Entwürfe",
+                "Gesendet",
+                "Archiv",
+                "Papierkorb",
+                "Arbeit"
+            ],
+            "specials in role order, the user's own last"
+        );
+    }
+
+    #[test]
+    fn upserting_a_folder_with_a_role_returns_the_folders_own_id() {
+        // The id is what the caller syncs mail into. A listing re-runs this for every folder on every
+        // sync, so returning the *same* row (not a new one) is the difference between a folder and a
+        // duplicate of it.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let id = s
+            .upsert_folder_with_role(acc, "Entwürfe", Some("drafts"))
+            .unwrap();
+        assert_eq!(
+            s.folders_for_account(acc).unwrap()[0].id,
+            id,
+            "the id returned must be the folder's"
+        );
+        // Idempotent: listing again is the same row, and the role can change on it.
+        let again = s.upsert_folder_with_role(acc, "Entwürfe", None).unwrap();
+        assert_eq!(again, id);
+        assert_eq!(s.folders_for_account(acc).unwrap().len(), 1);
+        assert_eq!(s.folders_for_account(acc).unwrap()[0].role, None);
+        // …and it agrees with the name-only upsert every message sync uses.
+        assert_eq!(s.upsert_folder(acc, "Entwürfe").unwrap(), id);
     }
 
     #[test]

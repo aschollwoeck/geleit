@@ -142,13 +142,15 @@ pub async fn list_folders(
         // The provider's Drafts folder is not a rail entry of its own: the **Drafts** entry *is* it
         // (its contents are merged into that list by `list_drafts`). Leaving it here would show
         // "Drafts" twice — once as the folder, once as the list of what's in it.
-        let names: Vec<String> = folders.iter().map(|f| f.name.clone()).collect();
-        if let Some(drafts) = crate::dto::pick_drafts_folder(&names) {
-            folders.retain(|f| f.name != drafts);
-        }
+        // Every folder that IS the drafts folder — not just the one we resolved to. A server that
+        // flags two (a locale migration that left both `Drafts` and `Entwürfe` marked) would otherwise
+        // leave the loser in the rail, with the drafts icon, next to a Drafts entry that doesn't hold
+        // its mail: the duplicate this was built to remove.
+        let drafts = crate::dto::resolve_folder(&folders, crate::dto::FolderRole::Drafts);
+        folders.retain(|f| f.role.as_deref() != Some("drafts") && Some(&f.name) != drafts.as_ref());
         folders.sort_by(|a, b| {
-            folder_rank(&a.name)
-                .cmp(&folder_rank(&b.name))
+            folder_rank(&a.name, a.role.as_deref())
+                .cmp(&folder_rank(&b.name, b.role.as_deref()))
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         // Per-folder unread counts, folded onto the folders (0 when a folder has none).
@@ -163,6 +165,7 @@ pub async fn list_folders(
                 unread: counts.get(&f.id).copied().unwrap_or(0),
                 id: f.id,
                 name: f.name,
+                role: f.role,
             })
             .collect())
     })
@@ -457,7 +460,7 @@ pub async fn move_to_role(
     let role = match role.as_str() {
         "archive" => FolderRole::Archive,
         "trash" => FolderRole::Trash,
-        "spam" => FolderRole::Spam,
+        "spam" => FolderRole::Junk,
         "inbox" => FolderRole::Inbox,
         _ => return Err("Unknown action.".to_owned()),
     };
@@ -478,19 +481,16 @@ pub async fn move_to_role(
             .account_for_message(id)
             .map_err(|_| "Couldn't move the message.".to_owned())?
             .ok_or_else(|| "Couldn't move the message.".to_owned())?;
-        let folders: Vec<String> = store
+        let folders = store
             .folders_for_account(account_id)
-            .map_err(|_| "Couldn't move the message.".to_owned())?
-            .into_iter()
-            .map(|f| f.name)
-            .collect();
+            .map_err(|_| "Couldn't move the message.".to_owned())?;
         let Some(target) = resolve_folder(&folders, role) else {
             return Ok(None); // account has no such folder — decline rather than invent one
         };
         if target == source {
             return Ok(None); // already there
         }
-        Ok(Some((account_id, source, uid, target.to_owned())))
+        Ok(Some((account_id, source, uid, target)))
     })
     .await?;
 
@@ -520,6 +520,68 @@ pub async fn move_to_role(
     Ok(true)
 }
 
+/// Move a message to a folder **by name** — the folder the user picked from the Move… menu.
+///
+/// Distinct from [`move_to_role`], which is for the toolbar's Archive / Delete / Spam and has to *find*
+/// the folder. Here the user has already named it, and any guessing on our part would be a bug: the
+/// menu used to map every folder it listed onto one of four roles, so moving a message into an ordinary
+/// folder filed it in the **Inbox** instead.
+///
+/// Returns whether it acted (false = no such folder, or it's already there).
+#[tauri::command]
+pub async fn move_to_folder(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    folder: String,
+) -> Result<bool, String> {
+    let st = state.inner().clone();
+    let target = folder.clone();
+    let plan = with_store(st.clone(), move |store| {
+        let Some((source, uid)) = store
+            .message_location(id)
+            .map_err(|_| "Couldn't move the message.".to_owned())?
+        else {
+            return Ok(None); // no server location (e.g. a local Saved message)
+        };
+        let account_id = store
+            .account_for_message(id)
+            .map_err(|_| "Couldn't move the message.".to_owned())?
+            .ok_or_else(|| "Couldn't move the message.".to_owned())?;
+        // The folder must be one this account actually has — never take a name on trust and create a
+        // mailbox out of a typo.
+        let known = store
+            .folders_for_account(account_id)
+            .map_err(|_| "Couldn't read your folders.".to_owned())?
+            .into_iter()
+            .any(|f| f.name == target);
+        if !known || target == source {
+            return Ok(None);
+        }
+        Ok(Some((account_id, source, uid)))
+    })
+    .await?;
+    let Some((account_id, source, uid)) = plan else {
+        return Ok(false);
+    };
+
+    // Server first — as in `move_to_role`, so a failed move never removes the row locally.
+    let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_move(
+            &db, &*secrets, account_id, &source, uid as u32, &folder,
+        )
+    })
+    .await
+    .map_err(|_| "The mailbox task stopped unexpectedly.".to_owned())??;
+    with_store(st, move |store| {
+        store
+            .delete_message(id)
+            .map_err(|_| "Couldn't update the local mailbox.".to_owned())
+    })
+    .await?;
+    Ok(true)
+}
+
 /// Empty the account's Trash (ORG-2): permanently delete everything in it, on the server and locally.
 /// Irreversible — the UI confirms first.
 #[tauri::command]
@@ -531,13 +593,14 @@ pub async fn empty_trash(state: tauri::State<'_, AppState>, account_id: i64) -> 
         let folders = store
             .folders_for_account(account_id)
             .map_err(|_| "Couldn't read your folders.".to_owned())?;
-        let names: Vec<String> = folders.iter().map(|f| f.name.clone()).collect();
-        Ok(resolve_folder(&names, FolderRole::Trash).and_then(|name| {
-            folders
-                .iter()
-                .find(|f| f.name == name)
-                .map(|f| (name.to_owned(), f.id))
-        }))
+        Ok(
+            resolve_folder(&folders, FolderRole::Trash).and_then(|name| {
+                folders
+                    .iter()
+                    .find(|f| f.name == name)
+                    .map(|f| (name.clone(), f.id))
+            }),
+        )
     })
     .await?;
     let Some((name, folder_id)) = trash else {
@@ -629,16 +692,20 @@ pub async fn rename_folder(
     from: String,
     to: String,
 ) -> Result<(), String> {
-    if is_protected_folder(&from) {
+    let st = state.inner().clone();
+    // A special folder is special whatever it is *called* — so ask the store for its role, not just its
+    // name. Renaming the folder the server marked `\Trash` breaks the account, and on a provider that
+    // calls it `Papierkorb` the name list alone would have let it through.
+    let role = folder_role(&st, account_id, &from).await;
+    if is_protected_folder(&from, role.as_deref()) {
         return Err("That folder can't be renamed.".to_owned());
     }
     let to = validate_folder_name(&to)?;
     // Don't let a user rename an ordinary folder *into* a reserved name — that would mint a
     // role-named folder the UI then treats as protected (un-renamable, un-deletable).
-    if is_protected_folder(&to) {
+    if is_protected_folder(&to, None) {
         return Err("That name is reserved for a standard folder.".to_owned());
     }
-    let st = state.inner().clone();
     let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
     let (from2, to2) = (from.clone(), to.clone());
     tauri::async_runtime::spawn_blocking(move || {
@@ -664,10 +731,11 @@ pub async fn delete_folder(
     folder_id: i64,
     name: String,
 ) -> Result<(), String> {
-    if is_protected_folder(&name) {
+    let st = state.inner().clone();
+    let role = folder_role(&st, account_id, &name).await;
+    if is_protected_folder(&name, role.as_deref()) {
         return Err("That folder can't be deleted.".to_owned());
     }
-    let st = state.inner().clone();
     let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
     let name2 = name.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -1007,17 +1075,30 @@ fn sync_drafts_on(store: &Store) -> bool {
         .is_some_and(|v| v == "1" || v == "true")
 }
 
-/// The account's Drafts folder, by name. `None` → the provider keeps none, so drafts live on this
-/// device (and nothing is hidden from the rail). The choosing is pure — see
-/// [`crate::dto::pick_drafts_folder`], which is the single answer to this question.
+/// The role the server gave one of this account's folders (`None` = it said nothing, or the folder is
+/// gone). Used to protect a special folder from being renamed or deleted whatever it is called.
+async fn folder_role(state: &AppState, account_id: i64, name: &str) -> Option<String> {
+    let name = name.to_owned();
+    with_store(state.clone(), move |store| {
+        Ok(store
+            .folders_for_account(account_id)
+            .ok()
+            .and_then(|fs| fs.into_iter().find(|f| f.name == name))
+            .and_then(|f| f.role))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// The account's Drafts folder. `None` → the provider keeps none, so drafts live on this device (and
+/// nothing is hidden from the rail).
+///
+/// The **server's** `\Drafts` flag decides, so a provider that calls it `Entwürfe` works; the English
+/// name is only the fallback. Same answer everywhere — see [`geleit_core::pick_folder`].
 fn drafts_folder(store: &Store, account_id: i64) -> Option<String> {
-    let names: Vec<String> = store
-        .folders_for_account(account_id)
-        .ok()?
-        .into_iter()
-        .map(|f| f.name)
-        .collect();
-    crate::dto::pick_drafts_folder(&names)
+    let folders = store.folders_for_account(account_id).ok()?;
+    crate::dto::resolve_folder(&folders, crate::dto::FolderRole::Drafts)
 }
 
 /// The opt-in setting key for mirroring drafts to the server's Drafts folder (default off, P2).
