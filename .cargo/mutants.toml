@@ -17,6 +17,10 @@ exclude_globs = [
     "**/geleit-engine/src/sync_actions.rs",
     # os_secret.rs is external keychain glue (Secret Service); verified by a live #[ignore] test.
     "**/geleit-platform/src/os_secret.rs",
+    # os_notify.rs is the same shape: a D-Bus call to the desktop's notification service. Nothing here
+    # can be caught without a live desktop (`examples/notify_once.rs` is how it's checked by hand). The
+    # `Notifier` trait, the fake, and every decision about WHAT to say stay mutation-tested.
+    "**/geleit-platform/src/os_notify.rs",
 
     # --- geleit-app is the Tauri host (M9, ADR-0012). Its glue is excluded; the PURE logic lives in
     # --- geleit-app/src/dto.rs (DTO mapping, sender/subject fallbacks, folder ordering, folder roles,

@@ -122,6 +122,35 @@ messages simply appear in the list with their unread dot — nothing jumps, noth
 whatever you were doing (reading, searching, writing) is left alone. If your machine is asleep or
 offline, it quietly tries again later rather than complaining at you.
 
+## Being told about new mail
+
+When mail arrives, GeleitMail shows a quiet **desktop notification** — the sender and the subject, so
+you can tell at a glance whether to put your coffee down. It's on by default; turn it off in
+**Settings → Notifications**. (GeleitMail checks for mail every few minutes, so a notification can lag
+the message by that much. Choose **Refresh** if you want to know *now*.)
+
+Because a notification shows the sender and the subject, your desktop may put them on the **lock
+screen**. If you'd rather it didn't, that's a setting your system provides for each app — GeleitMail
+identifies itself properly so those controls apply to it.
+
+- **Several messages at once are one notification**, not a stack of them: *"3 new messages — From Alice,
+  Bob, Cara"*. Come back from lunch to a busy inbox and you get one line, not fourteen popups.
+- **Quiet hours** keep it silent overnight (set them in **Settings → Notifications**). Mail that arrives
+  while you're asleep is still there in the morning — and so is one notification telling you about it.
+- **With more than one account**, you can choose which ones you want to hear about. A mailing-list
+  account can stay quiet while the one your family writes to doesn't.
+- Mail you've **already read somewhere else** — on your phone, in webmail — is never announced here.
+  You already know about it.
+
+Mail you fetched yourself with **Refresh** is never popped up at you afterwards — you asked for it, and
+it's on your screen.
+
+Turning notifications **off** means mail that arrives while they're off stays quiet for good: switching
+them back on greets you with your inbox, not with a week of missed popups. (Anything GeleitMail was
+holding for you — mail that came in during quiet hours, say — is let go at the same time.)
+
+## Getting new mail right now
+
 You can also check **right now**: choose **Refresh** at the top of the message list. While it works,
 the button reads *Refreshing…* and a quiet line shows what's happening — *Checking for new mail…*,
 then *Catching up…* with a count as older messages download in the background. The app stays

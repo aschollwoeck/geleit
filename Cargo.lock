@@ -1574,6 +1574,7 @@ dependencies = [
 name = "geleit-app"
 version = "0.1.2"
 dependencies = [
+ "chrono",
  "geleit-core",
  "geleit-engine",
  "geleit-platform",
@@ -1620,6 +1621,7 @@ version = "0.1.2"
 dependencies = [
  "keyring",
  "thiserror 2.0.18",
+ "zbus",
 ]
 
 [[package]]

@@ -17,6 +17,7 @@
 mod dto;
 mod ipc;
 mod mailproto;
+mod notify;
 mod schedule;
 mod scheduler;
 
@@ -160,6 +161,8 @@ fn main() {
         ipc::remove_account,
         ipc::get_bool_setting,
         ipc::set_bool_setting,
+        ipc::get_setting,
+        ipc::set_setting,
         ipc::get_signature,
         ipc::set_signature,
         ipc::theme,
@@ -216,6 +219,8 @@ fn main() {
         ipc::remove_account,
         ipc::get_bool_setting,
         ipc::set_bool_setting,
+        ipc::get_setting,
+        ipc::set_setting,
         ipc::get_signature,
         ipc::set_signature,
         ipc::theme,

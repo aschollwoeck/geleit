@@ -19,3 +19,11 @@ keyring = { version = "4", default-features = false, features = [
     "zbus-secret-service-keyring-store",
 ] }
 thiserror = "2.0.18"
+# Desktop notifications over D-Bus (`org.freedesktop.Notifications`). Already in the tree — the
+# secret-service keyring backend above is built on the same zbus — so this adds no new dependency,
+# only a direct use of one. No `notify-rust`, no C bindings.
+# Default features on purpose: cargo unifies features across the graph, so enabling zbus's `tokio`
+# backend here would have switched the KEYRING's zbus onto tokio too — and the engine's `block_on`
+# then panics with "cannot start a runtime from within a runtime" the first time an account is added.
+# A dependency's features are not local, and this one is load-bearing three crates away.
+zbus = "5"

@@ -207,6 +207,20 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE folder ADD COLUMN role TEXT;
     ",
+    // 17 — has the user been *told* about this message? (NOTIF-1.)
+    //
+    // Whether mail is news was, until now, a property of one sync's diff against the store: whoever
+    // wrote the message first ate the signal. So a message that arrived while the **backfill** thread
+    // was running got stored by the backfill, was therefore no longer "absent from our store", and no
+    // later sync would ever call it new — it sat in the inbox, unread and unannounced, forever.
+    //
+    // Being told is now a durable fact about the message, not a property of a diff. `0` = we owe the
+    // user a notification; anything already in a folder at its first sync, and anything the backfill
+    // fetches from *below* the newest UID we already had (i.e. old mail, which is what backfill is
+    // for), is written as `1` — accounted for, never announced.
+    "
+    ALTER TABLE message ADD COLUMN notified INTEGER NOT NULL DEFAULT 1;
+    ",
 ];
 
 /// A parsed search query (SEARCH-1/4): an FTS5 `MATCH` string (`None` when there are no full-text
@@ -437,6 +451,23 @@ pub struct NewMessage {
     pub flagged: bool,
     pub has_attachments: bool,
     pub snippet: Option<String>,
+    /// Do we owe the user a notification for this message (NOTIF-1)?
+    ///
+    /// **Deliberately phrased so that `Default` (`false`) means "owes nobody".** The column is
+    /// `notified`, whose default is the same thing said the other way round — and a writer that reaches
+    /// for `..Default::default()` (the `.eml` importer does) must never accidentally mint a debt and
+    /// pop up a notification for a file the user opened by hand. Only ever written on insert: a re-sync
+    /// of a message must not re-announce it.
+    pub owed_notification: bool,
+}
+
+/// A message the user has not been told about yet — what a notification needs, and nothing more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingNotification {
+    pub id: i64,
+    pub from_name: Option<String>,
+    pub from_addr: Option<String>,
+    pub subject: Option<String>,
 }
 
 /// A draft as it sits in the provider's Drafts folder — what the Drafts list needs to show it, decide
@@ -927,6 +958,14 @@ impl Store {
 
     /// Delete an account and everything under it (folders/messages/bodies cascade).
     pub fn delete_account(&self, account_id: i64) -> Result<(), StoreError> {
+        // The account's per-account settings live in a k/v table keyed by its **id**, and they do not
+        // cascade. SQLite reuses the row ids of deleted rows, so leaving them behind means the *next*
+        // account added inherits them: add an account, and it silently has notifications switched off,
+        // with no way to find out why. Take them with the account.
+        self.conn.execute(
+            "DELETE FROM setting WHERE key = 'notify_account_' || ?1",
+            [account_id],
+        )?;
         self.conn
             .execute("DELETE FROM account WHERE id = ?1", [account_id])?;
         Ok(())
@@ -1098,11 +1137,13 @@ impl Store {
         folder_id: i64,
         m: &NewMessage,
     ) -> Result<i64, StoreError> {
+        // `notified` is deliberately absent from the ON CONFLICT update list: a re-sync of a message
+        // we have already announced must never make it news again.
         self.conn.execute(
             "INSERT INTO message \
              (account_id, folder_id, uid, message_id, in_reply_to, subject, from_name, from_addr, \
-              to_addrs, cc_addrs, date, seen, flagged, has_attachments, snippet) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
+              to_addrs, cc_addrs, date, seen, flagged, has_attachments, snippet, notified) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
              ON CONFLICT(account_id, folder_id, uid) DO UPDATE SET \
                message_id = excluded.message_id, in_reply_to = excluded.in_reply_to, \
                subject = excluded.subject, from_name = excluded.from_name, \
@@ -1124,6 +1165,7 @@ impl Store {
                 m.flagged,
                 m.has_attachments,
                 &m.snippet,
+                !m.owed_notification, // the column is `notified` — the same fact, said the other way
             ),
         )?;
         let id = match m.uid {
@@ -1170,6 +1212,120 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The messages we still owe the user a notification for (NOTIF-1), newest first.
+    ///
+    /// Unseen **and** unannounced. Read from the store rather than from a sync's diff, so a message the
+    /// backfill happened to store — or one a sync fetched while notifications were switched off, or
+    /// during quiet hours — is still owed, and is not lost to whichever writer got there first.
+    /// Reading it elsewhere in the meantime settles the debt: `seen` messages are never news.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn pending_notifications(
+        &self,
+        folder_id: i64,
+        limit: i64,
+    ) -> Result<Vec<PendingNotification>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, from_name, from_addr, subject FROM message \
+             WHERE folder_id = ?1 AND notified = 0 AND seen = 0 \
+             ORDER BY date DESC, id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map((folder_id, limit), |r| {
+            Ok(PendingNotification {
+                id: r.get(0)?,
+                from_name: r.get(1)?,
+                from_addr: r.get(2)?,
+                subject: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// How many messages this folder owes a notification for, and the highest id among them.
+    ///
+    /// The **count** must come from here, not from the sample we build the notification's text out of:
+    /// summarising 50 of 300 owed messages as "50 new messages" is a lie, and settling only those 50
+    /// means the next sweep raises another "50 new messages" five minutes later, about older mail. The
+    /// number is the whole point of collapsing.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn pending_notification_summary(
+        &self,
+        folder_id: i64,
+    ) -> Result<(i64, Option<i64>), StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*), MAX(id) FROM message \
+             WHERE folder_id = ?1 AND notified = 0 AND seen = 0",
+            [folder_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
+    /// The RFC `Message-ID`s of the messages this folder still owes a notification for.
+    ///
+    /// Read **before** a UIDVALIDITY reset clears the folder, so the debt can be carried across the
+    /// rebuild — the server invalidating its UIDs is not the user being told about their mail.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn owed_message_ids(&self, folder_id: i64) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT message_id FROM message \
+             WHERE folder_id = ?1 AND notified = 0 AND seen = 0 AND message_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([folder_id], |r| r.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Re-owe a notification for these messages, by `Message-ID` — the other half of carrying a debt
+    /// across a UIDVALIDITY reset. Messages the user has since read elsewhere stay settled.
+    ///
+    /// # Errors
+    /// The update failing (a corrupt or unreadable database).
+    pub fn restore_owed(&self, folder_id: i64, message_ids: &[String]) -> Result<(), StoreError> {
+        for mid in message_ids {
+            self.conn.execute(
+                "UPDATE message SET notified = 0 \
+                 WHERE folder_id = ?1 AND message_id = ?2 AND seen = 0",
+                (folder_id, mid),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Settle the debt for everything in this folder up to and including `max_id` — one statement, so a
+    /// half-marked batch can't leave some messages to be announced twice.
+    ///
+    /// Bounded by an id rather than "everything owed" because mail keeps arriving: a message stored
+    /// *while* the notification was being raised has a higher id, was not in the notification, and must
+    /// keep its debt.
+    ///
+    /// # Errors
+    /// The update failing (a corrupt or unreadable database).
+    pub fn mark_notified_through(&self, folder_id: i64, max_id: i64) -> Result<usize, StoreError> {
+        Ok(self.conn.execute(
+            "UPDATE message SET notified = 1 WHERE folder_id = ?1 AND id <= ?2 AND notified = 0",
+            (folder_id, max_id),
+        )?)
+    }
+
+    /// Record that the user has been told about these messages — the debt is settled, once.
+    ///
+    /// Called **after** the notification is actually raised, so a crash between the two costs a
+    /// repeated notification rather than a silently swallowed one. (Of those two, only one loses mail.)
+    ///
+    /// # Errors
+    /// The update failing (a corrupt or unreadable database).
+    pub fn mark_notified(&self, ids: &[i64]) -> Result<(), StoreError> {
+        for id in ids {
+            self.conn
+                .execute("UPDATE message SET notified = 1 WHERE id = ?1", [id])?;
+        }
+        Ok(())
     }
 
     /// The drafts sitting in a provider's Drafts folder, newest first — everything the Drafts list
@@ -1883,6 +2039,177 @@ mod tests {
         let msgs = s.messages_in_folder(fld, 50).unwrap();
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].seen);
+    }
+
+    #[test]
+    fn being_told_about_a_message_is_a_fact_that_survives_the_next_sync() {
+        // The bug this exists to prevent: "is this news?" used to be a diff against the store, so
+        // whichever writer stored the message first ate the signal — a message the backfill swept up
+        // was never announced, because by the next sync it was no longer absent.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let msg = |uid: i64, owed: bool, seen: bool| NewMessage {
+            uid: Some(uid),
+            from_name: Some("Alice".to_owned()),
+            subject: Some("Lunch?".to_owned()),
+            seen,
+            owed_notification: owed,
+            ..Default::default()
+        };
+
+        let owed = s.upsert_message(acc, inbox, &msg(1, true, false)).unwrap();
+        s.upsert_message(acc, inbox, &msg(2, false, false)).unwrap(); // already accounted for (old mail)
+        s.upsert_message(acc, inbox, &msg(3, true, true)).unwrap(); // read elsewhere → never news
+
+        let pending = s.pending_notifications(inbox, 10).unwrap();
+        assert_eq!(pending.len(), 1, "only the unseen, unannounced one is owed");
+        assert_eq!(pending[0].id, owed);
+        assert_eq!(pending[0].from_name.as_deref(), Some("Alice"));
+        assert_eq!(pending[0].subject.as_deref(), Some("Lunch?"));
+
+        // A re-sync of the same message — flags change, the envelope is re-fetched — must NOT make it
+        // news again, or every sync would re-announce the whole inbox.
+        s.upsert_message(acc, inbox, &msg(1, true, false)).unwrap();
+        s.mark_notified(&[owed]).unwrap();
+        s.upsert_message(acc, inbox, &msg(1, true, false)).unwrap();
+        assert!(
+            s.pending_notifications(inbox, 10).unwrap().is_empty(),
+            "told once, never again"
+        );
+    }
+
+    #[test]
+    fn a_debt_survives_the_server_reinventing_its_uids() {
+        // A UIDVALIDITY reset clears the folder and re-fetches it, and the re-fetch announces nothing
+        // (the folder is unprimed again — else every message in the inbox would pop up). Without
+        // carrying the debt across, mail we owed a notification for and hadn't raised yet — held
+        // through quiet hours, say — would be silently written off. The server renumbering its
+        // mailbox is not the user being told about their mail.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let msg = |uid: i64, mid: &str, owed: bool, seen: bool| NewMessage {
+            uid: Some(uid),
+            message_id: Some(mid.to_owned()),
+            owed_notification: owed,
+            seen,
+            ..Default::default()
+        };
+        s.upsert_message(acc, inbox, &msg(1, "<owed@x>", true, false))
+            .unwrap();
+        s.upsert_message(acc, inbox, &msg(2, "<known@x>", false, false))
+            .unwrap();
+
+        // What we'd read before clearing the folder…
+        let carried = s.owed_message_ids(inbox).unwrap();
+        assert_eq!(carried, vec!["<owed@x>".to_owned()], "only the unpaid one");
+
+        // …the server reinvents its UIDs, so the folder is rebuilt and everything comes back as
+        // "already accounted for" (an unprimed folder announces nothing).
+        s.clear_folder(inbox).unwrap();
+        s.upsert_message(acc, inbox, &msg(101, "<owed@x>", false, false))
+            .unwrap();
+        s.upsert_message(acc, inbox, &msg(102, "<known@x>", false, false))
+            .unwrap();
+        assert!(s.pending_notifications(inbox, 10).unwrap().is_empty());
+
+        // …and the debt is carried across.
+        s.restore_owed(inbox, &carried).unwrap();
+        let owed = s.pending_notifications(inbox, 10).unwrap();
+        assert_eq!(owed.len(), 1);
+        assert_eq!(s.pending_notification_summary(inbox).unwrap().0, 1);
+
+        // A message the user read elsewhere in the meantime stays settled — they know about it.
+        s.set_seen(owed[0].id, true).unwrap();
+        s.restore_owed(inbox, &carried).unwrap();
+        assert!(s.pending_notifications(inbox, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn settling_a_batch_leaves_the_mail_that_arrived_while_we_were_telling_them() {
+        // The notification named the mail up to `max_id`. Mail stored *while* it was being raised has a
+        // higher id, was not in it, and must keep its debt — or it is announced to nobody, ever.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let new = |uid: i64| NewMessage {
+            uid: Some(uid),
+            owed_notification: true,
+            ..Default::default()
+        };
+        let first = s.upsert_message(acc, inbox, &new(1)).unwrap();
+        let second = s.upsert_message(acc, inbox, &new(2)).unwrap();
+        let (count, max) = s.pending_notification_summary(inbox).unwrap();
+        assert_eq!((count, max), (2, Some(second)));
+
+        // …a third lands while the notification is on screen.
+        let third = s.upsert_message(acc, inbox, &new(3)).unwrap();
+        assert_eq!(s.mark_notified_through(inbox, second).unwrap(), 2);
+        let left = s.pending_notifications(inbox, 10).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, third, "the latecomer is still owed");
+        assert_ne!(left[0].id, first);
+    }
+
+    #[test]
+    fn removing_an_account_takes_its_notification_setting_with_it() {
+        // SQLite reuses the ids of deleted rows, and the per-account switches are keyed by id. Leave one
+        // behind and the NEXT account added inherits it: notifications silently off, and (with one
+        // account) no switch in the UI to find out why.
+        let s = Store::open_in_memory().unwrap();
+        let doomed = s.add_account("a@example.com", None).unwrap();
+        s.set_setting(&format!("notify_account_{doomed}"), "0")
+            .unwrap();
+        s.set_setting("notify", "1").unwrap();
+
+        s.delete_account(doomed).unwrap();
+        assert_eq!(
+            s.get_setting(&format!("notify_account_{doomed}")).unwrap(),
+            None,
+            "the setting went with the account"
+        );
+        assert_eq!(
+            s.get_setting("notify").unwrap().as_deref(),
+            Some("1"),
+            "…and took nothing else with it"
+        );
+
+        let reborn = s.add_account("b@example.com", None).unwrap();
+        assert_eq!(reborn, doomed, "SQLite really does hand the id back");
+        assert_eq!(
+            s.get_setting(&format!("notify_account_{reborn}")).unwrap(),
+            None,
+            "a new account starts with a clean slate, not the dead one's silence"
+        );
+    }
+
+    #[test]
+    fn reading_a_message_elsewhere_settles_the_debt_and_the_notification_is_scoped_to_its_folder() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let other = s.upsert_folder(acc, "Work").unwrap();
+        let new = |uid: i64| NewMessage {
+            uid: Some(uid),
+            owed_notification: true,
+            seen: false,
+            ..Default::default()
+        };
+        let id = s.upsert_message(acc, inbox, &new(1)).unwrap();
+        s.upsert_message(acc, other, &new(2)).unwrap();
+
+        assert_eq!(s.pending_notifications(inbox, 10).unwrap().len(), 1);
+        assert_eq!(
+            s.pending_notifications(other, 10).unwrap().len(),
+            1,
+            "each folder is asked separately — the scheduler only asks about the inbox"
+        );
+
+        // Read it in the app before the sweep gets to it: it isn't news any more, and no notification
+        // should arrive for a message the user is already looking at.
+        s.set_seen(id, true).unwrap();
+        assert!(s.pending_notifications(inbox, 10).unwrap().is_empty());
     }
 
     #[test]

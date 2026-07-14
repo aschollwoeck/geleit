@@ -11,10 +11,16 @@
 //! live in [`crate::schedule`], where they are unit-tested. This file is the glue that acts on them.
 
 use crate::ipc::AppState;
+use crate::notify::{self, QuietHours, Verdict, COLLAPSE_AT};
 use crate::schedule::{backoff, should_try, sweep_verdict};
 use std::collections::HashMap;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
+
+/// How many messages we read to build the notification's *text*. Only the senders' names come from
+/// these; the **count** is asked of the store, because a mailbox back from a week away needs a true
+/// number far more than it needs every sender read out.
+const NOTIFY_SAMPLE: i64 = 10;
 
 /// Wait before the *first* sweep, so we don't fight the app's own boot: the UI is already refreshing
 /// the account it opens on, and a cold start is the one moment latency is visible (P3).
@@ -109,6 +115,10 @@ async fn sweep(
             Ok(outcome) => {
                 account_failures.remove(account_id); // recovered
                 news += outcome.worth_announcing().len();
+                // Tell the user — from the **store**, not from this sync's diff. A message the backfill
+                // swept up, or one that arrived while notifications were off or the user was asleep, is
+                // owed a notification just the same, and only the store remembers that (migration 17).
+                announce(&state, *account_id).await;
             }
             Err(_) => {
                 failed += 1;
@@ -119,4 +129,194 @@ async fn sweep(
     // Judge the sweep on what it actually *tried* — an account we deliberately skipped isn't a
     // failure, and shouldn't drag the whole schedule into backoff.
     sweep_verdict(news, failed, tried)
+}
+
+/// Tell the user about the mail this account is owed a notification for.
+///
+/// The decisions are pure (`notify.rs`); this is the glue that reads the settings, asks the store what
+/// is owed, and — **only after the notification is actually raised** — records that the debt is
+/// settled. That order matters: a crash between the two costs a repeated notification, and the other
+/// order costs a silently swallowed one. Only one of those loses mail.
+pub(crate) async fn announce(state: &AppState, account_id: i64) {
+    // How many are really owed — and the newest of them. The COUNT comes from the store, never from
+    // the handful of messages we sample for the senders' names: telling the user "50 new messages"
+    // when 300 arrived, and then telling them "50 new messages" again five minutes later about older
+    // mail, is exactly the storm collapsing exists to prevent.
+    let Ok((total, Some(max_id))) = crate::ipc::pending_summary(state, account_id).await else {
+        return; // nothing owed, or the store is busy — the debt survives either way
+    };
+    let Ok(sample) = crate::ipc::pending_notifications(state, account_id, NOTIFY_SAMPLE).await
+    else {
+        return;
+    };
+
+    let enabled = crate::ipc::bool_setting(state, "notify", true).await;
+    let per_account = crate::ipc::bool_setting(state, &notify::account_key(account_id), true).await;
+    let quiet = crate::ipc::string_setting(state, "quiet_hours")
+        .await
+        .and_then(|raw| QuietHours::parse(&raw))
+        .is_some_and(|q| q.contains(local_minutes()));
+
+    match notify::verdict(enabled, per_account, quiet) {
+        // Quiet hours: say nothing, and keep owing it. The mail is still there in the morning, and so
+        // is the notification — as one collapsed line, not a night's worth of popups.
+        Verdict::Hold => {}
+        // Switched off: the mail is not owed at all. Keeping the debt would mean that turning
+        // notifications on greets the user with every message that arrived while they were off.
+        Verdict::Drop => {
+            let _ = crate::ipc::settle(state, account_id, max_id).await;
+        }
+        Verdict::Announce => {
+            let Some(n) = notify::summarize(&sample, total as usize, COLLAPSE_AT) else {
+                return;
+            };
+            // On a worker: a D-Bus round trip is blocking work (connect, authenticate, call), and this
+            // is an async task on Tauri's runtime. It is also the one call here with no timeout — a
+            // notification daemon that is slow to start would otherwise stall a runtime thread.
+            let notifier = state.notifier.clone();
+            let shown = tauri::async_runtime::spawn_blocking(move || notifier.notify(&n))
+                .await
+                .is_ok_and(|r| r.is_ok());
+            // A desktop with no notification service (a session that hasn't finished starting, say) is
+            // not an error the user needs to hear about while reading their mail — but the debt stays
+            // owed, so the mail is not lost either: the next sweep tries again.
+            if shown {
+                // Settled only now, and only up to the message we actually told them about: mail that
+                // arrived while the notification was being raised has a higher id and keeps its debt.
+                let _ = crate::ipc::settle(state, account_id, max_id).await;
+            }
+        }
+    }
+}
+
+/// The wall-clock time of day, in minutes since midnight, in the **user's** timezone — which is the
+/// only one "quiet hours" can possibly mean.
+fn local_minutes() -> u16 {
+    use chrono::Timelike;
+    let now = chrono::Local::now();
+    (now.hour() * 60 + now.minute()) as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::announce;
+    use crate::ipc::AppState;
+    use geleit_platform::notify::FakeNotifier;
+    use geleit_platform::secret::InMemorySecretStore;
+    use geleit_store::NewMessage;
+    use std::sync::Arc;
+
+    /// A mailbox on disk with one unread, unannounced message in its inbox, and the `AppState` that
+    /// reads it. (`announce` needs no `AppHandle`, which is exactly why it is separated from `sweep`.)
+    fn mailbox(notifier: Arc<FakeNotifier>) -> (AppState, tempfile::TempDir, i64) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mail.db");
+        let db = path.to_string_lossy().into_owned();
+        // Seeded through the app's own door: the mailbox is encrypted at rest, and the key lives in the
+        // secret store — so the seed and the AppState must share one.
+        let secrets: Arc<dyn geleit_platform::secret::SecretStore> =
+            Arc::new(InMemorySecretStore::new());
+        {
+            let store = geleit_engine::localstore::open_store(&db, secrets.as_ref()).expect("open");
+            let acc = store.add_account("a@example.com", None).unwrap();
+            let inbox = store.upsert_folder(acc, "INBOX").unwrap();
+            store
+                .upsert_message(
+                    acc,
+                    inbox,
+                    &NewMessage {
+                        uid: Some(1),
+                        from_name: Some("Alice".to_owned()),
+                        subject: Some("Lunch?".to_owned()),
+                        owed_notification: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let state = AppState::with_notifier(
+            db,
+            secrets,
+            notifier as Arc<dyn geleit_platform::notify::Notifier>,
+        );
+        (state, dir, 1)
+    }
+
+    async fn still_owed(state: &AppState, account_id: i64) -> i64 {
+        crate::ipc::pending_summary(state, account_id)
+            .await
+            .expect("summary")
+            .0
+    }
+
+    #[tokio::test]
+    async fn new_mail_is_announced_once_and_then_never_again() {
+        let fake = Arc::new(FakeNotifier::new());
+        let (state, _dir, acc) = mailbox(fake.clone());
+
+        announce(&state, acc).await;
+        let sent = fake.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].summary, "Alice");
+        assert_eq!(sent[0].body, "Lunch?");
+        assert_eq!(still_owed(&state, acc).await, 0, "the debt is settled");
+
+        // A second sweep must not tell them again — the whole point of the durable fact.
+        announce(&state, acc).await;
+        assert_eq!(fake.sent().len(), 1, "told once, never again");
+    }
+
+    #[tokio::test]
+    async fn a_notification_the_desktop_refused_is_still_owed() {
+        // A session whose notification service hasn't started yet (the first sweep is 30s after boot).
+        // Settling the debt here would lose the message: the user is never told, and never can be.
+        let fake = Arc::new(FakeNotifier::failing());
+        let (state, _dir, acc) = mailbox(fake.clone());
+
+        announce(&state, acc).await;
+        assert!(fake.sent().is_empty());
+        assert_eq!(
+            still_owed(&state, acc).await,
+            1,
+            "the desktop wouldn't show it, so the user hasn't been told — try again next sweep"
+        );
+    }
+
+    #[tokio::test]
+    async fn quiet_hours_keep_the_debt_and_switching_notifications_off_settles_it() {
+        // The two verdicts are wired to opposite store effects, and swapping them would be invisible to
+        // every other test: quiet hours would *lose* the night's mail, and switching notifications back
+        // on would greet the user with everything they missed.
+        let fake = Arc::new(FakeNotifier::new());
+        let (state, _dir, acc) = mailbox(fake.clone());
+
+        // Quiet hours, all day: silent — but the mail is still owed, so it is announced in the morning.
+        crate::ipc::set_setting_for_test(&state, "quiet_hours", "00:00-23:59").await;
+        announce(&state, acc).await;
+        assert!(fake.sent().is_empty(), "quiet hours are quiet");
+        assert_eq!(
+            still_owed(&state, acc).await,
+            1,
+            "…but the mail is still owed"
+        );
+
+        // Switched off: silent, and the debt goes with it — otherwise turning notifications back on
+        // greets the user with every message that arrived while they were off.
+        crate::ipc::set_setting_for_test(&state, "quiet_hours", "").await;
+        crate::ipc::set_setting_for_test(&state, "notify", "0").await;
+        announce(&state, acc).await;
+        assert!(fake.sent().is_empty());
+        assert_eq!(still_owed(&state, acc).await, 0, "not owed at all");
+    }
+
+    #[tokio::test]
+    async fn an_account_the_user_muted_is_silent_while_the_others_are_not() {
+        let fake = Arc::new(FakeNotifier::new());
+        let (state, _dir, acc) = mailbox(fake.clone());
+        crate::ipc::set_setting_for_test(&state, &crate::notify::account_key(acc), "0").await;
+
+        announce(&state, acc).await;
+        assert!(fake.sent().is_empty(), "this mailbox was muted");
+        assert_eq!(still_owed(&state, acc).await, 0);
+    }
 }
