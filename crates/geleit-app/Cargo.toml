@@ -21,6 +21,9 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 # navigation guard: parse + classify URLs (already in the tree via tauri)
 url = "2"
+# the background sync scheduler: a per-folder async lock + an interval timer. Already in the tree
+# (tauri's async runtime IS tokio, and the engine uses it) — these features add no new crate.
+tokio = { version = "1", default-features = false, features = ["sync", "time"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

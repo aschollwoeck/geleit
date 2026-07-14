@@ -26,6 +26,10 @@ exclude_globs = [
     "**/geleit-app/src/ipc.rs",
     # main.rs: window/protocol/handler wiring — no logic to mutate.
     "**/geleit-app/src/main.rs",
+    # scheduler.rs: the background-sync loop — a tokio task needing a live AppHandle, an IMAP server
+    # and a clock; nothing here can run under mutants. Its DECISIONS (backoff, sweep verdict, the
+    # per-account retry cadence) are split into `schedule.rs`, which STAYS mutation-tested.
+    "**/geleit-app/src/scheduler.rs",
     # mailproto::handle: protocol glue needing a live Tauri UriSchemeContext; its pure helpers
     # (csp/placeholder/html_response) are unit-tested.
     "**/geleit-app/src/mailproto.rs",

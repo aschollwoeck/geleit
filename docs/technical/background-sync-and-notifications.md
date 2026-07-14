@@ -98,6 +98,63 @@ actually act on them:
   durable fact per message rather than a property of one sync's diff (kills the backfill window). Both
   are noted here so neither is quietly forgotten.
 
+---
+
+## The scheduler (slice 2)
+
+`scheduler.rs`, spawned in `main`'s `setup`. Every 5 minutes it sweeps every account's INBOX. It lives
+in the **host**, not the frontend, for two reasons that both matter: a webview **throttles or freezes
+timers in a hidden or occluded window** — which is precisely the situation this feature exists for —
+and the frontend only knows the account you are *looking at*, while the host can just ask the store for
+all of them.
+
+- **Failure is ordinary and silent.** The laptop sleeps; the wifi drops. A failed sweep never raises a
+  toast — an error the user didn't ask for, about a sync they didn't start, is noise. It backs off
+  instead: 5m → 10m → 20m → 30m (cap), reset by one success. `backoff()` is pure and unit-tested.
+- **One bad account doesn't stop the others.** A sweep is only a failure if *every* account failed
+  (which almost certainly means it's us — we're offline), so a single dead password can't push the
+  whole schedule into backoff.
+- **A failing account is tried progressively less often** (every 2nd, 4th, then 8th sweep — capped, so
+  a fixed password recovers on its own). "Unreachable" and "wrong password" look identical from here
+  but behave very differently, and a client that retries a revoked login every five minutes for days,
+  unattended, is how a provider decides to lock the account or block the IP.
+- **A successful Refresh wakes it.** `tokio::time::sleep` is monotonic — a suspended laptop doesn't
+  burn the wait down while it's asleep — and a machine that was offline overnight has backed off to the
+  half-hour cap. So mail would be up to 30 minutes stale exactly when the user sits down. A
+  user-pressed Refresh that *succeeds* is the strongest evidence we have that the network is back, so
+  it pokes the scheduler, which resets and sweeps at once.
+- **`GELEIT_SYNC_SECS=<n>`** (debug builds only) replaces the interval **and the backoff**, because a
+  5-minute poll cannot be watched by hand. That's how this was verified end to end: run the app
+  against the local Dovecot, deliver an unseen message from *outside* the app, and watch it appear in
+  the list — untouched. (It bypasses backoff, so backoff itself is exactly the path the dev seam
+  can't exercise — which is why it's unit-tested instead.)
+
+The decisions — `backoff`, `sweep_verdict`, `should_try` — are **pure and unit-tested** in
+`schedule.rs`; `scheduler.rs` is the glue that acts on them, and is excluded from mutants (it needs a
+live `AppHandle`, an IMAP server and a clock).
+
+### The sync lock — the care-point of this milestone
+
+**Every** sync — the scheduler's and a user-pressed Refresh alike — goes through
+`ipc::sync_folder_once`, which takes a per-`(account, folder)` async lock (`AppState::sync_lock`).
+
+Without it, both paths would compute "what's new" from the same local snapshot, both would fetch the
+same messages, and (once slice 3 lands) the user would get **two notifications for one email**. Note
+the UI's `refreshing` flag could never have done this job: it's per-window UI state, and the engine's
+workers don't even share `AppState`'s store connection.
+
+It **waits** rather than skips: a Refresh pressed during a background sync queues behind it and then
+syncs again — finding nothing new, because the first sync already stored it. That's the right shape.
+The user's click still ends with fresh mail on screen; it just doesn't race.
+
+### Arrival, in the UI
+
+The scheduler emits `mail-arrived` only when something is actually worth announcing. The UI re-lists
+**quietly** — no toast, no scroll jump: the message simply appears with its unread dot, the way mail
+should. The re-list goes through the same `request` epoch as every other one, so it cannot clobber a
+search the user is mid-way through typing or a folder they just switched to. It skips entirely while a
+search is showing results, or while the drafts pane is open. An open message stays open.
+
 ## Deliberately not IMAP IDLE (yet)
 
 `async-imap` does support IDLE. But it means a long-lived TLS connection **per account per folder**,

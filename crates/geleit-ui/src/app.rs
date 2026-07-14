@@ -299,6 +299,47 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    // The background scheduler found new mail (NOTIF-1). Slip it into the list quietly — no toast, no
+    // jump: it just appears, with its unread dot, the way mail should. The re-list goes through the
+    // `request` epoch like every other one, so it can never clobber a search the user is mid-way
+    // through typing or a folder they just switched to. A message that's open stays open.
+    api::on_mail_arrived(move |_n| {
+        let q = query.get_untracked();
+        if !q.trim().is_empty() {
+            return; // they're searching — don't yank the results out from under them
+        }
+        if drafts_open.get_untracked() {
+            return; // the drafts pane isn't a mail list
+        }
+        let epoch = request.get_untracked() + 1;
+        request.set(epoch);
+        let is_unified = unified.get_untracked();
+        let fid = selected_folder.get_untracked();
+        let aid = account.get_untracked();
+        leptos::task::spawn_local(async move {
+            let result = if is_unified {
+                api::list_all_messages(PAGE).await
+            } else if let Some(fid) = fid {
+                api::list_messages(fid, PAGE).await
+            } else {
+                return;
+            };
+            if let Ok(m) = result {
+                if request.get_untracked() == epoch {
+                    messages.set(m);
+                }
+            }
+            // Keep the rail's unread counts honest.
+            if let Some(aid) = aid {
+                if let Ok(fs) = api::list_folders(aid).await {
+                    if account.get_untracked() == Some(aid) {
+                        folders.set(fs);
+                    }
+                }
+            }
+        });
+    });
+
     // Boot: accounts → the first account's folders + messages; load persisted prefs.
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {

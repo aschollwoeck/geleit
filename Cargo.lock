@@ -1581,6 +1581,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tempfile",
+ "tokio",
  "url",
 ]
 
