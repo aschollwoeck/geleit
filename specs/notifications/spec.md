@@ -15,8 +15,8 @@ means anything.
 ## The milestone, in four slices
 
 1. **New mail is knowable** ✅ — engine + store; no user-visible change.
-2. **The host syncs on its own** (this slice) — the scheduler + the collision guard.
-3. **Notify** — NOTIF-1 + NOTIF-2.
+2. **The host syncs on its own** ✅ — the scheduler + the collision guard.
+3. **Notify** ✅ (this slice) — NOTIF-1 + NOTIF-2.
 4. **Badge** — NOTIF-3 (unread count in the window title).
 
 ---
@@ -105,3 +105,51 @@ ends with fresh mail on screen; it just queues.
 `mail-arrived` fires only when something is worth announcing. The UI re-lists **quietly** — no toast,
 no jump — through the same `request` epoch as every other re-list, so it can't clobber a search being
 typed or a folder just switched to. It skips entirely while a search is open.
+
+
+---
+
+## Slice 3 — Telling the user
+
+The **Settings → Notifications** toggle has, until now, persisted a `notify` setting that **nothing
+read**. It reads now.
+
+### Being told is a fact about the message, not about a sync
+
+Whether mail was news used to be a diff against the store, computed by one sync — so whoever wrote the
+message first ate the signal. A message that arrived while the **backfill** thread was running got
+stored by the backfill, was therefore no longer "absent from our store", and **no later sync could ever
+call it new**: it sat in the inbox, unread and unannounced, forever.
+
+So `message.notified` (migration 17) is a durable debt. Every writer records it: a folder's first sync
+owes nothing (a first look is not news), the backfill owes nothing for the **old** mail it exists to
+fetch — but everything above the newest UID we already held is still owed, which is exactly the message
+the old signal lost. A message already `\Seen` on the server was read elsewhere and is never news, and
+reading it here settles the debt before the notification is ever raised.
+
+The debt is settled **after** the notification is raised, never before: a crash between the two costs a
+repeated notification, and the other order costs a swallowed one. Only one of those loses mail.
+
+### Calm by construction (P3)
+
+- **Several messages are one notification.** "3 new messages — From Alice, Bob, Cara"; above the
+  threshold, the count *is* the message. A popup per message is how a mail client teaches you to switch
+  its notifications off.
+- **Quiet hours** hold the debt rather than dropping it: the mail is still there in the morning, and so
+  is one notification saying so. Switching notifications **off**, by contrast, drops the debt — else
+  turning them back on would greet the user with everything they missed.
+- **Per account**, because one noisy mailbox shouldn't cost the notifications of the other.
+
+### Everything on a notification was written by a stranger
+
+The sender chose their own display name; the subject is theirs too. A newline in a display name lets
+them forge what looks like a second line of the popup ("Alice Baker\nYour password has expired"), and
+the desktop renders it faithfully. So every field is stripped of control characters, has its whitespace
+collapsed, and is clamped — a subject long enough to push the real content off the screen is not an
+accident either.
+
+### The desktop
+
+`org.freedesktop.Notifications` over D-Bus, through **zbus** — already in the tree (the secret-service
+keyring is built on it), so this costs **no new dependency**. A [`Notifier`] trait keeps D-Bus out of
+the app and lets the tests run without a desktop, exactly as `SecretStore` does for the keychain.

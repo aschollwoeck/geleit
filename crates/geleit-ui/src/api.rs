@@ -606,6 +606,35 @@ pub async fn remove_account(account_id: i64) -> Result<bool, String> {
 }
 
 /// A persisted boolean preference, or `None` if never set.
+pub async fn get_setting(key: &str) -> Result<Option<String>, String> {
+    call(
+        "get_setting",
+        &KeyArg {
+            key: key.to_owned(),
+        },
+    )
+    .await
+}
+
+/// Save a free-text setting (quiet hours).
+pub async fn set_setting(key: &str, value: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args {
+        key: String,
+        value: String,
+    }
+    call(
+        "set_setting",
+        &Args {
+            key: key.to_owned(),
+            value: value.to_owned(),
+        },
+    )
+    .await
+}
+
+/// A boolean setting (`None` = never set; the caller supplies the default).
 pub async fn get_bool_setting(key: &str) -> Result<Option<bool>, String> {
     call(
         "get_bool_setting",

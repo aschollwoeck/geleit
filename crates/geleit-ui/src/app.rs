@@ -268,7 +268,12 @@ pub fn App() -> impl IntoView {
     let block_remote = RwSignal::new(true);
     let sync_drafts = RwSignal::new(false); // opt-in: mirror drafts to the server (default OFF, P2)
     let mark_read = RwSignal::new(true);
-    let notify = RwSignal::new(false);
+    let notify = RwSignal::new(true); // a mail client that never tells you about mail is a strange one
+    let quiet_on = RwSignal::new(false); // quiet hours: silent, but the mail is still owed a mention
+    let quiet_bad = RwSignal::new(false); // a window the host would throw away — tell them, don't store it
+    let quiet_from = RwSignal::new("22:00".to_owned());
+    let quiet_to = RwSignal::new("07:00".to_owned());
+    let notify_accounts = RwSignal::new(std::collections::HashMap::<i64, bool>::new());
     let sig_text = RwSignal::new(String::new());
     // ---- wizard ----
     let wiz = RwSignal::new(Option::<AccountForm>::None); // Some while open (manual step)
@@ -394,8 +399,16 @@ pub fn App() -> impl IntoView {
                     .await
                     .ok()
                     .flatten()
-                    .unwrap_or(false),
+                    .unwrap_or(true), // on unless the user has said otherwise
             );
+            // Quiet hours are one string ("22:00-07:00"); unset or empty = off.
+            if let Ok(Some(raw)) = api::get_setting("quiet_hours").await {
+                if let Some((from, to)) = raw.split_once('-') {
+                    quiet_on.set(true);
+                    quiet_from.set(from.trim().to_owned());
+                    quiet_to.set(to.trim().to_owned());
+                }
+            }
             if let Ok(Some(t)) = api::theme().await {
                 dark.set(t == "dark");
                 apply_theme(&t);
@@ -922,6 +935,66 @@ pub fn App() -> impl IntoView {
         notify.set(next);
         leptos::task::spawn_local(async move {
             let _ = api::set_bool_setting("notify", next).await;
+        });
+    };
+    // Quiet hours are written as one string, and cleared to "" when switched off. The host treats
+    // anything it can't parse as "no quiet hours" — never as "silent forever".
+    let save_quiet = move || {
+        let (from, to) = (quiet_from.get_untracked(), quiet_to.get_untracked());
+        // A zero-length window is not a window: the host discards anything it can't parse as "no quiet
+        // hours" (never "silent forever"), and the toggle would go on reading ON. The user asked for
+        // silence and would have got the opposite, with no feedback. Say so instead.
+        let bad = quiet_on.get_untracked() && (from.trim().is_empty() || from == to);
+        quiet_bad.set(bad);
+        if bad {
+            return;
+        }
+        let value = if quiet_on.get_untracked() {
+            format!("{from}-{to}")
+        } else {
+            String::new()
+        };
+        leptos::task::spawn_local(async move {
+            let _ = api::set_setting("quiet_hours", &value).await;
+        });
+    };
+    let toggle_quiet = move || {
+        quiet_on.update(|q| *q = !*q);
+        save_quiet();
+    };
+    // Per account, so one noisy mailbox doesn't cost the user the notifications of the other.
+    let load_account_notify = move || {
+        leptos::task::spawn_local(async move {
+            let mut map = std::collections::HashMap::new();
+            for a in accounts.get_untracked() {
+                let on = api::get_bool_setting(&format!("notify_account_{}", a.id))
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(true);
+                map.insert(a.id, on);
+            }
+            notify_accounts.set(map);
+        });
+    };
+    // Whenever the settings window opens, read the per-account switches back (an account may have been
+    // added since the last time).
+    Effect::new(move |_| {
+        if settings_open.get() {
+            load_account_notify();
+        }
+    });
+    let toggle_account_notify = move |id: i64| {
+        let next = !notify_accounts
+            .get_untracked()
+            .get(&id)
+            .copied()
+            .unwrap_or(true);
+        notify_accounts.update(|m| {
+            m.insert(id, next);
+        });
+        leptos::task::spawn_local(async move {
+            let _ = api::set_bool_setting(&format!("notify_account_{id}"), next).await;
         });
     };
     let save_signature = move |text: String| {
@@ -2393,9 +2466,52 @@ pub fn App() -> impl IntoView {
                                 // Notifications
                                 <Show when=move || settings_tab.get() == "notifications">
                                     <div class="setting-row">
-                                        <span class="setting-name">"Notify me about new mail"</span>
+                                        <div>
+                                            <div class="setting-name">"Notify me about new mail"</div>
+                                            <div class="setting-desc">"A quiet desktop notification when mail arrives — several at once are shown as one."</div>
+                                        </div>
                                         <div class="toggle" class:on=move || notify.get() on:click=move |_| toggle_notify()><span class="knob"></span></div>
                                     </div>
+                                    <Show when=move || notify.get()>
+                                        <div class="setting-row">
+                                            <div>
+                                                <div class="setting-name">"Quiet hours"</div>
+                                                <div class="setting-desc">"Stay silent overnight. Mail that arrives is still there in the morning — and so is one notification telling you about it."</div>
+                                            </div>
+                                            <div class="toggle" class:on=move || quiet_on.get() on:click=move |_| toggle_quiet()><span class="knob"></span></div>
+                                        </div>
+                                        <Show when=move || quiet_on.get()>
+                                            <div class="setting-row quiet-row">
+                                                <span class="setting-name">"From"</span>
+                                                <input type="time" class="folder-input quiet-time" prop:value=move || quiet_from.get()
+                                                    on:change=move |e| { quiet_from.set(event_target_value(&e)); save_quiet(); }/>
+                                                <span class="setting-name">"until"</span>
+                                                <input type="time" class="folder-input quiet-time" prop:value=move || quiet_to.get()
+                                                    on:change=move |e| { quiet_to.set(event_target_value(&e)); save_quiet(); }/>
+                                            </div>
+                                            <Show when=move || quiet_bad.get()>
+                                                <div class="setting-warn">"Choose two different times — otherwise quiet hours do nothing."</div>
+                                            </Show>
+                                        </Show>
+                                        <Show when=move || { accounts.get().len() > 1 || notify_accounts.get().values().any(|on| !on) }>
+                                            <div class="setting-sub">"Which accounts"</div>
+                                            <For each=move || accounts.get() key=|a| a.id let:a>
+                                                {
+                                                    let (id, email) = (a.id, a.email.clone());
+                                                    view! {
+                                                        <div class="setting-row">
+                                                            <span class="setting-name">{email}</span>
+                                                            <div class="toggle"
+                                                                class:on=move || notify_accounts.get().get(&id).copied().unwrap_or(true)
+                                                                on:click=move |_| toggle_account_notify(id)>
+                                                                <span class="knob"></span>
+                                                            </div>
+                                                        </div>
+                                                    }
+                                                }
+                                            </For>
+                                        </Show>
+                                    </Show>
                                 </Show>
                             </div>
                         </div>

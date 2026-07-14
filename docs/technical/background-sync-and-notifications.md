@@ -162,3 +162,87 @@ re-IDLE every ≤29 minutes (RFC 2177), reconnect/backoff on drop, and it reshap
 which today builds a fresh runtime and a fresh session per call. It also doesn't remove polling
 (servers that don't advertise IDLE; reconnects). Polling first; IDLE plugs into this same
 "new mail detected" seam later.
+
+
+---
+
+## Notifications (slice 3)
+
+### The debt, not the diff
+
+`sync::notifiable` answered "is this news?" from **one sync's diff** against the store. That signal is
+consumed by whichever writer stores the message first — and `ipc::refresh` runs a *detached backfill*
+that stores messages too. Mail arriving in that window was swept up by the backfill, and no later sync
+could call it new again: it sat in the inbox, unread and **never announced**. The slice-1 doc flagged
+this and left it open; this closes it.
+
+`message.notified` (migration 17) makes being told a durable fact:
+
+| writer | owes a notification? |
+| --- | --- |
+| a folder's **first** sync | no — a first look is not news, or a new account notifies once per message in its inbox |
+| a primed sync's new UIDs | yes, if unseen |
+| the **backfill**, for old mail | no — that is what it went to fetch |
+| the **backfill**, above the newest UID we already held | **yes** — that is the message the old signal lost |
+| any message already `\Seen` on the server | no — it was read elsewhere |
+
+`sync::News` is that table — **pure, and in `sync.rs` rather than `imap.rs`**, because `imap.rs` is
+excluded from mutation testing: `News::All => false` (notifications never fire at all) and
+`News::None => true` (a new account notifies once per message in its inbox) are mutants that would have
+survived in silence. The debt is then queried from the store, not from the sync's return value — so a
+message that arrived while notifications were off, or while the user was asleep, is still owed.
+
+**Settle after, never before.** The debt is settled only once `notifier.notify()` has returned. A crash
+in between costs a repeated notification; the other order costs a silently swallowed one. (`FakeNotifier
+::failing()` exists so that guarantee is actually testable — a desktop whose notification service hasn't
+started is the ordinary case 30 seconds after login.)
+
+**The count comes from the store, not from the sample.** We read a handful of messages to name the
+senders; the *number* is a `COUNT(*)`. Reporting the sample size would tell a user with 300 waiting that
+they have 10 — and then settle only those 10, so the next sweep raises another "10 new messages" five
+minutes later, about older mail. That is the storm collapsing exists to prevent, rebuilt out of the fix
+for it. Settling is bounded by the id we told them about (`mark_notified_through`), so mail that lands
+*while the notification is on screen* keeps its own debt.
+
+**A UIDVALIDITY reset must not settle a debt.** The reset clears the folder and re-fetches it as
+unprimed (announcing nothing — otherwise the whole inbox pops up), which would silently write off mail
+we owed but hadn't raised yet. The owed `Message-ID`s are carried across the rebuild and re-owed. The
+server renumbering its mailbox is not the user being told about their mail.
+
+**Refresh settles what it fetched.** The user asked for that mail and is looking at the list it landed
+in; a popup about it two minutes later is the app interrupting them about something already on their
+screen. (The old diff-based signal *couldn't* do this — Refresh's own diff consumed it. Making "told" a
+durable fact is what created the possibility of telling someone twice.)
+
+### The decisions are pure
+
+`notify.rs`: `summarize` (one message → sender + subject; several → a count and the names; above the
+threshold → the count *is* the message), `clean` (strip control characters, collapse whitespace, clamp
+— everything on a notification was written by a stranger, and a newline in a display name forges a
+second line of the popup), `QuietHours::{parse, contains}` (wrapping midnight, which a naive
+`start <= now < end` gets exactly backwards — silent all day, loud all night), and `verdict`:
+
+- **Announce** — show it, then settle the debt.
+- **Hold** (quiet hours) — say nothing, **keep** the debt. The user learns in the morning, once.
+- **Drop** (switched off) — say nothing, settle it. Otherwise switching notifications on greets the
+  user with every message that arrived while they were off.
+
+A malformed quiet-hours setting parses to `None` — "no quiet hours", never "silent forever".
+
+### The desktop, and one dependency trap
+
+`org.freedesktop.Notifications` over D-Bus via **zbus**, which is already in the tree (the
+secret-service keyring backend is built on it) — so notifications add **no new dependency**. A
+`Notifier` trait keeps D-Bus out of the app and the desktop out of the tests, exactly as `SecretStore`
+does for the keychain.
+
+The trap, found the hard way: enabling zbus's `tokio` feature here switched the **keyring's** zbus onto
+tokio as well (cargo unifies features across the graph), and the engine's `block_on` then panicked with
+*"cannot start a runtime from within a runtime"* the first time an account was added. A dependency's
+features are not local to the crate that declares them.
+
+The D-Bus call itself runs on `spawn_blocking`: it is a synchronous connect + authenticate + call with
+no timeout, and the scheduler is an async task on Tauri's runtime. A notification daemon that is slow to
+start would otherwise stall a runtime worker — and if a future dependency bump ever *did* pull in
+`zbus/tokio`, the panic would unwind the scheduler's loop and silently stop background sync for every
+account, for the rest of the session. Blocking work belongs on a blocking thread.

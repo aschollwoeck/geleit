@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use crate::sync::Arrived;
+use crate::sync::{news_for_backfill, owed, Arrived, News};
 use async_imap::types::NameAttribute;
 use futures::StreamExt;
 use geleit_core::FolderRole;
@@ -213,6 +213,9 @@ fn fetch_to_new_message(f: &async_imap::types::Fetch) -> NewMessage {
             .any(|fl| matches!(fl, async_imap::types::Flag::Flagged)),
         has_attachments: false,
         snippet: None,
+        // The caller decides — see `sync::owed` — because only it knows whether this folder had ever
+        // been looked at, and whether this UID is new mail or the old mail a backfill exists to fetch.
+        owed_notification: false,
     }
 }
 
@@ -593,9 +596,16 @@ pub async fn sync_folder_incremental(
     // UIDVALIDITY: if it changed since last sync, our stored UIDs are meaningless — drop them. That
     // also makes every message look new again, so the folder must be primed afresh.
     let mut uidvalidity_changed = false;
+    // A UIDVALIDITY reset clears the folder and re-fetches it, and the re-fetch announces nothing (the
+    // folder is unprimed again — otherwise every message in the inbox would pop up). But a message we
+    // owed a notification for and hadn't raised yet — held through quiet hours, say — would be silently
+    // written off by that rebuild. The server invalidating its UIDs is not the user being told, so the
+    // debt is carried across, by Message-ID.
+    let mut owed_across_reset: Vec<String> = Vec::new();
     if let Some(validity) = mailbox.uid_validity {
         let validity = i64::from(validity);
         if matches!(store.folder_uidvalidity(folder_id)?, Some(prev) if prev != validity) {
+            owed_across_reset = store.owed_message_ids(folder_id)?;
             store.clear_folder(folder_id)?;
             store.set_folder_primed(folder_id, false)?;
             uidvalidity_changed = true;
@@ -629,6 +639,9 @@ pub async fn sync_folder_incremental(
             account_id,
             folder_id,
             &uid_set(recent_new),
+            // An unprimed folder announces nothing: "absent from our store" only means "we have never
+            // looked", and a new account would otherwise notify once per message in its inbox.
+            if primed { News::All } else { News::None },
         )
         .await?;
     }
@@ -649,6 +662,12 @@ pub async fn sync_folder_incremental(
             &uid_set(&need_bodies),
         )
         .await;
+    }
+
+    // Mail we already owed the user, that the UIDVALIDITY rebuild has just re-fetched as though it
+    // were old: it is still owed. (Anything they read elsewhere in the meantime stays settled.)
+    if !owed_across_reset.is_empty() {
+        store.restore_owed(folder_id, &owed_across_reset)?;
     }
 
     // The folder has now completed a sync — from here on, "absent from our store" really does mean
@@ -689,10 +708,16 @@ pub async fn backfill_folder(
     missing.sort_unstable();
     missing.reverse(); // newest (highest UID) first
 
+    // The backfill exists to fetch **old** mail, and old mail is not news. But it can also sweep up a
+    // message that arrived while it was running — and that message would then be in our store, so no
+    // later sync would ever call it new. That is precisely the mail the old diff-based signal lost, so
+    // anything above the newest UID we already held is still owed a notification.
+    let news = news_for_backfill(&local);
+
     let mut total = 0usize;
     for chunk in missing.chunks(batch_size.max(1) as usize) {
         let set = uid_set(chunk);
-        fetch_envelopes_for(&mut session, store, account_id, folder_id, &set).await?;
+        fetch_envelopes_for(&mut session, store, account_id, folder_id, &set, news).await?;
         fetch_bodies_for(&mut session, store, account_id, folder_id, &set).await?;
         total += chunk.len();
         on_batch(total);
@@ -724,16 +749,21 @@ async fn fetch_envelopes_for(
     account_id: i64,
     folder_id: i64,
     uid_set: &str,
+    news: News,
 ) -> Result<Vec<Arrived>, ImapError> {
     let mut fetches = session
         .uid_fetch(uid_set, "(UID ENVELOPE FLAGS INTERNALDATE)")
         .await?;
     let mut arrived = Vec::new();
     while let Some(fetch) = fetches.next().await {
-        let msg = fetch_to_new_message(&fetch?);
+        let mut msg = fetch_to_new_message(&fetch?);
         let Some(uid) = msg.uid else {
             continue;
         };
+        // Whether we owe the user a notification is written **with the message**, so it survives
+        // whichever sync path happened to store it (migration 17). The decision itself is pure and
+        // lives in `sync::owed`.
+        msg.owed_notification = owed(news, uid as u32, msg.seen);
         // These UIDs came from the reconcile plan, so each one really is new to us. Record what a
         // notification would need before the envelope is consumed by the store.
         arrived.push(Arrived {
@@ -1452,6 +1482,125 @@ mod tests {
         }
         let _ = session.logout().await;
         out
+    }
+
+    /// The durable "we owe you a notification" fact (NOTIF-1), end to end against a real server —
+    /// including the case it exists for: **a message that arrives while the backfill is running**.
+    ///
+    /// The old signal was a diff against the store, so whichever writer stored the message first ate
+    /// it: the backfill stored the message, no later sync could call it new, and the mail sat in the
+    /// inbox unread and unannounced forever. Now the debt is written with the message, and the backfill
+    /// only writes off what is genuinely *old* — everything above the newest UID we already held is
+    /// still owed.
+    /// Needs Dovecot + `--features dangerous-tls`.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn mail_the_backfill_sweeps_up_is_still_owed_a_notification() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        // Its own mailbox: sibling tests append to the shared INBOX, and their mail would land in this
+        // test's counts.
+        let folder = format!("GeleitOwed{}", std::process::id());
+        let _ = delete_folder(&cfg, &secrets, &folder).await;
+        create_folder(&cfg, &secrets, &folder)
+            .await
+            .expect("create");
+        let raw = |subject: &str| {
+            format!("Subject: {subject}\r\nFrom: Alice <alice@example.com>\r\n\r\nBody.\r\n")
+        };
+
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("geleittest@localhost", None).unwrap();
+
+        // Two messages are already there when we first look — they are not news, however new they are
+        // to *us*.
+        for s in ["Old one", "Old two"] {
+            append_message(&cfg, &secrets, &folder, "()", raw(s).as_bytes())
+                .await
+                .expect("append");
+        }
+        sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("first sync");
+        let folder_id = store
+            .folders_for_account(acc)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.name == folder)
+            .unwrap()
+            .id;
+        assert!(
+            store
+                .pending_notifications(folder_id, 10)
+                .unwrap()
+                .is_empty(),
+            "the first sync of a folder announces nothing — it is a first look, not news"
+        );
+
+        // Now mail arrives, and it is the BACKFILL that stores it (the case that used to be lost).
+        append_message(&cfg, &secrets, &folder, "()", raw("New mail").as_bytes())
+            .await
+            .expect("append");
+        let mut batches = 0;
+        backfill_folder(&cfg, &secrets, &store, acc, &folder, 10, &mut |_| {
+            batches += 1
+        })
+        .await
+        .expect("backfill");
+
+        let owed = store.pending_notifications(folder_id, 10).unwrap();
+        assert_eq!(
+            owed.len(),
+            1,
+            "the backfill stored it — but it is still owed"
+        );
+        assert_eq!(owed[0].subject.as_deref(), Some("New mail"));
+        assert_eq!(owed[0].from_name.as_deref(), Some("Alice"));
+
+        // Telling the user settles it, once. A later sync must not resurrect the debt.
+        store.mark_notified(&[owed[0].id]).unwrap();
+        sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("re-sync");
+        assert!(
+            store
+                .pending_notifications(folder_id, 10)
+                .unwrap()
+                .is_empty(),
+            "told once, never again"
+        );
+
+        // …and a message that is already \Seen on the server was read elsewhere: never news.
+        append_message(
+            &cfg,
+            &secrets,
+            &folder,
+            "(\\Seen)",
+            raw("Read on my phone").as_bytes(),
+        )
+        .await
+        .expect("append seen");
+        sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("sync");
+        assert!(
+            store
+                .pending_notifications(folder_id, 10)
+                .unwrap()
+                .is_empty(),
+            "already read elsewhere — announcing it would be telling the user something they know"
+        );
+
+        let _ = delete_folder(&cfg, &secrets, &folder).await;
     }
 
     /// The server tells us what its folders are *for* — and we keep it (RFC 6154 SPECIAL-USE).

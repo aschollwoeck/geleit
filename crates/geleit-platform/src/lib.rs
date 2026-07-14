@@ -7,6 +7,8 @@
 //! never depend on UI code (constitution P4, ADR-0003).
 
 pub mod html;
+pub mod notify;
 pub mod oauth;
+pub mod os_notify;
 pub mod os_secret;
 pub mod secret;

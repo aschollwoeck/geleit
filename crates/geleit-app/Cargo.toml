@@ -25,6 +25,9 @@ url = "2"
 # the background sync scheduler: a per-folder async lock + an interval timer. Already in the tree
 # (tauri's async runtime IS tokio, and the engine uses it) — these features add no new crate.
 tokio = { version = "1", default-features = false, features = ["sync", "time"] }
+# The user's local time-of-day, for quiet hours. Already in the tree (tauri pulls it), and getting the
+# machine's UTC offset right is not something to hand-roll — it is a database, not a formula.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

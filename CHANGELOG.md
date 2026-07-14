@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Mail tells you it's here
+- **New-mail notifications.** GeleitMail now shows a quiet desktop notification when mail arrives —
+  the sender and the subject. The **Settings → Notifications** toggle finally does something: until now
+  it saved a setting that nothing read.
+- **Several messages at once are one notification** ("3 new messages — From Alice, Bob, Cara"), not a
+  stack of popups. **Quiet hours** keep it silent overnight and tell you once in the morning. With more
+  than one account, you can choose which ones you want to hear about.
+- Mail you've already read elsewhere is never announced, and **mail that arrived while GeleitMail was
+  catching up on older messages is no longer silently missed** — being told is now remembered per
+  message, rather than being a property of whichever sync happened to fetch it first.
+
 ### Drafts, in one place
 - **One Drafts.** The folder list showed "Drafts" twice — GeleitMail's own drafts and your provider's
   Drafts folder. Now there is one, and it holds both: the drafts you saved here *and* the ones you

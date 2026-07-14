@@ -59,6 +59,51 @@ pub fn notifiable(arrived: &[Arrived], primed: bool) -> Vec<&Arrived> {
     arrived.iter().filter(|a| !a.seen).collect()
 }
 
+/// Which of the messages a fetch brings back does the user still have to be told about (NOTIF-1)?
+///
+/// Every sync path fetches messages, and each knows something different about what it is fetching. A
+/// folder's **first** sync is looking at it for the first time — nothing there is news, however new it
+/// is to us. A **backfill** is deliberately fetching *old* mail — also not news — except that it can
+/// sweep up a message that arrived while it was running, and *that* message is exactly the one the old
+/// diff-based signal lost forever (it was in our store, so no later sync could call it new).
+///
+/// This is the writer's half of the durable "announced" fact (store migration 17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum News {
+    /// Nothing here is news: we have never looked in this folder.
+    None,
+    /// Everything fetched is news — a primed folder's genuinely new UIDs.
+    All,
+    /// Only what is above this UID. The backfill's rule.
+    Above(u32),
+}
+
+/// The backfill's verdict, from the UIDs we already hold: everything above the newest of them is news,
+/// and if we hold none, this is a first look and nothing is.
+#[must_use]
+pub fn news_for_backfill(local: &[u32]) -> News {
+    match local.iter().max() {
+        Some(&high) => News::Above(high),
+        None => News::None,
+    }
+}
+
+/// Do we owe the user a notification for this message?
+///
+/// News **and** unseen. A message already `\Seen` on the server was read somewhere else — announcing
+/// it would be telling the user something they already know.
+#[must_use]
+pub fn owed(news: News, uid: u32, seen: bool) -> bool {
+    if seen {
+        return false;
+    }
+    match news {
+        News::None => false,
+        News::All => true,
+        News::Above(high) => uid > high,
+    }
+}
+
 /// Reconcile local vs. server UIDs into a [`SyncPlan`]. Pure set difference, both directions — the
 /// output is **deduplicated** (set-derived) regardless of duplicates in the inputs, so a caller
 /// never fetches or deletes the same UID twice (P6). Order is unspecified; callers sort as needed.
@@ -73,6 +118,41 @@ pub(crate) fn reconcile(local: &[u32], server: &[u32]) -> SyncPlan {
 
 #[cfg(test)]
 mod tests {
+    use super::{news_for_backfill, owed, News};
+
+    #[test]
+    fn a_first_look_at_a_folder_is_not_news_but_a_message_above_the_newest_uid_we_held_is() {
+        // The backfill exists to fetch OLD mail — announcing that would notify the user about their own
+        // archive. But it can also sweep up a message that arrived while it was running, and that one
+        // is the whole reason the "announced" fact is durable: it is in our store now, so no later sync
+        // could ever call it new again.
+        let news = news_for_backfill(&[10, 40, 25]);
+        assert_eq!(news, News::Above(40));
+        assert!(owed(news, 41, false), "it landed while we were backfilling");
+        assert!(
+            !owed(news, 40, false),
+            "the old mail we went to fetch is not news"
+        );
+        assert!(!owed(news, 3, false));
+
+        // Nothing local yet: this is a first look at the folder, not news. (A new account would
+        // otherwise notify once per message in its inbox.)
+        assert_eq!(news_for_backfill(&[]), News::None);
+        assert!(!owed(News::None, 999, false));
+
+        // A primed folder's new UIDs are all news.
+        assert!(owed(News::All, 1, false));
+    }
+
+    #[test]
+    fn a_message_already_read_elsewhere_is_never_owed_a_notification() {
+        // Read on a phone, in webmail — the `\Seen` flag comes back with the envelope. Announcing it
+        // would be telling the user something they already know.
+        assert!(!owed(News::All, 7, true));
+        assert!(!owed(News::Above(1), 7, true));
+        assert!(!owed(News::None, 7, true));
+    }
+
     use super::{notifiable, reconcile, Arrived};
 
     fn msg(uid: u32, seen: bool) -> Arrived {

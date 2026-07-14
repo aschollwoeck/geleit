@@ -46,16 +46,34 @@ pub struct AppState {
     /// Poked when a user-pressed Refresh succeeds, to wake the background scheduler — see
     /// [`AppState::wake_sync`].
     wake_sync: Arc<tokio::sync::Notify>,
+    /// Where new-mail notifications go. Injected (like [`Self::secrets`]) so the tests never need a
+    /// desktop, and so the app never talks to D-Bus directly.
+    pub notifier: Arc<dyn geleit_platform::notify::Notifier>,
 }
 
 impl AppState {
     pub fn new(db_path: String, secrets: Arc<dyn SecretStore>) -> Self {
+        Self::with_notifier(
+            db_path,
+            secrets,
+            Arc::new(geleit_platform::os_notify::DesktopNotifier::new()),
+        )
+    }
+
+    /// The same, with the notifier chosen by the caller (tests use the fake — no desktop needed).
+    #[must_use]
+    pub fn with_notifier(
+        db_path: String,
+        secrets: Arc<dyn SecretStore>,
+        notifier: Arc<dyn geleit_platform::notify::Notifier>,
+    ) -> Self {
         Self {
             db_path,
             secrets,
             store: Arc::new(Mutex::new(None)),
             sync_locks: Arc::new(Mutex::new(HashMap::new())),
             wake_sync: Arc::new(tokio::sync::Notify::new()),
+            notifier,
         }
     }
 
@@ -212,6 +230,35 @@ pub async fn set_bool_setting(
     with_store(state.inner().clone(), move |store| {
         store
             .set_setting(&key, if value { "1" } else { "0" })
+            .map_err(|_| "Couldn't save your setting.".to_owned())
+    })
+    .await
+}
+
+/// A free-text setting (quiet hours, so far). Same k/v table as [`get_bool_setting`]; `None` = unset,
+/// and the frontend supplies the default.
+#[tauri::command]
+pub async fn get_setting(
+    state: tauri::State<'_, AppState>,
+    key: String,
+) -> Result<Option<String>, String> {
+    with_store(state.inner().clone(), move |store| {
+        store
+            .get_setting(&key)
+            .map_err(|_| "Couldn't read your settings.".to_owned())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_setting(
+    state: tauri::State<'_, AppState>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    with_store(state.inner().clone(), move |store| {
+        store
+            .set_setting(&key, &value)
             .map_err(|_| "Couldn't save your setting.".to_owned())
     })
     .await
@@ -1751,6 +1798,108 @@ fn pick_open_eml() -> Result<Option<Vec<u8>>, String> {
         .map_err(|_| "Couldn't read that file.".to_owned())
 }
 
+/// The messages this account still owes the user a notification for — its **INBOX** only. The
+/// scheduler sweeps nothing else, and mail a server-side rule filed straight into a folder is not what
+/// "new mail" means to a person.
+pub(crate) async fn pending_notifications(
+    state: &AppState,
+    account_id: i64,
+    limit: i64,
+) -> Result<Vec<geleit_store::PendingNotification>, String> {
+    with_store(state.clone(), move |store| {
+        let Some(inbox) = store
+            .folders_for_account(account_id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|f| f.name.eq_ignore_ascii_case("INBOX"))
+        else {
+            return Ok(Vec::new());
+        };
+        store
+            .pending_notifications(inbox.id, limit)
+            .map_err(|_| "Couldn't read your mailbox.".to_owned())
+    })
+    .await
+}
+
+/// How much this account's inbox owes, and the newest message it owes for.
+pub(crate) async fn pending_summary(
+    state: &AppState,
+    account_id: i64,
+) -> Result<(i64, Option<i64>), String> {
+    with_store(state.clone(), move |store| {
+        let Some(inbox) = inbox_of(store, account_id) else {
+            return Ok((0, None));
+        };
+        store
+            .pending_notification_summary(inbox)
+            .map_err(|_| "Couldn't read your mailbox.".to_owned())
+    })
+    .await
+}
+
+/// Settle the inbox's debt up to `max_id` — the user has been told (or has decided they don't want to
+/// be). Bounded by id so mail that arrived in the meantime keeps its own debt.
+pub(crate) async fn settle(state: &AppState, account_id: i64, max_id: i64) -> Result<(), String> {
+    with_store(state.clone(), move |store| {
+        let Some(inbox) = inbox_of(store, account_id) else {
+            return Ok(());
+        };
+        store
+            .mark_notified_through(inbox, max_id)
+            .map(|_| ())
+            .map_err(|_| "Couldn't update your mailbox.".to_owned())
+    })
+    .await
+}
+
+/// The account's INBOX folder id, or `None` if it has none yet.
+fn inbox_of(store: &Store, account_id: i64) -> Option<i64> {
+    store
+        .folders_for_account(account_id)
+        .ok()?
+        .into_iter()
+        .find(|f| f.name.eq_ignore_ascii_case("INBOX"))
+        .map(|f| f.id)
+}
+
+/// A boolean setting, read by the **host** (the scheduler) rather than the frontend. `default` is what
+/// an unset key means — notifications are on unless the user has turned them off.
+pub(crate) async fn bool_setting(state: &AppState, key: &str, default: bool) -> bool {
+    let key = key.to_owned();
+    with_store(state.clone(), move |store| {
+        Ok(store
+            .get_setting(&key)
+            .ok()
+            .flatten()
+            .map_or(default, |v| v == "1" || v == "true"))
+    })
+    .await
+    .unwrap_or(default)
+}
+
+/// A free-text setting, read by the host. `None` = unset (or unreadable).
+pub(crate) async fn string_setting(state: &AppState, key: &str) -> Option<String> {
+    let key = key.to_owned();
+    with_store(state.clone(), move |store| {
+        Ok(store.get_setting(&key).ok().flatten())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Write a setting, for tests that drive the scheduler directly.
+#[cfg(test)]
+pub(crate) async fn set_setting_for_test(state: &AppState, key: &str, value: &str) {
+    let (key, value) = (key.to_owned(), value.to_owned());
+    with_store(state.clone(), move |store| {
+        store.set_setting(&key, &value).map_err(|_| String::new())
+    })
+    .await
+    .expect("set setting");
+}
+
 /// Every account's id, for the background scheduler's sweep.
 pub(crate) async fn account_ids(state: &AppState) -> Result<Vec<i64>, String> {
     with_store(state.clone(), |store| {
@@ -1804,6 +1953,17 @@ pub async fn refresh(
     // if one is already running, this waits for it and then syncs again — finding nothing new, which
     // is exactly right.
     sync_folder_once(&st, account_id, &folder).await?;
+    // The user **asked** for this mail and is looking at the list it just landed in — so they have been
+    // told, and a popup about it two minutes later would be the app interrupting them about something
+    // already on their screen (P3). Settle the debt rather than announce it.
+    //
+    // (The old diff-based signal couldn't do this: Refresh's own diff consumed it. Making "told" a
+    // durable fact is what created the possibility of telling someone twice.)
+    if folder.eq_ignore_ascii_case("INBOX") {
+        if let Ok((_, Some(max_id))) = pending_summary(&st, account_id).await {
+            let _ = settle(&st, account_id, max_id).await;
+        }
+    }
     // That worked, so we're online — which is the one thing the background scheduler can't know while
     // it sits in a backed-off sleep. Wake it: it resets and sweeps the other accounts at once, rather
     // than leaving their mail up to half an hour stale after a laptop comes back from a night off.

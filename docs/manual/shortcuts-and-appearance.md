@@ -34,7 +34,8 @@ Choose **Settings** at the bottom of the left rail to open the Settings window. 
 - **Appearance** — the **theme**: **Light** ("Soft daylight") or **Dark** ("Soft dusk"). Your choice
   is remembered and applied the next time you open GeleitMail.
 - **Privacy** — **Block remote images** (on by default; see [privacy](privacy.md)).
-- **Notifications** — whether to be notified about new mail.
+- **Notifications** — whether to be told about new mail, **quiet hours**, and (with more than one
+  account) which accounts you want to hear about. See [reading your mail](reading-mail.md#being-told-about-new-mail).
 
 ![The Settings window: the tabs Accounts / General / Appearance / Privacy / Notifications down the side, with the Accounts tab open.](images/settings.png)
 
