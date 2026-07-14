@@ -190,6 +190,10 @@ pub struct ResumedDraft {
 }
 
 /// A row in the Drafts list: enough to recognise a saved draft without loading its whole body.
+///
+/// The list holds both kinds of draft — this device's and the provider's — so `on_server` says which
+/// `id` this is: a **draft** id when `false`, a **message** id when `true`. Every use site branches on
+/// it, because the two live in different tables and are deleted down different paths.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DraftSummary {
     pub id: i64,
@@ -199,6 +203,26 @@ pub struct DraftSummary {
     /// A short one-line preview of the body.
     pub snippet: String,
     pub updated_at: i64,
+    /// This draft is in the provider's Drafts folder, not on this device (`id` is a message id).
+    pub on_server: bool,
+    /// A server draft written with formatting (HTML). Continuing it in our plain-text composer keeps
+    /// the words and drops the styling — and, unlike a reply, *replaces* the original, so the UI asks
+    /// before opening it.
+    pub formatted: bool,
+}
+
+/// A draft found in the provider's Drafts folder, as read out of the store.
+pub struct ServerDraft {
+    /// Our local message id for it.
+    pub id: i64,
+    /// The RFC 5322 `Message-ID`, which is how we recognise the copies we put there ourselves.
+    pub message_id: Option<String>,
+    pub to: String,
+    pub subject: String,
+    pub snippet: String,
+    /// The `Date:` header — when the draft was last written, as the server saw it.
+    pub date: i64,
+    pub formatted: bool,
 }
 
 /// Map a compose form to the store's draft content (a 1:1 field copy — the two types are deliberately
@@ -274,7 +298,77 @@ pub fn draft_summary(row: &DraftRow) -> DraftSummary {
         subject: row.content.subject.clone(),
         snippet: draft_snippet(&row.content.body, 80),
         updated_at: row.updated_at,
+        on_server: false,
+        formatted: false, // drafts written here are plain text by construction
     }
+}
+
+/// The last segment of an IMAP folder path: `INBOX.Drafts` → `Drafts`, `[Gmail]/Drafts` → `Drafts`.
+/// Servers use either separator, and which one is server configuration we don't otherwise care about.
+fn folder_leaf(name: &str) -> &str {
+    name.rsplit(['/', '.']).next().unwrap_or(name)
+}
+
+/// Which folder is the provider's Drafts folder, if it keeps one?
+///
+/// The whole name first, then the **last segment** of the path — so `INBOX.Drafts` and `[Gmail]/Drafts`
+/// resolve, while `INBOX.Alte Drafts` does not. A plain `contains("draft")` was wrong in a way that
+/// mattered: on a namespaced server it would take whichever draft-ish folder sorted first, so an old
+/// archive called `INBOX.Alte Drafts` would win over `INBOX.Drafts` — and since the picked folder is
+/// *hidden from the rail* and its contents are listed as drafts, that folder's ordinary mail would
+/// become resumable, expungeable "drafts" while the real Drafts folder stayed in the rail, still
+/// duplicated. So: never guess. If nothing is a Drafts folder by name, the provider keeps none.
+///
+/// This is the **single** answer to that question: the folder it names is the one drafts are mirrored
+/// to, the one the Drafts list reads, and the one hidden from the rail (because the Drafts entry *is*
+/// it). Two different answers would put the folder back in the rail beside its own contents.
+#[must_use]
+pub fn pick_drafts_folder(names: &[String]) -> Option<String> {
+    names
+        .iter()
+        .find(|n| n.eq_ignore_ascii_case("drafts"))
+        .or_else(|| {
+            names
+                .iter()
+                .find(|n| folder_leaf(n).eq_ignore_ascii_case("drafts"))
+        })
+        .cloned()
+}
+
+/// The Drafts list: this device's drafts and the provider's, in one list, newest first.
+///
+/// **The de-duplication is the point.** With "sync drafts" on, every local draft *already has* a copy
+/// in the server's Drafts folder — so a naive merge would show each of them twice. Every draft carries
+/// its own `Message-ID` (`DraftRow::msgid`, minted once and stored), which is what its copy on the
+/// server is stamped with — so a server row belonging to a draft we still hold folds into that draft's
+/// row instead of adding one.
+///
+/// Matched against the drafts that **exist**, and against their **stored** ids. Both halves matter:
+/// a copy whose local draft is gone (deleted while offline, so the expunge never landed) is listed as
+/// what it really is — a draft still on the provider, which can be deleted from here — and because the
+/// id is stored rather than derived from `draft.id`, a *new* draft can't inherit a dead one's identity
+/// and swallow that copy (SQLite reuses row ids; store migration 15).
+#[must_use]
+pub fn merged_drafts(local: &[DraftRow], server: &[ServerDraft]) -> Vec<DraftSummary> {
+    let ours: std::collections::HashSet<&str> = local.iter().map(|d| d.msgid.as_str()).collect();
+
+    let mut rows: Vec<DraftSummary> = local.iter().map(draft_summary).collect();
+    rows.extend(
+        server
+            .iter()
+            .filter(|s| !s.message_id.as_deref().is_some_and(|m| ours.contains(m)))
+            .map(|s| DraftSummary {
+                id: s.id,
+                to: s.to.clone(),
+                subject: s.subject.clone(),
+                snippet: s.snippet.clone(),
+                updated_at: s.date,
+                on_server: true,
+                formatted: s.formatted,
+            }),
+    );
+    rows.sort_by_key(|r| std::cmp::Reverse(r.updated_at)); // newest first, wherever it lives
+    rows
 }
 
 /// Format a unix timestamp as a short human date (e.g. `12 Jul 2026`) for a reply's attribution line
@@ -549,6 +643,7 @@ mod tests {
     fn draft_summary_carries_id_recipient_subject_and_a_snippet() {
         let row = DraftRow {
             id: 7,
+            msgid: "<geleit-draft-1-7-4b2e@geleit.local>".to_owned(),
             content: DraftContent {
                 to: "a@x.io".to_owned(),
                 cc: String::new(),
@@ -566,6 +661,193 @@ mod tests {
         assert_eq!(s.subject, "Plan");
         assert_eq!(s.snippet, "Let's meet next week to plan.");
         assert_eq!(s.updated_at, 1_700_000_000);
+        assert!(!s.on_server, "a draft saved here is not the server's");
+        assert!(!s.formatted);
+    }
+
+    /// A local draft, for the merge tests. `msgid` is what the store minted for it — the identity its
+    /// copy on the server is stamped with.
+    fn draft(id: i64, msgid: &str, subject: &str, updated_at: i64) -> DraftRow {
+        DraftRow {
+            id,
+            msgid: msgid.to_owned(),
+            content: DraftContent {
+                to: "a@x.io".to_owned(),
+                cc: String::new(),
+                subject: subject.to_owned(),
+                body: "…".to_owned(),
+                in_reply_to: None,
+                references: Vec::new(),
+            },
+            updated_at,
+            server_folder: None,
+        }
+    }
+
+    /// A draft sitting in the provider's Drafts folder.
+    fn server(id: i64, message_id: Option<&str>, subject: &str, date: i64) -> ServerDraft {
+        ServerDraft {
+            id,
+            message_id: message_id.map(str::to_owned),
+            to: "b@x.io".to_owned(),
+            subject: subject.to_owned(),
+            snippet: "…".to_owned(),
+            date,
+            formatted: false,
+        }
+    }
+
+    #[test]
+    fn the_drafts_list_holds_this_device_and_the_server_newest_first() {
+        let local = [draft(1, "<geleit-draft-1-1-aa@geleit.local>", "here", 200)];
+        let srv = [server(9, Some("<other@webmail>"), "there", 300)];
+        let rows = merged_drafts(&local, &srv);
+
+        assert_eq!(rows.len(), 2);
+        // Newest first, whichever side it came from.
+        assert_eq!(rows[0].subject, "there");
+        assert!(rows[0].on_server);
+        assert_eq!(rows[0].id, 9, "a server row carries the MESSAGE id");
+        assert_eq!(rows[1].subject, "here");
+        assert!(!rows[1].on_server);
+        assert_eq!(rows[1].id, 1, "a local row carries the DRAFT id");
+    }
+
+    #[test]
+    fn our_own_server_copy_folds_into_its_draft_instead_of_listing_twice() {
+        // "Sync drafts" is on, so draft 1 has a copy on the server, appended under the draft's own
+        // stored Message-ID. The list must still show ONE row — the local one (it's the editable
+        // original, and it's the one that's up to date).
+        let mine = "<geleit-draft-1-1-9f2c@geleit.local>";
+        let local = [draft(1, mine, "here", 200)];
+        let srv = [server(9, Some(mine), "here", 100)];
+
+        let rows = merged_drafts(&local, &srv);
+        assert_eq!(rows.len(), 1, "the copy of a draft we hold is that draft");
+        assert!(!rows[0].on_server);
+        assert_eq!(rows[0].id, 1);
+    }
+
+    #[test]
+    fn a_copy_whose_draft_is_gone_is_shown_rather_than_hidden_forever() {
+        // Deleted the draft while offline, so the expunge never landed. The copy is still on the
+        // provider — the only way to be rid of it is to see it.
+        let rows = merged_drafts(
+            &[],
+            &[server(
+                9,
+                Some("<geleit-draft-1-42-71ab@geleit.local>"),
+                "stranded",
+                100,
+            )],
+        );
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].on_server, "it's still on the provider, so say so");
+        assert_eq!(rows[0].id, 9);
+    }
+
+    #[test]
+    fn a_new_draft_never_inherits_a_dead_drafts_identity() {
+        // The reason a draft's Message-ID is stored rather than derived from its row id: SQLite hands
+        // a deleted draft's id straight to the next one. Draft 42 was deleted while offline (its copy
+        // is stranded on the provider) and a new, unrelated draft got id 42 back.
+        //
+        // Derive the id from `(account, 42)` and the stranded draft folds into the new one: it drops
+        // out of the list for good — and the new draft's next save expunges its content off the server,
+        // by that same Message-ID. Two different drafts, two different stored ids, no collision.
+        let stranded = "<geleit-draft-1-42-71ab@geleit.local>";
+        let reborn = draft(
+            42,
+            "<geleit-draft-1-42-c30d@geleit.local>",
+            "brand new",
+            300,
+        );
+        let rows = merged_drafts(
+            &[reborn],
+            &[server(9, Some(stranded), "the stranded one", 100)],
+        );
+
+        assert_eq!(rows.len(), 2, "the dead draft's copy must not be swallowed");
+        assert_eq!(rows[1].subject, "the stranded one");
+        assert!(rows[1].on_server);
+    }
+
+    #[test]
+    fn a_server_draft_with_no_message_id_is_kept() {
+        // No Message-ID means it can't be one of ours (we always stamp one), so it must not vanish.
+        let rows = merged_drafts(
+            &[draft(1, "<geleit-draft-1-1-aa@geleit.local>", "here", 200)],
+            &[server(9, None, "there", 300)],
+        );
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn a_formatted_server_draft_is_flagged_so_the_ui_can_warn_before_replacing_it() {
+        let mut s = server(9, None, "from webmail", 300);
+        s.formatted = true;
+        let rows = merged_drafts(&[], &[s]);
+        assert!(rows[0].formatted);
+    }
+
+    #[test]
+    fn a_draft_and_its_copy_saved_in_the_same_second_keep_the_local_row() {
+        // Equal timestamps happen (a local save and the copy's INTERNALDATE land in the same second).
+        // The local row must win: it's the editable one. `sort_by_key` is stable and locals are pushed
+        // first, so this holds — pinned here because it is otherwise accidental.
+        let rows = merged_drafts(
+            &[draft(1, "<geleit-draft-1-1-aa@geleit.local>", "mine", 500)],
+            &[server(9, Some("<someone@else>"), "theirs", 500)],
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(
+            !rows[0].on_server,
+            "the one you can actually edit comes first"
+        );
+    }
+
+    #[test]
+    fn the_drafts_folder_is_the_exact_name_first_then_a_namespaced_one() {
+        let names = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+
+        // Exact wins even when another folder merely contains the word — and even when it comes first.
+        assert_eq!(
+            pick_drafts_folder(&names(&["Drafts.Old", "INBOX", "Drafts"])),
+            Some("Drafts".to_owned())
+        );
+        assert_eq!(
+            pick_drafts_folder(&names(&["INBOX", "drafts"])),
+            Some("drafts".to_owned()),
+            "the name is matched case-insensitively"
+        );
+        // Namespaced forms, which is how most servers actually present it — matched on the LAST
+        // segment, with either separator.
+        assert_eq!(
+            pick_drafts_folder(&names(&["INBOX", "INBOX.Drafts"])),
+            Some("INBOX.Drafts".to_owned())
+        );
+        assert_eq!(
+            pick_drafts_folder(&names(&["[Gmail]/Drafts"])),
+            Some("[Gmail]/Drafts".to_owned())
+        );
+
+        // The one that matters: a folder that merely *contains* "draft" must never win. It sorts
+        // first, so a substring match would pick it — and the picked folder is hidden from the rail and
+        // has its contents listed as drafts, so an old archive would become a set of resumable,
+        // expungeable "drafts" while the real Drafts folder stayed in the rail, still duplicated.
+        assert_eq!(
+            pick_drafts_folder(&names(&["INBOX", "INBOX.Alte Drafts", "INBOX.Drafts"])),
+            Some("INBOX.Drafts".to_owned())
+        );
+        assert_eq!(
+            pick_drafts_folder(&names(&["INBOX", "Draft ideas"])),
+            None,
+            "a user folder that happens to say 'draft' is not the Drafts folder"
+        );
+
+        // A provider that keeps none: the drafts live on this device, and nothing is hidden.
+        assert_eq!(pick_drafts_folder(&names(&["INBOX", "Sent"])), None);
+        assert_eq!(pick_drafts_folder(&[]), None);
     }
 
     #[test]

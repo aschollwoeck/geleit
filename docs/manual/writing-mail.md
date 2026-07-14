@@ -44,8 +44,8 @@ clear message rather than failing mid-send.)
 
 Not ready to send? Choose **Save draft** in the compose footer. GeleitMail stores the message —
 recipients, subject, body, **and any attachments** — on your device and closes the window. Open
-**Drafts** in the folder list to see everything you've saved, newest first; choose one to pick up
-exactly where you left off, attachments and all. Continuing to edit updates the same draft, and
+**Drafts** in the folder list to see everything you've saved, newest first (along with any drafts you
+started elsewhere — see below); choose one to pick up exactly where you left off, attachments and all. Continuing to edit updates the same draft, and
 **sending it removes it from Drafts** automatically. To throw a saved draft away, hover its row and
 choose the trash icon.
 
@@ -58,6 +58,33 @@ provider's **Drafts** folder, so your phone or webmail can see it. Editing a sav
 copy there, and sending or deleting it removes the copy. Turn the setting back **off** and GeleitMail
 takes those copies off your provider again, leaving your drafts here. (If your account has no Drafts
 folder, GeleitMail simply keeps the draft on this device.)
+
+## Drafts you started somewhere else
+
+**Drafts** shows them too. If your provider keeps a Drafts folder, the messages you began in webmail or
+on your phone are in the same list as the ones you saved here, newest first — one **Drafts**, whatever
+you started, wherever you started it. A draft your provider is keeping for you is marked **"On your
+provider"**; everything else in the list is one you saved here.
+
+Choose one and it opens in the compose window, ready to continue. If it has files attached, GeleitMail
+fetches them from your provider as it opens, so that part needs a connection — and if a file can't be
+fetched, the draft won't open at all, rather than open without it and lose it when you save.
+
+**Saving it moves the draft here.** It becomes a draft on this device, and the copy on your provider is
+removed — so it will no longer show up in webmail or on your phone. (If you've turned on **Sync drafts
+to your provider**, a fresh copy is put back there, so your other devices still see it.) **Sending** it
+removes their copy too: a message you've sent isn't a draft any more. Close the window without saving
+and nothing changes on your provider.
+
+The trash icon on such a row deletes the draft **from your provider for good** — it isn't moved to
+Trash and there's no undo, so GeleitMail asks you to confirm first.
+
+One thing to know: GeleitMail writes plain text, and webmail usually writes formatted text. So
+continuing a draft you wrote with **formatting** keeps every word and drops the styling — and because
+saving replaces the original, GeleitMail asks you first.
+
+GeleitMail checks your provider's Drafts folder each time you open **Drafts**; **Refresh** at the top of
+the list checks again. Your own drafts are always there instantly, connection or not.
 
 ## Markdown formatting
 

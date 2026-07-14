@@ -342,9 +342,11 @@ pub fn run_send(
             .find(|n| n.eq_ignore_ascii_case("sent") || n.to_ascii_lowercase().contains("sent"))
     });
     // If this draft has a copy on the server (opt-in "sync drafts"), remove it once the mail is away.
+    // By the draft's **stored** Message-ID — deriving one from the row id would expunge whatever copy a
+    // long-dead draft with the same (reused) id left behind (store migration 15).
     let server_draft = draft_id.and_then(|id| {
-        let folder = store.draft_by_id(id).ok().flatten()?.server_folder?;
-        Some((folder, message::draft_message_id(account.id, id)))
+        let row = store.draft_by_id(id).ok().flatten()?;
+        Some((row.server_folder?, row.msgid))
     });
     let imap_config = to_config(&imap);
     runtime()?.block_on(async {

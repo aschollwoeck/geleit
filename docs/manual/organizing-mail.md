@@ -45,6 +45,10 @@ Mail you delete goes to **Trash**, where it stays until you clear it.
 Both are **irreversible** — there's no undo, which is why GeleitMail always asks first. Everywhere
 else, deleting only moves mail to Trash, so you have a safety net until you choose to empty it.
 
+The one exception is a **draft**, which isn't mail you've received: deleting a draft removes it straight
+away rather than moving it to Trash. Deleting one that lives on your provider asks first, because that
+copy is the only one there is — see [writing your mail](writing-mail.md).
+
 ## Acting on several messages at once
 
 To handle a batch of mail together, **hover a message row** and a checkbox appears on the left —

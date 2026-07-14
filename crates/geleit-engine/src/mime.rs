@@ -93,6 +93,36 @@ pub(crate) fn make_snippet(text: &str, max: usize) -> String {
 }
 
 #[cfg(test)]
+mod html_only_tests {
+    use super::parse_body;
+
+    /// Webmail composes HTML, so a draft started there usually has **no** `text/plain` part. The whole
+    /// "continuing it keeps every word, drops the styling" promise — and, crucially, the safety of
+    /// expunging the original once the continued draft is saved — rests on `plain` still being
+    /// populated for such a message. It is, because `mail_parser`'s `body_text` converts an HTML part
+    /// to text. Nothing else in this repo asserts that, and "take only genuine text/plain parts" is
+    /// exactly the sort of tightening someone would plausibly make (we did it for `html`, just above).
+    /// That edit would open every webmail draft empty and then destroy the original on save.
+    #[test]
+    fn an_html_only_message_still_yields_a_plain_body() {
+        let raw = b"Subject: From webmail\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+                    <html><body><p>The roofer can come <b>Thursday</b>.</p></body></html>";
+        let parsed = parse_body(raw);
+        let plain = parsed
+            .plain
+            .expect("an HTML-only message must still give us text");
+        assert!(
+            plain.contains("The roofer can come") && plain.contains("Thursday"),
+            "the words must survive the HTML → text conversion: {plain:?}"
+        );
+        assert!(
+            parsed.html.is_some(),
+            "…and it's still known to be formatted"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{make_snippet, parse_body};
 

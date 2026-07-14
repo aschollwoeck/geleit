@@ -141,8 +141,10 @@ add the account again to re-download it.)
 ## Reading offline
 
 Because your mail lives on your own device, you can read everything you've synced with no internet
-connection. Talking to your provider — the automatic check for new mail, and Refresh when you ask
-for it — is the only part that needs the network; the rest keeps working offline.
+connection. Talking to your provider is the only part that needs the network: the automatic check for
+new mail and **Refresh**; opening **Drafts** (which looks for drafts you started elsewhere); fetching a
+file, such as saving an attachment; and sending. The rest keeps working offline — see
+[privacy](privacy.md) for the full list.
 
 ## More than one account
 

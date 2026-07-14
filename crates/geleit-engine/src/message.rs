@@ -207,16 +207,6 @@ pub fn build_draft(draft: &Draft, message_id: &str) -> Result<Vec<u8>, String> {
     build_inner(draft, Some(message_id))
 }
 
-/// The **stable** Message-ID stamped on a draft's server copy (SEND-5). Stable per draft — *not* per
-/// save — so every copy of the same draft carries it: a re-save finds and expunges whatever is there
-/// (even an orphan left by an earlier failure) before appending the new one, and a send/discard can
-/// clean up without a stored UID. That sidesteps IMAP's missing `APPENDUID`, UID-validity resets, and
-/// duplicate copies in one stroke. Pure.
-#[must_use]
-pub fn draft_message_id(account_id: i64, draft_id: i64) -> String {
-    format!("<geleit-draft-{account_id}-{draft_id}@geleit.local>")
-}
-
 fn build_inner(draft: &Draft, message_id: Option<&str>) -> Result<Vec<u8>, String> {
     if draft.from_addr.trim().is_empty() {
         return Err("The message needs a sender address.".to_owned());
@@ -581,19 +571,6 @@ mod tests {
         let with = build_draft(&sample(), mid).expect("build");
         let raw = String::from_utf8_lossy(&with);
         assert!(raw.contains("bob@test.local") && raw.contains(mid));
-    }
-
-    #[test]
-    fn draft_message_id_is_stable_per_draft_and_unique_across_accounts() {
-        // Stable: the SAME draft always gets the same id, so a re-save can find (and replace) the
-        // copy it left on the server last time.
-        assert_eq!(draft_message_id(1, 7), draft_message_id(1, 7));
-        // Distinct per draft, and per account (two accounts on one server must not collide).
-        assert_ne!(draft_message_id(1, 7), draft_message_id(1, 8));
-        assert_ne!(draft_message_id(1, 7), draft_message_id(2, 7));
-        // Angle-bracketed, as a Message-ID must be.
-        let mid = draft_message_id(1, 7);
-        assert!(mid.starts_with('<') && mid.ends_with('>'), "{mid}");
     }
 
     #[test]
