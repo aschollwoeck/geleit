@@ -213,6 +213,17 @@ pub fn App() -> impl IntoView {
     let move_menu = RwSignal::new(false);
     let compose = RwSignal::new(Option::<ComposeDraft>::None);
     let current_draft_id = RwSignal::new(Option::<i64>::None); // the saved draft being edited, if any
+                                                               // The provider's draft being continued (a message id). Saving or sending removes it from the
+                                                               // server: the draft you edited is the draft you now have, and leaving the original there would put
+                                                               // it straight back in the list as a second row.
+    let resumed_server = RwSignal::new(Option::<i64>::None);
+    let formatted_ask = RwSignal::new(Option::<i64>::None); // "continuing this drops its formatting"
+                                                            // Deleting a draft that's on the provider is irreversible and it may be the ONLY copy — so it asks,
+                                                            // like every other permanent action here. A local draft is still a one-click delete (it's ours,
+                                                            // and it's the one the trash icon has always meant).
+    let draft_del = RwSignal::new(Option::<i64>::None);
+    let draft_busy = RwSignal::new(false); // fetching a provider draft (its attachments) — one at a time
+    let drafts_loading = RwSignal::new(false); // …and the first look at the provider's Drafts folder
     let drafts_open = RwSignal::new(false); // list pane shows saved drafts instead of a folder
     let drafts = RwSignal::new(Vec::<DraftSummary>::new());
     let to_input = RwSignal::new(String::new()); // in-progress recipient text (not yet a chip)
@@ -982,6 +993,7 @@ pub fn App() -> impl IntoView {
         attach_paths.set(Vec::new());
         md_on.set(false); // each new draft starts as plain text
         current_draft_id.set(None); // a fresh compose isn't tied to a saved draft yet
+        resumed_server.set(None); // …nor to one of the provider's
     };
     // Open the native file picker and add the chosen files to the draft.
     let attach_files = move || {
@@ -1040,6 +1052,7 @@ pub fn App() -> impl IntoView {
         let atts = attach_paths.get_untracked();
         let markdown = md_on.get_untracked();
         let draft_id = current_draft_id.get_untracked(); // if resumed, run_send deletes it after send
+        let replaced = resumed_server.get_untracked(); // a draft of the provider's, now sent
         leptos::task::spawn_local(async move {
             match api::send_message(
                 aid,
@@ -1060,7 +1073,21 @@ pub fn App() -> impl IntoView {
                     reset_recipient_inputs();
                     // The sent draft (if any) is gone server-side; drop its row from the open list.
                     if let Some(id) = draft_id {
-                        drafts.update(|l| l.retain(|d| d.id != id));
+                        // …a LOCAL draft: a row's id only identifies it together with its origin (a
+                        // draft id and a message id can be the same number).
+                        drafts.update(|l| l.retain(|d| d.on_server || d.id != id));
+                    }
+                    // A draft of the provider's that we just sent is no longer a draft — take it off
+                    // the server, or it stays in Drafts forever, half-written and already sent.
+                    if let Some(mid) = replaced {
+                        drafts.update(|l| l.retain(|d| !(d.on_server && d.id == mid)));
+                        if api::delete_forever(mid).await.is_err() {
+                            error.set(Some(
+                                "Sent — but the draft is still in your provider's Drafts folder. \
+                                 Delete it there, or from Drafts here."
+                                    .to_owned(),
+                            ));
+                        }
                     }
                     commit_pending(); // resolve any queued move before this confirmation toast
                     toast.set(Some("Sent".into()));
@@ -1085,11 +1112,32 @@ pub fn App() -> impl IntoView {
             drafts.set(Vec::new());
             return;
         };
+        drafts_loading.set(true);
         leptos::task::spawn_local(async move {
+            // From the store first — instant, and it works offline (P1). Guarded like every other
+            // re-list: the store call is a spawn_blocking behind a Mutex, so two of these can land out
+            // of order, and painting account A's drafts into account B's open pane would let the user
+            // resume a draft that isn't theirs to send from here.
+            let mine = || drafts_open.get_untracked() && account.get_untracked() == Some(aid);
             match api::list_drafts(aid).await {
-                Ok(list) => drafts.set(list),
+                Ok(list) if mine() => drafts.set(list),
+                Ok(_) => {
+                    drafts_loading.set(false); // the pane moved on; don't leave it saying "checking…"
+                    return;
+                }
                 Err(e) => error.set(Some(e)),
             }
+            // Then catch up with the provider's Drafts folder, which nothing else syncs (the
+            // scheduler sweeps INBOX), and re-list if it brought anything. Quiet on failure: an
+            // offline drafts list is the local one, which is exactly what the user expects to see.
+            let synced = api::refresh_drafts(aid).await.unwrap_or(false);
+            // …and again after the sync: the user may well have moved on while it ran.
+            if synced && mine() {
+                if let Ok(list) = api::list_drafts(aid).await {
+                    drafts.set(list);
+                }
+            }
+            drafts_loading.set(false);
         });
     };
 
@@ -1113,8 +1161,10 @@ pub fn App() -> impl IntoView {
             reset_recipient_inputs();
             return;
         }
-        // Capture the attachment paths BEFORE the reset clears them, so they're stored with the draft.
+        // Capture the attachment paths and the server draft being replaced BEFORE the reset clears
+        // them, so they're stored with the draft (and the original is taken off the server).
         let atts = attach_paths.get_untracked();
+        let replaced = resumed_server.get_untracked();
         compose.set(None);
         reset_recipient_inputs();
         let showing_drafts = drafts_open.get_untracked();
@@ -1122,6 +1172,20 @@ pub fn App() -> impl IntoView {
             match api::save_draft(aid, existing, d, atts).await {
                 Ok(_) => {
                     toast.set(Some("Draft saved".into()));
+                    // This draft *was* the provider's: it's ours now, so take the original off the
+                    // server — only now that the local save has succeeded, so a failure can never
+                    // lose it. (Left there, it would be back in the list as a second row.)
+                    if let Some(mid) = replaced {
+                        if api::delete_forever(mid).await.is_err() {
+                            // Say what actually happened: the draft IS saved here, and the copy is
+                            // still on the provider — so Drafts will show both until it can be removed.
+                            error.set(Some(
+                                "Draft saved here, but the copy on your provider couldn't be removed \
+                                 — it will still show in Drafts."
+                                    .to_owned(),
+                            ));
+                        }
+                    }
                     // Keep the drafts list current if it's the pane on screen.
                     if showing_drafts {
                         if let Ok(list) = api::list_drafts(aid).await {
@@ -1146,19 +1210,89 @@ pub fn App() -> impl IntoView {
                 }
                 Ok(None) => {
                     // Already gone (e.g. sent elsewhere) — drop the stale row.
-                    drafts.update(|l| l.retain(|d| d.id != id));
+                    drafts.update(|l| l.retain(|d| d.on_server || d.id != id));
                 }
                 Err(e) => error.set(Some(e)),
             }
         });
     };
 
-    // Delete a saved draft from the list (its own row affordance).
-    let remove_draft = move |id: i64| {
-        drafts.update(|l| l.retain(|d| d.id != id));
+    // Continue a draft that's in the provider's Drafts folder. Its text is already here; its
+    // attachments are fetched now (that's the one part that needs the network). The original stays on
+    // the server until the draft is actually saved or sent — abandon it and nothing has changed there.
+    let resume_server_draft = move |id: i64| {
+        formatted_ask.set(None);
+        if draft_busy.get_untracked() {
+            return; // a second click would fetch it twice and leave the loser's files behind
+        }
+        draft_busy.set(true);
+        leptos::task::spawn_local(async move {
+            match api::resume_server_draft(id).await {
+                Ok(ResumedDraft { draft, attachments }) => {
+                    reset_recipient_inputs(); // clears attach_paths + both draft ids first
+                    compose.set(Some(draft));
+                    attach_paths.set(attachments);
+                    resumed_server.set(Some(id));
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            draft_busy.set(false);
+        });
+    };
+
+    // Open a draft row — from this device or from the provider. A formatted one asks first: the
+    // composer writes plain text, and saving *replaces* the original (unlike a reply, where the
+    // formatted message survives untouched).
+    let open_draft_row = move |d: &DraftSummary| {
+        let id = d.id;
+        if !d.on_server {
+            resume_draft(id);
+        } else if d.formatted {
+            formatted_ask.set(Some(id));
+        } else {
+            resume_server_draft(id);
+        }
+    };
+
+    // Delete a saved draft from the list (its own row affordance). One on the provider is expunged
+    // there — it isn't ours to keep a copy of.
+    let remove_draft = move |id: i64, on_server: bool| {
+        // The provider's copy may be the only one there is, and this expunges it — so ask, the way
+        // every other irreversible action in the app does.
+        if on_server {
+            draft_del.set(Some(id));
+            return;
+        }
+        let snapshot = drafts.get_untracked();
+        drafts.update(|l| l.retain(|d| d.on_server || d.id != id));
         leptos::task::spawn_local(async move {
             if let Err(e) = api::delete_draft(id).await {
+                drafts.set(snapshot); // it's still there — don't leave the list lying about it
                 error.set(Some(e));
+            }
+        });
+    };
+
+    // …and the confirmed one: expunge a draft from the provider.
+    let do_remove_server_draft = move || {
+        let Some(id) = draft_del.get_untracked() else {
+            return;
+        };
+        draft_del.set(None);
+        let snapshot = drafts.get_untracked();
+        drafts.update(|l| l.retain(|d| !(d.on_server && d.id == id)));
+        leptos::task::spawn_local(async move {
+            match api::delete_forever(id).await {
+                Ok(()) => toast.set(Some("Deleted from your provider".into())),
+                Err(_) => {
+                    // Offline is the ordinary case here, and the draft is still on the provider — so
+                    // put the row back rather than let the list claim it's gone.
+                    drafts.set(snapshot);
+                    error.set(Some(
+                        "Couldn't delete that draft from your provider. Check your connection."
+                            .to_owned(),
+                    ));
+                }
             }
         });
     };
@@ -1441,7 +1575,10 @@ pub fn App() -> impl IntoView {
                 if let Some(aid) = account.get_untracked() {
                     if let Ok(list) = api::list_drafts(aid).await {
                         if let Some(first) = list.first() {
-                            resume_draft(first.id);
+                            // Through the same door a click uses: the newest draft may well be one of
+                            // the provider's, whose id is a MESSAGE id and must not be resumed as a
+                            // local draft.
+                            open_draft_row(first);
                         }
                     }
                 }
@@ -1503,6 +1640,10 @@ pub fn App() -> impl IntoView {
                         folder_form.set(None);
                     } else if folder_del.get_untracked().is_some() {
                         folder_del.set(None);
+                    } else if formatted_ask.get_untracked().is_some() {
+                        formatted_ask.set(None);
+                    } else if draft_del.get_untracked().is_some() {
+                        draft_del.set(None);
                     } else if confirm.get_untracked().is_some() {
                         confirm.set(None);
                     } else if move_menu.get_untracked()
@@ -1807,7 +1948,12 @@ pub fn App() -> impl IntoView {
                     <div class="list-sub">{move || {
                         if drafts_open.get() {
                             let n = drafts.get().len();
-                            return if n > 0 { format!("{n} saved") } else { String::new() };
+                            // Not "saved" — some of these live on the provider, not here.
+                            return match n {
+                                0 => String::new(),
+                                1 => "1 draft".to_owned(),
+                                n => format!("{n} drafts"),
+                            };
                         }
                         let n = messages.get().iter().filter(|m| is_unread(m.id, m.seen, read_now, marked_unread)).count();
                         if n > 0 { format!("{n} unread") } else { String::new() }
@@ -1818,8 +1964,11 @@ pub fn App() -> impl IntoView {
                         </Show>
                         <Show when=move || !drafts_open.get()>
                             <span class="icon-btn" class:on=move || search_open.get() title="Search" on:click=move |_| search_open.update(|o| *o = !*o)>{icon(icons::SEARCH)}</span>
-                            <span class="icon-btn" title="Refresh" on:click=move |_| do_refresh()>{icon(icons::REFRESH)}</span>
                         </Show>
+                        <span class="icon-btn" title="Refresh"
+                            on:click=move |_| if drafts_open.get_untracked() { open_drafts() } else { do_refresh() }>
+                            {icon(icons::REFRESH)}
+                        </span>
                     </div>
                 </div>
                 <Show when=move || !drafts_open.get() && !selected.get().is_empty()>
@@ -1845,12 +1994,22 @@ pub fn App() -> impl IntoView {
                         <span class="icon-btn" title="Clear selection" on:click=move |_| { selected.set(HashSet::new()); select_anchor.set(None); }>{icon(icons::CLOSE)}</span>
                     </div>
                 </Show>
-                <Show when=move || refreshing.get() || catchup.get().is_some()>
+                <Show when=move || refreshing.get() || catchup.get().is_some() || drafts_loading.get() || draft_busy.get()>
                     <div style="padding:0 20px 8px;font-size:12px;color:var(--text-muted)">
-                        {move || match catchup.get() {
-                            Some(0) => "Checking for new mail…".to_owned(),
-                            Some(n) => format!("Catching up… {n}"),
-                            None => "Refreshing…".to_owned(),
+                        {move || {
+                            if draft_busy.get() {
+                                // The one place a click here waits on the network: fetching the draft's
+                                // files. Say so, rather than look frozen.
+                                return "Opening the draft on your provider…".to_owned();
+                            }
+                            if drafts_loading.get() {
+                                return "Checking your provider for drafts…".to_owned();
+                            }
+                            match catchup.get() {
+                                Some(0) => "Checking for new mail…".to_owned(),
+                                Some(n) => format!("Catching up… {n}"),
+                                None => "Refreshing…".to_owned(),
+                            }
                         }}
                     </div>
                 </Show>
@@ -1869,32 +2028,40 @@ pub fn App() -> impl IntoView {
                             </Show>
                         </div>
                     </Show>
-                    <Show when=move || drafts_open.get() && drafts.get().is_empty()>
+                    <Show when=move || drafts_open.get() && drafts.get().is_empty() && !drafts_loading.get()>
                         <div class="list-empty">
-                            <div class="msg">"No saved drafts."</div>
+                            // Not "no saved drafts" — this list holds the provider's too, and saying
+                            // "none" before we've looked there would be contradicted a second later.
+                            <div class="msg">"No drafts."</div>
                         </div>
                     </Show>
                     <Show when=move || drafts_open.get()>
-                        <For each=move || drafts.get() key=|d| (d.id, d.updated_at) let:d>
+                        <For each=move || drafts.get() key=|d| (d.id, d.on_server, d.updated_at) let:d>
                             {
-                                let id = d.id;
+                                let (id, on_server) = (d.id, d.on_server);
+                                let row = d.clone();
                                 let subject = if d.subject.trim().is_empty() { "(no subject)".to_owned() } else { d.subject.clone() };
                                 let to = if d.to.trim().is_empty() { "(no recipient)".to_owned() } else { d.to.clone() };
                                 let snippet = elide(&d.snippet, 84);
-                                let saved = local_date(Some(d.updated_at));
+                                let saved = if d.updated_at > 0 { local_date(Some(d.updated_at)) } else { String::new() };
                                 view! {
-                                    <div class="row draft" on:click=move |_| resume_draft(id)>
+                                    <div class="row draft" on:click=move |_| open_draft_row(&row)>
                                         <span class="guide"></span>
                                         <div class="row-top">
                                             <span class="sender">{to}</span>
-                                            <span class="draftdel" title="Delete draft"
-                                                on:click=move |e| { e.stop_propagation(); remove_draft(id); }>
+                                            <span class="draftdel" title=move || if on_server { "Delete from your provider" } else { "Delete draft" }
+                                                on:click=move |e| { e.stop_propagation(); remove_draft(id, on_server); }>
                                                 {icon(icons::TRASH)}
                                             </span>
                                             <span class="time">{saved}</span>
                                         </div>
                                         <div class="subj">{subject}</div>
                                         <div class="prev">{snippet}</div>
+                                        <Show when=move || on_server>
+                                            // Where this draft lives, said plainly: it isn't on this device, and
+                                            // deleting it here deletes it from the provider.
+                                            <span class="draft-where">"On your provider"</span>
+                                        </Show>
                                     </div>
                                 }
                             }
@@ -2063,6 +2230,12 @@ pub fn App() -> impl IntoView {
                             }}</span>
                             <button class="close-btn" on:click=move |_| discard_compose()>{icon(icons::CLOSE)}</button>
                         </div>
+                        <Show when=move || resumed_server.get().is_some()>
+                            <div class="compose-note">
+                                "From your provider's Drafts. Saving or sending it moves it here and removes their copy \
+                                 — close it instead and nothing changes there."
+                            </div>
+                        </Show>
                         <div class="field-row">
                             <span class="field-label">"From"</span>
                             <span style="font-weight:500">{current_email}</span>
@@ -2279,6 +2452,39 @@ pub fn App() -> impl IntoView {
                                 on:click=move |_| submit_folder()>
                                 {move || if folder_form.get().and_then(|f| f.rename_from).is_some() { "Rename" } else { "Create" }}
                             </button>
+                        </div>
+                    </div>
+                </div>
+            </Show>
+
+            <Show when=move || draft_del.get().is_some()>
+                <div class="scrim">
+                    <div class="window dialog">
+                        <h2>"Delete this draft?"</h2>
+                        <p>
+                            "This draft is on your provider, not on this device. Deleting it removes it there \
+                             for good — it isn't moved to Trash, and it can't be undone."
+                        </p>
+                        <div class="drow">
+                            <button class="btn-ghost" on:click=move |_| draft_del.set(None)>"Cancel"</button>
+                            <button class="btn-danger" on:click=move |_| do_remove_server_draft()>"Delete draft"</button>
+                        </div>
+                    </div>
+                </div>
+            </Show>
+
+            <Show when=move || formatted_ask.get().is_some()>
+                <div class="scrim">
+                    <div class="window dialog">
+                        <h2>"Continue this draft?"</h2>
+                        <p>
+                            "This draft was written with formatting. GeleitMail writes plain text, so \
+                             continuing it keeps every word and drops the styling. Saving or sending it \
+                             then removes the copy on your provider, so the formatted version is gone."
+                        </p>
+                        <div class="drow">
+                            <button class="btn-ghost" on:click=move |_| formatted_ask.set(None)>"Cancel"</button>
+                            <button class="btn" on:click=move |_| { if let Some(id) = formatted_ask.get() { resume_server_draft(id); } }>"Continue"</button>
                         </div>
                     </div>
                 </div>

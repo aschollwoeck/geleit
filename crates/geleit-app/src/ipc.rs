@@ -23,8 +23,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::dto::{
-    compose_from_draft, display_sender, display_subject, draft_content_from, draft_summary,
-    folder_rank, human_size, is_protected_folder, safe_attachment_filename, safe_filename_stem,
+    compose_from_draft, display_sender, display_subject, draft_content_from, folder_rank,
+    human_size, is_protected_folder, safe_attachment_filename, safe_filename_stem,
     validate_folder_name, AccountDto, AttachmentDto, ComposeDraft, DraftSummary, FolderDto,
     MessageBodyDto, MessageDto, ResumedDraft,
 };
@@ -139,6 +139,13 @@ pub async fn list_folders(
         let mut folders = store
             .folders_for_account(account_id)
             .map_err(|_| "Couldn't read your folders.".to_owned())?;
+        // The provider's Drafts folder is not a rail entry of its own: the **Drafts** entry *is* it
+        // (its contents are merged into that list by `list_drafts`). Leaving it here would show
+        // "Drafts" twice — once as the folder, once as the list of what's in it.
+        let names: Vec<String> = folders.iter().map(|f| f.name.clone()).collect();
+        if let Some(drafts) = crate::dto::pick_drafts_folder(&names) {
+            folders.retain(|f| f.name != drafts);
+        }
         folders.sort_by(|a, b| {
             folder_rank(&a.name)
                 .cmp(&folder_rank(&b.name))
@@ -957,7 +964,10 @@ fn server_draft_plan(
     }
     let folder = drafts_folder(store, account_id)?;
     let account = store.account_by_id(account_id).ok()??;
-    let message_id = geleit_engine::message::draft_message_id(account_id, id);
+    // The draft's own stored Message-ID. Never re-derive it from `id`: SQLite reuses the ids of
+    // deleted drafts, and expunging by a re-derived id would destroy a stranded copy of the *dead*
+    // draft that happened to share the number (migration 15).
+    let message_id = store.draft_by_id(id).ok()??.msgid;
     let d = geleit_engine::message::Draft {
         from_name: account.display_name.clone(),
         from_addr: account.email,
@@ -997,9 +1007,9 @@ fn sync_drafts_on(store: &Store) -> bool {
         .is_some_and(|v| v == "1" || v == "true")
 }
 
-/// The account's Drafts folder, by name — exact match first, then a substring (so `INBOX.Drafts` or
-/// `[Gmail]/Drafts` still resolve), mirroring how Sent is found. `None` → the draft stays local
-/// rather than inventing a folder.
+/// The account's Drafts folder, by name. `None` → the provider keeps none, so drafts live on this
+/// device (and nothing is hidden from the rail). The choosing is pure — see
+/// [`crate::dto::pick_drafts_folder`], which is the single answer to this question.
 fn drafts_folder(store: &Store, account_id: i64) -> Option<String> {
     let names: Vec<String> = store
         .folders_for_account(account_id)
@@ -1007,15 +1017,7 @@ fn drafts_folder(store: &Store, account_id: i64) -> Option<String> {
         .into_iter()
         .map(|f| f.name)
         .collect();
-    names
-        .iter()
-        .find(|n| n.eq_ignore_ascii_case("drafts"))
-        .or_else(|| {
-            names
-                .iter()
-                .find(|n| n.to_ascii_lowercase().contains("draft"))
-        })
-        .cloned()
+    crate::dto::pick_drafts_folder(&names)
 }
 
 /// The opt-in setting key for mirroring drafts to the server's Drafts folder (default off, P2).
@@ -1034,19 +1036,209 @@ fn read_draft_attachments(paths: &[String]) -> Result<Vec<geleit_store::DraftAtt
         .collect())
 }
 
-/// Every saved draft for an account, newest first, as list summaries.
+/// How many of the provider's drafts we list. A Drafts folder is a handful of messages; the cap only
+/// stops a pathological one (a broken client that appended thousands) from stalling the pane.
+const SERVER_DRAFTS_CAP: i64 = 200;
+
+/// **One Drafts.** Every draft for an account, newest first — this device's *and* the ones in the
+/// provider's Drafts folder (started in webmail, or on a phone).
+///
+/// The de-duplication is what makes this safe to merge: with "sync drafts" on, every local draft
+/// already has a copy on the server, and listing both would show each one twice. `dto::merged_drafts`
+/// folds our own copies (recognised by the `Message-ID` we stamped) back into the drafts they came
+/// from. Purely local reads — the folder is *synced* by [`refresh_drafts`].
 #[tauri::command]
 pub async fn list_drafts(
     state: tauri::State<'_, AppState>,
     account_id: i64,
 ) -> Result<Vec<DraftSummary>, String> {
     with_store(state.inner().clone(), move |store| {
-        store
+        let local = store
             .list_drafts(account_id)
-            .map(|rows| rows.iter().map(draft_summary).collect())
-            .map_err(|_| "Couldn't load your drafts.".to_owned())
+            .map_err(|_| "Couldn't load your drafts.".to_owned())?;
+        let server = server_drafts(store, account_id, local.len());
+        Ok(crate::dto::merged_drafts(&local, &server))
     })
     .await
+}
+
+/// Read the provider's Drafts folder out of the **local store** (no network — [`refresh_drafts`] is
+/// what fills it). Best-effort: a provider with no Drafts folder, or one we haven't synced yet, simply
+/// contributes nothing, and the list is this device's drafts alone.
+///
+/// One store query for the whole folder (`drafts_in_folder`) — a Drafts pane that decrypted a body per
+/// row just to ask "is this HTML?" would be a latency defect (P3).
+fn server_drafts(
+    store: &Store,
+    account_id: i64,
+    local_drafts: usize,
+) -> Vec<crate::dto::ServerDraft> {
+    let Some(name) = drafts_folder(store, account_id) else {
+        return Vec::new(); // the provider keeps none — the drafts live here
+    };
+    let Some(folder) = store
+        .folders_for_account(account_id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|f| f.name == name)
+    else {
+        return Vec::new();
+    };
+    // Read past the cap by however many drafts we hold: with "sync drafts" on, our own copies are in
+    // this folder too and every one of them is about to be deduped away. Capping *before* the dedup
+    // would mean a user with 200 local drafts never sees the one they started in webmail — the exact
+    // draft this feature exists for.
+    let cap = SERVER_DRAFTS_CAP.saturating_add(i64::try_from(local_drafts).unwrap_or(i64::MAX));
+    store
+        .drafts_in_folder(folder.id, cap)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| crate::dto::ServerDraft {
+            id: d.id,
+            message_id: d.message_id,
+            to: d.to_addrs.unwrap_or_default(),
+            subject: d.subject.unwrap_or_default(),
+            snippet: d.snippet.unwrap_or_default(),
+            date: d.date.unwrap_or(0),
+            formatted: d.formatted,
+        })
+        .collect()
+}
+
+/// Sync the provider's Drafts folder, so a draft started in webmail shows up here.
+///
+/// The scheduler only sweeps `INBOX`, and the Drafts folder is no longer selectable in the rail (the
+/// Drafts entry *is* it), so nothing else would ever fetch it. Goes through [`sync_folder_once`] like
+/// every other sync, so it takes the folder lock and can't race the scheduler or a Refresh.
+///
+/// Returns `false` when the provider keeps no Drafts folder — not an error: the drafts simply live on
+/// this device.
+#[tauri::command]
+pub async fn refresh_drafts(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+) -> Result<bool, String> {
+    let st = state.inner().clone();
+    let folder = with_store(st.clone(), move |store| {
+        Ok(drafts_folder(store, account_id))
+    })
+    .await?;
+    let Some(folder) = folder else {
+        return Ok(false);
+    };
+    sync_folder_once(&st, account_id, &folder).await?;
+    Ok(true)
+}
+
+/// Continue a draft that lives in the provider's Drafts folder: load it back into the compose form,
+/// attachments and all.
+///
+/// The text comes from the local store (already synced). The **attachments** are the one thing here
+/// that needs the network — they're never stored on this device until they're needed (P2) — so they're
+/// fetched now and written to temp files, exactly like a resumed local draft's are, so send and re-save
+/// go down the ordinary path-based flow.
+///
+/// The attachments are **fail-closed**, unlike everywhere else we touch them: if any one of them can't
+/// be fetched, the whole resume fails and the server copy stays untouched. Opening the draft without a
+/// file and then expunging the original on save would destroy that file for good.
+#[tauri::command]
+pub async fn resume_server_draft(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<ResumedDraft, String> {
+    let st = state.inner().clone();
+    let plan = with_store(st.clone(), move |store| {
+        let h = store
+            .header_by_id(id)
+            .map_err(|_| "Couldn't open that draft.".to_owned())?
+            .ok_or_else(|| "That draft is no longer here.".to_owned())?;
+        let body = store
+            .body_for(id)
+            .map_err(|_| "Couldn't open that draft.".to_owned())?;
+        let loc = store
+            .message_location(id)
+            .map_err(|_| "Couldn't open that draft.".to_owned())?;
+        let account_id = store
+            .account_for_message(id)
+            .map_err(|_| "Couldn't open that draft.".to_owned())?;
+        let attachments = store.attachments_for(id).unwrap_or_default();
+        Ok((h, body, loc, account_id, attachments))
+    })
+    .await?;
+    let (h, body, loc, account_id, attachments) = plan;
+
+    // Nothing to show means we must not open it: saving an empty compose form would replace the real
+    // draft on the server with nothing. Two ways that can happen, and the guard has to cover both —
+    // no body row at all (the folder hasn't finished downloading), and a body whose text is empty
+    // while an HTML part exists (our text extraction gave us nothing, so the words are still in the
+    // part we can't read). A draft that is genuinely blank — a subject and no text — opens fine.
+    let text = body
+        .as_ref()
+        .and_then(|b| b.plain.clone())
+        .unwrap_or_default();
+    let has_html = body.as_ref().is_some_and(|b| b.html.is_some());
+    if body.is_none() || (text.trim().is_empty() && has_html) {
+        return Err("This draft hasn't finished downloading. Try again in a moment.".to_owned());
+    }
+    let draft = ComposeDraft {
+        to: h.to_addrs.clone().unwrap_or_default(),
+        cc: h.cc_addrs.clone().unwrap_or_default(),
+        subject: h.subject.clone().unwrap_or_default(),
+        body: text,
+        // A half-written reply is still a reply: keep the threading headers so sending it lands in the
+        // conversation it belongs to.
+        in_reply_to: h.in_reply_to.clone(),
+        references: h.in_reply_to.clone().into_iter().collect(),
+    };
+
+    // The message says it has files, but we hold no rows for them (a body stored before the attachment
+    // table existed, or a sync that died between the two writes). Fetching "all zero" of them would open
+    // the draft with no chips — and saving it would then expunge the original, taking the files with it.
+    if h.has_attachments && attachments.is_empty() {
+        return Err(
+            "This draft's files haven't downloaded yet. Refresh, then try again.".to_owned(),
+        );
+    }
+
+    let mut paths = Vec::new();
+    if !attachments.is_empty() {
+        let Some(((folder, uid), account_id)) = loc.zip(account_id) else {
+            return Err("This draft's files can't be fetched (it isn't on a server).".to_owned());
+        };
+        let base = std::env::temp_dir().join(format!("geleit-server-draft-{id}"));
+        for (i, a) in attachments.iter().enumerate() {
+            let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+            let (folder, uid) = (folder.clone(), uid as u32);
+            let (fetched_name, bytes) = tauri::async_runtime::spawn_blocking(move || {
+                geleit_engine::sync_actions::run_fetch_attachment(
+                    &db, &*secrets, account_id, &folder, uid, i,
+                )
+            })
+            .await
+            .map_err(|_| "The download task stopped unexpectedly.".to_owned())?
+            .map_err(|_| "Couldn't fetch this draft's files. Check your connection.".to_owned())?;
+
+            let name = safe_attachment_filename(
+                &fetched_name
+                    .or_else(|| a.filename.clone())
+                    .unwrap_or_else(|| format!("attachment-{}", i + 1)),
+            );
+            // Own sub-dir per file, so same-named files stay distinct while the basename (what the
+            // composer chip shows) stays clean.
+            let dir = base.join(i.to_string());
+            std::fs::create_dir_all(&dir)
+                .and_then(|()| {
+                    let path = dir.join(&name);
+                    std::fs::write(&path, &bytes).map(|()| path)
+                })
+                .map(|path| paths.push(path.to_string_lossy().into_owned()))
+                .map_err(|_| "Couldn't open this draft's files.".to_owned())?;
+        }
+    }
+    Ok(ResumedDraft {
+        draft,
+        attachments: paths,
+    })
 }
 
 /// Load a draft's full content back into a compose form, to resume editing. `None` if it's gone. Its
@@ -1110,22 +1302,27 @@ pub async fn delete_draft(state: tauri::State<'_, AppState>, id: i64) -> Result<
     let st = state.inner().clone();
     // Note where any server copy lives (opt-in "sync drafts") before dropping the row that records it.
     let server = with_store(st.clone(), move |store| {
-        let folder = store
-            .draft_by_id(id)
-            .ok()
-            .flatten()
-            .and_then(|r| r.server_folder);
+        // Read the row's own Message-ID and server folder before deleting it — both are gone after.
+        let row = store.draft_by_id(id).ok().flatten();
         let account = store.account_for_draft(id).ok().flatten();
+        let mid = row.as_ref().map(|r| r.msgid.clone());
+        let folder = row.and_then(|r| r.server_folder);
         store
             .delete_draft(id)
             .map_err(|_| "Couldn't delete the draft.".to_owned())?;
-        Ok(folder.zip(account))
+        // The mirrored copy is a *message* row too, once the Drafts folder has been synced. Drop it
+        // with the draft: the merged list folds our copies into the drafts we hold, so a copy whose
+        // draft is gone stops being folded — and the draft the user just deleted would come back as an
+        // "On your provider" row, still resumable, until a sync happened to reconcile it away.
+        if let (Some(account_id), Some(mid)) = (account, mid.as_deref()) {
+            let _ = store.delete_message_by_message_id(account_id, mid);
+        }
+        Ok(folder.zip(account).zip(mid))
     })
     .await?;
     // Best-effort: the local draft is already gone; a failed server cleanup must not error the UI.
-    if let Some((folder, account_id)) = server {
+    if let Some(((folder, account_id), mid)) = server {
         let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
-        let mid = geleit_engine::message::draft_message_id(account_id, id);
         let _ = tauri::async_runtime::spawn_blocking(move || {
             geleit_engine::sync_actions::run_expunge_server_draft(
                 &db, &*secrets, account_id, &folder, &mid,
@@ -1152,9 +1349,8 @@ pub async fn purge_server_drafts(
             .map_err(|_| "Couldn't read your drafts.".to_owned())
     })
     .await?;
-    for (draft_id, folder) in copies {
+    for (draft_id, folder, mid) in copies {
         let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
-        let mid = geleit_engine::message::draft_message_id(account_id, draft_id);
         let gone = tauri::async_runtime::spawn_blocking(move || {
             geleit_engine::sync_actions::run_expunge_server_draft(
                 &db, &*secrets, account_id, &folder, &mid,
@@ -1707,8 +1903,108 @@ pub async fn dev_folder() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{materialize_draft_attachments, read_attachments, AppState};
+    use super::{materialize_draft_attachments, read_attachments, server_drafts, AppState};
     use geleit_platform::secret::InMemorySecretStore;
+    use geleit_store::{DraftContent, NewMessage, Store};
+
+    /// The seam where the real data shapes meet the pure merge: a **namespaced** Drafts folder, read
+    /// out of a real store, folded against the drafts we hold. Everything the pure tests can't see —
+    /// the folder round-trip, the columns, the id spaces — lives here.
+    #[test]
+    fn the_drafts_list_merges_the_providers_drafts_folder_out_of_the_store() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("me@example.com", None).unwrap();
+        s.upsert_folder(acc, "INBOX").unwrap();
+        let drafts = s.upsert_folder(acc, "INBOX.Drafts").unwrap();
+
+        // A draft of ours, mirrored to the server ("sync drafts" on) — appended under its own id.
+        let mine = s
+            .save_draft(
+                acc,
+                None,
+                &DraftContent {
+                    subject: "Mine".to_owned(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let my_msgid = s.draft_by_id(mine).unwrap().unwrap().msgid;
+        s.upsert_message(
+            acc,
+            drafts,
+            &NewMessage {
+                uid: Some(1),
+                message_id: Some(my_msgid),
+                subject: Some("Mine".to_owned()),
+                date: Some(100),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // …and one started in webmail: formatted, addressed to someone, not ours.
+        let theirs = s
+            .upsert_message(
+                acc,
+                drafts,
+                &NewMessage {
+                    uid: Some(2),
+                    message_id: Some("<written-in-webmail@example.org>".to_owned()),
+                    to_addrs: Some("hazel@example.org".to_owned()),
+                    subject: Some("The roof".to_owned()),
+                    date: Some(200),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.store_body(
+            theirs,
+            Some("the words"),
+            Some("<p>the words</p>"),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let local = s.list_drafts(acc).unwrap();
+        let server = server_drafts(&s, acc, local.len());
+        let rows = crate::dto::merged_drafts(&local, &server);
+
+        assert_eq!(
+            rows.len(),
+            2,
+            "our own copy folded back into the draft it is"
+        );
+        let webmail = rows
+            .iter()
+            .find(|r| r.on_server)
+            .expect("the webmail draft");
+        assert_eq!(webmail.id, theirs, "a server row carries the MESSAGE id");
+        assert_eq!(webmail.to, "hazel@example.org");
+        assert_eq!(webmail.subject, "The roof");
+        assert!(
+            webmail.formatted,
+            "it has an HTML part — warn before replacing it"
+        );
+
+        let ours = rows.iter().find(|r| !r.on_server).expect("our draft");
+        assert_eq!(ours.id, mine, "a local row carries the DRAFT id");
+        assert!(!ours.formatted);
+    }
+
+    /// A provider that keeps no Drafts folder: the drafts live on this device, and nothing is hidden.
+    #[test]
+    fn with_no_drafts_folder_on_the_provider_the_list_is_this_devices_drafts_alone() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("me@example.com", None).unwrap();
+        s.upsert_folder(acc, "INBOX").unwrap();
+        s.save_draft(acc, None, &DraftContent::default()).unwrap();
+
+        assert!(server_drafts(&s, acc, 1).is_empty());
+        let rows = crate::dto::merged_drafts(&s.list_drafts(acc).unwrap(), &[]);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].on_server);
+    }
 
     #[test]
     fn one_sync_lock_per_folder_shared_by_every_syncer() {

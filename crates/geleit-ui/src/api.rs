@@ -64,6 +64,12 @@ pub struct DraftSummary {
     pub subject: String,
     pub snippet: String,
     pub updated_at: i64,
+    /// This draft is in the provider's Drafts folder, not on this device — so `id` is a **message**
+    /// id, and it's continued and deleted down different paths than a local draft.
+    pub on_server: bool,
+    /// Written with formatting (HTML). Continuing it in the plain-text composer drops the styling and
+    /// replaces the original, so we ask first.
+    pub formatted: bool,
 }
 
 /// A message opened for reading.
@@ -512,6 +518,18 @@ pub async fn list_drafts(account_id: i64) -> Result<Vec<DraftSummary>, String> {
 /// Load a draft back into a compose form + its attachment paths (`None` if it's gone).
 pub async fn load_draft(id: i64) -> Result<Option<ResumedDraft>, String> {
     call("load_draft", &IdArgs { id }).await
+}
+
+/// Sync the provider's Drafts folder, so a draft started in webmail turns up here. `false` = the
+/// provider keeps no Drafts folder, so the drafts live on this device.
+pub async fn refresh_drafts(account_id: i64) -> Result<bool, String> {
+    call("refresh_drafts", &AccountArgs { account_id }).await
+}
+
+/// Continue a draft that's in the provider's Drafts folder: its text plus its attachments, fetched
+/// and written to temp files so the composer handles them like any other.
+pub async fn resume_server_draft(id: i64) -> Result<ResumedDraft, String> {
+    call("resume_server_draft", &IdArgs { id }).await
 }
 
 /// Take every server copy of this account's drafts back off the server — when "sync drafts" is

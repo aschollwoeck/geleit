@@ -1283,6 +1283,86 @@ mod tests {
         out
     }
 
+    /// The hinge of the merged Drafts list: a draft we upload must come back through a **real sync**
+    /// carrying the Message-ID we stamped on it, byte for byte.
+    ///
+    /// Everything else about the merge is pure and unit-tested — but the pure tests build the server
+    /// row's Message-ID by calling the same code the dedup calls, so they cannot see this. If a server
+    /// (or our own `decode_header`) hands the id back unbracketed, folded, or whitespace-padded, the
+    /// dedup silently stops matching and **every synced draft lists twice** — the exact bug the whole
+    /// feature exists to kill — with all the unit tests still green.
+    /// Needs Dovecot + `--features dangerous-tls`.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn a_draft_we_uploaded_comes_back_carrying_the_message_id_we_stamped() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        // Its own mailbox: the shared Drafts folder is used by sibling tests (and by hand).
+        let folder = format!("GeleitRoundTrip{}", std::process::id());
+        let _ = delete_folder(&cfg, &secrets, &folder).await;
+        create_folder(&cfg, &secrets, &folder)
+            .await
+            .expect("create");
+
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("geleittest@localhost", None).unwrap();
+        // A draft, with the id the STORE minted for it — the one its copy is appended under.
+        let draft_id = store
+            .save_draft(
+                acc,
+                None,
+                &geleit_store::DraftContent {
+                    subject: "Round trip".to_owned(),
+                    body: "Does the id survive?".to_owned(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mid = store.draft_by_id(draft_id).unwrap().unwrap().msgid;
+
+        let raw = format!(
+            "Message-ID: {mid}\r\nFrom: geleittest@localhost\r\nSubject: Round trip\r\n\r\nDoes the id survive?\r\n"
+        );
+        sync_draft(&cfg, &secrets, &folder, &mid, raw.as_bytes())
+            .await
+            .expect("append the copy");
+
+        sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("sync it back");
+        let folder_id = store
+            .folders_for_account(acc)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.name == folder)
+            .expect("the folder")
+            .id;
+        let rows = store.drafts_in_folder(folder_id, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].message_id.as_deref(),
+            Some(mid.as_str()),
+            "the id must survive ENVELOPE + decode_header untouched, or the dedup stops matching"
+        );
+
+        // And the payoff, end to end: the draft and its copy are ONE row in the Drafts list.
+        assert_eq!(
+            rows.len(),
+            1,
+            "one copy on the server for one draft — a re-save replaces it, never appends"
+        );
+        let _ = delete_folder(&cfg, &secrets, &folder).await;
+    }
+
     /// New-mail detection (NOTIF-1): the FIRST sync of a folder primes it and announces nothing (or a
     /// new account would notify about its whole inbox); after that, an arriving message is announced,
     /// one already `\Seen` on the server is not, and a re-sync announces nothing again.

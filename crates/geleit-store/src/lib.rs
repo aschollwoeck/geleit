@@ -178,6 +178,25 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE folder ADD COLUMN primed INTEGER NOT NULL DEFAULT 0;
     ",
+    // 15 — a draft's Message-ID is now a **stored fact**, not a function of its id.
+    //
+    // It used to be derived: `<geleit-draft-{account}-{draft}@geleit.local>`. But `draft.id` is a bare
+    // SQLite rowid, and SQLite **reuses** the id of the highest deleted row — so a new, unrelated draft
+    // could inherit a deleted one's identity. Two things then went wrong, both silent:
+    //
+    //   * a copy of the deleted draft still on the server (the expunge failed — offline) folded into
+    //     the new draft in the Drafts list and vanished from view for good; and, far worse,
+    //   * the next save of the new draft expunged **by Message-ID**, destroying that stranded draft's
+    //     content on the server.
+    //
+    // So each draft now carries its own id with a random suffix, minted once and never reused. Existing
+    // rows are backfilled with the derived form they already have copies under, so those copies stay
+    // findable (and expungeable) exactly as before.
+    "
+    ALTER TABLE draft ADD COLUMN msgid TEXT NOT NULL DEFAULT '';
+    UPDATE draft SET msgid = '<geleit-draft-' || account_id || '-' || id || '@geleit.local>'
+      WHERE msgid = '';
+    ",
 ];
 
 /// A parsed search query (SEARCH-1/4): an FTS5 `MATCH` string (`None` when there are no full-text
@@ -347,6 +366,10 @@ pub struct DraftContent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftRow {
     pub id: i64,
+    /// This draft's own RFC 5322 `Message-ID`, minted when it was first saved and never reused — it is
+    /// how a copy on the server is recognised as *this* draft's. Deliberately **not** derived from
+    /// `id`: SQLite reuses the ids of deleted rows (migration 15).
+    pub msgid: String,
     pub content: DraftContent,
     pub updated_at: i64,
     /// The server folder holding a copy of this draft, when the opt-in "sync drafts" setting put one
@@ -388,6 +411,23 @@ pub struct NewMessage {
     pub flagged: bool,
     pub has_attachments: bool,
     pub snippet: Option<String>,
+}
+
+/// A draft as it sits in the provider's Drafts folder — what the Drafts list needs to show it, decide
+/// whether it's one of ours, and warn before a plain-text composer eats its formatting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderDraft {
+    pub id: i64,
+    /// The RFC 5322 `Message-ID` — how a copy GeleitMail itself uploaded is recognised.
+    pub message_id: Option<String>,
+    pub to_addrs: Option<String>,
+    pub cc_addrs: Option<String>,
+    pub subject: Option<String>,
+    pub snippet: Option<String>,
+    /// The `Date:` header — when the draft was written, as the provider recorded it.
+    pub date: Option<i64>,
+    /// It has an HTML body: continuing it in a plain-text composer keeps the words, not the styling.
+    pub formatted: bool,
 }
 
 /// A message header as read back for listing (newest-first).
@@ -696,7 +736,16 @@ impl Store {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%s','now'))",
                     (account_id, &c.to, &c.cc, &c.subject, &c.body, &c.in_reply_to, &refs),
                 )?;
-                Ok(self.conn.last_insert_rowid())
+                let id = self.conn.last_insert_rowid();
+                // The random suffix is the whole point: the row id alone is reused by SQLite after a
+                // delete, and a draft that inherits a dead draft's Message-ID expunges *its* copy off
+                // the server. `randomblob` keeps this in SQL — no RNG dependency for a mail store.
+                self.conn.execute(
+                    "UPDATE draft SET msgid = '<geleit-draft-' || account_id || '-' || id || '-' || \
+                     lower(hex(randomblob(6))) || '@geleit.local>' WHERE id = ?1",
+                    [id],
+                )?;
+                Ok(id)
             }
         }
     }
@@ -705,7 +754,7 @@ impl Store {
     pub fn list_drafts(&self, account_id: i64) -> Result<Vec<DraftRow>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, to_addrs, cc_addrs, subject, body, in_reply_to, reference_ids, updated_at, \
-             server_folder \
+             server_folder, msgid \
              FROM draft WHERE account_id = ?1 ORDER BY updated_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([account_id], Self::draft_from_row)?;
@@ -718,7 +767,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT id, to_addrs, cc_addrs, subject, body, in_reply_to, reference_ids, \
-                 updated_at, server_folder FROM draft WHERE id = ?1",
+                 updated_at, server_folder, msgid FROM draft WHERE id = ?1",
                 [id],
                 Self::draft_from_row,
             )
@@ -787,6 +836,7 @@ impl Store {
             },
             updated_at: r.get(7)?,
             server_folder: r.get(8)?,
+            msgid: r.get(9)?,
         })
     }
 
@@ -807,12 +857,12 @@ impl Store {
     pub fn drafts_with_server_copies(
         &self,
         account_id: i64,
-    ) -> Result<Vec<(i64, String)>, StoreError> {
+    ) -> Result<Vec<(i64, String, String)>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, server_folder FROM draft \
+            "SELECT id, server_folder, msgid FROM draft \
              WHERE account_id = ?1 AND server_folder IS NOT NULL",
         )?;
-        let rows = stmt.query_map([account_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let rows = stmt.query_map([account_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -1065,6 +1115,60 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The drafts sitting in a provider's Drafts folder, newest first — everything the Drafts list
+    /// needs about them, in **one** query.
+    ///
+    /// Not `messages_in_folder` + `header_by_id` + `body_for` per row: that's three reads per draft,
+    /// and the last one pulls the whole body through SQLCipher just to ask whether it has an HTML
+    /// part. This asks the database that question instead (`html IS NOT NULL`), and never reads a body.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn drafts_in_folder(
+        &self,
+        folder_id: i64,
+        limit: i64,
+    ) -> Result<Vec<FolderDraft>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, m.message_id, m.to_addrs, m.cc_addrs, m.subject, m.snippet, m.date, \
+             EXISTS(SELECT 1 FROM body b WHERE b.message_id = m.id AND b.html IS NOT NULL) \
+             FROM message m WHERE m.folder_id = ?1 ORDER BY m.date DESC, m.id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map((folder_id, limit), |r| {
+            Ok(FolderDraft {
+                id: r.get(0)?,
+                message_id: r.get(1)?,
+                to_addrs: r.get(2)?,
+                cc_addrs: r.get(3)?,
+                subject: r.get(4)?,
+                snippet: r.get(5)?,
+                date: r.get(6)?,
+                formatted: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Delete an account's local row for a message with this RFC 5322 `Message-ID`. Returns how many
+    /// rows went (0 if we don't hold it).
+    ///
+    /// Used when a draft that had been mirrored to the provider is deleted: the mirrored copy is also
+    /// a **message row** in the synced Drafts folder, and leaving it there would resurrect the draft
+    /// the user just deleted — as an "On your provider" row, still resumable.
+    ///
+    /// # Errors
+    /// The delete failing (a corrupt or unreadable database).
+    pub fn delete_message_by_message_id(
+        &self,
+        account_id: i64,
+        message_id: &str,
+    ) -> Result<usize, StoreError> {
+        Ok(self.conn.execute(
+            "DELETE FROM message WHERE account_id = ?1 AND message_id = ?2",
+            (account_id, message_id),
+        )?)
     }
 
     /// Recent messages across **every** account's INBOX, newest first — for the merged "All inboxes"
@@ -1727,6 +1831,188 @@ mod tests {
     }
 
     #[test]
+    fn a_new_draft_never_inherits_a_deleted_drafts_message_id() {
+        // SQLite reuses the row id of the highest deleted row, so `draft.id` is NOT a stable identity.
+        // A draft's Message-ID is what its copy on the server is stamped with — and what a re-save
+        // expunges by. If a new draft could inherit a dead one's Message-ID, saving it would destroy
+        // the dead draft's stranded copy on the server (and hide it from the Drafts list first).
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let c = DraftContent::default();
+
+        let first = s.save_draft(acc, None, &c).unwrap();
+        let doomed = s.save_draft(acc, None, &c).unwrap();
+        let doomed_id = s.draft_by_id(doomed).unwrap().unwrap().msgid;
+        s.delete_draft(doomed).unwrap();
+
+        let reborn = s.save_draft(acc, None, &c).unwrap();
+        let reborn_id = s.draft_by_id(reborn).unwrap().unwrap().msgid;
+        assert_eq!(
+            reborn, doomed,
+            "SQLite really does hand the id back — that's the hazard"
+        );
+        assert_ne!(
+            reborn_id, doomed_id,
+            "…but the identity that reaches the server must not come back with it"
+        );
+
+        // And the ordinary guarantees: every draft's id is distinct, stamped, and stable across saves.
+        let first_id = s.draft_by_id(first).unwrap().unwrap().msgid;
+        assert_ne!(first_id, reborn_id);
+        assert!(reborn_id.starts_with("<geleit-draft-") && reborn_id.ends_with("@geleit.local>"));
+        s.save_draft(acc, Some(reborn), &c).unwrap();
+        assert_eq!(
+            s.draft_by_id(reborn).unwrap().unwrap().msgid,
+            reborn_id,
+            "a re-save keeps the id, or it could never find the copy it left last time"
+        );
+    }
+
+    #[test]
+    fn deleting_a_message_by_its_message_id_is_scoped_to_the_account() {
+        // The mirrored copy of a deleted draft has to go with it, or the draft comes back as an "On
+        // your provider" row. Two accounts on one server can hold the same Message-ID, so scope it.
+        let s = Store::open_in_memory().unwrap();
+        let (a, b) = (
+            s.add_account("a@example.com", None).unwrap(),
+            s.add_account("b@example.com", None).unwrap(),
+        );
+        let mid = "<geleit-draft-1-7-aa@geleit.local>";
+        for acc in [a, b] {
+            let f = s.upsert_folder(acc, "Drafts").unwrap();
+            s.upsert_message(
+                acc,
+                f,
+                &NewMessage {
+                    uid: Some(1),
+                    message_id: Some(mid.to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(s.delete_message_by_message_id(a, mid).unwrap(), 1);
+        assert_eq!(
+            s.delete_message_by_message_id(a, mid).unwrap(),
+            0,
+            "idempotent — a copy we never held is not an error"
+        );
+        let b_drafts = s.folders_for_account(b).unwrap()[0].id;
+        assert_eq!(
+            s.messages_in_folder(b_drafts, 10).unwrap().len(),
+            1,
+            "the other account's message is untouched"
+        );
+    }
+
+    #[test]
+    fn drafts_in_folder_reads_the_whole_row_and_says_which_ones_are_formatted() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let drafts = s.upsert_folder(acc, "Drafts").unwrap();
+        let other = s.upsert_folder(acc, "INBOX").unwrap();
+
+        // A draft written in webmail (HTML), a plain one, and one in another folder entirely.
+        let html = s
+            .upsert_message(
+                acc,
+                drafts,
+                &NewMessage {
+                    uid: Some(1),
+                    message_id: Some("<a@webmail>".to_owned()),
+                    to_addrs: Some("hazel@example.org".to_owned()),
+                    cc_addrs: Some("sam@example.org".to_owned()),
+                    subject: Some("The roof".to_owned()),
+                    date: Some(100),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.store_body(
+            html,
+            Some("the words"),
+            Some("<p>the words</p>"),
+            Some("the words"),
+            false,
+        )
+        .unwrap();
+        let plain = s
+            .upsert_message(
+                acc,
+                drafts,
+                &NewMessage {
+                    uid: Some(2),
+                    subject: Some("Plain".to_owned()),
+                    date: Some(300),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.store_body(plain, Some("just text"), None, Some("just text"), false)
+            .unwrap();
+        s.upsert_message(
+            acc,
+            other,
+            &NewMessage {
+                uid: Some(3),
+                subject: Some("not a draft".to_owned()),
+                date: Some(400),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rows = s.drafts_in_folder(drafts, 50).unwrap();
+        assert_eq!(rows.len(), 2, "only this folder's drafts");
+        // Newest first.
+        assert_eq!(rows[0].id, plain);
+        assert_eq!(rows[0].subject.as_deref(), Some("Plain"));
+        assert!(
+            !rows[0].formatted,
+            "a plain-text draft loses nothing in our composer"
+        );
+
+        let h = &rows[1];
+        assert_eq!(h.id, html);
+        assert!(
+            h.formatted,
+            "it has an HTML body — continuing it would drop the styling, so the UI must ask"
+        );
+        // Everything the list needs, from the one query: who it's to, what it says, when, and whether
+        // it's a copy we uploaded ourselves.
+        assert_eq!(h.message_id.as_deref(), Some("<a@webmail>"));
+        assert_eq!(h.to_addrs.as_deref(), Some("hazel@example.org"));
+        assert_eq!(h.cc_addrs.as_deref(), Some("sam@example.org"));
+        assert_eq!(h.snippet.as_deref(), Some("the words"));
+        assert_eq!(h.date, Some(100));
+
+        // The cap is honoured (a broken client could have appended thousands).
+        assert_eq!(s.drafts_in_folder(drafts, 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_draft_with_no_body_yet_is_listed_and_is_not_called_formatted() {
+        // It hasn't finished downloading. It must still show up (it's a draft on the provider), and it
+        // must not be flagged as formatted — that would raise a warning about styling we've never seen.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let drafts = s.upsert_folder(acc, "Drafts").unwrap();
+        s.upsert_message(
+            acc,
+            drafts,
+            &NewMessage {
+                uid: Some(1),
+                subject: Some("No body yet".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let rows = s.drafts_in_folder(drafts, 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].formatted);
+    }
+
+    #[test]
     fn messages_in_folder_newest_first_and_scoped() {
         let s = Store::open_in_memory().unwrap();
         let acc = s.add_account("a@example.com", None).unwrap();
@@ -2016,14 +2302,21 @@ mod tests {
         let others = s.save_draft(other, None, &c).unwrap();
         s.set_draft_server_folder(others, Some("INBOX.Drafts"))
             .unwrap();
+        // Each row carries the draft's own stored Message-ID — the copy on the server is expunged by
+        // it, so it must be the one that draft was appended under, never one re-derived from its id.
+        let mine = s.draft_by_id(id).unwrap().unwrap().msgid;
         assert_eq!(
             s.drafts_with_server_copies(acc).unwrap(),
-            vec![(id, "Drafts".to_owned())],
+            vec![(id, "Drafts".to_owned(), mine)],
             "only this account's synced draft"
         );
         assert_eq!(
             s.drafts_with_server_copies(other).unwrap(),
-            vec![(others, "INBOX.Drafts".to_owned())]
+            vec![(
+                others,
+                "INBOX.Drafts".to_owned(),
+                s.draft_by_id(others).unwrap().unwrap().msgid
+            )]
         );
         assert!(s
             .draft_by_id(local_only)

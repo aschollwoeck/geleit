@@ -23,6 +23,11 @@ An unsent draft is often the most private thing in your mailbox, so GeleitMail k
 device only**, encrypted like the rest of your mail. Nothing you haven't sent is uploaded to your
 provider.
 
+**Drafts you started somewhere else.** If your provider keeps a Drafts folder, GeleitMail reads it so
+those drafts appear in one list with yours — they're already on your provider's server, and GeleitMail
+only reads them. Continue one and **save** it, and it becomes a draft on this device and is removed from
+your provider. Drafts you write here still aren't uploaded unless you turn the setting on.
+
 If you want your drafts on your other devices, you can choose to share them: turn on **Sync drafts to
 your provider** in **Settings → Privacy**. It's **off by default**, and while it's off no draft ever
 leaves your machine.
@@ -48,8 +53,14 @@ pixels from firing without your say-so.
 ## Reading offline
 
 Because your mail lives on your own device, you can read everything you've synced with no internet
-connection. Talking to your provider is the only part that needs the network — that means the
-automatic check for new mail (every few minutes, in the background) and **Refresh** when you ask for
-it. Nothing else about your mail leaves this machine.
+connection. Talking to your provider is the only part that needs the network, and it happens when:
+
+- GeleitMail **checks for new mail** (every few minutes, in the background), or you choose **Refresh**;
+- you open **Drafts** — GeleitMail looks in your provider's Drafts folder for drafts you started
+  elsewhere — or continue and save one of those drafts;
+- you **fetch a file**: saving an attachment, or opening a draft that has one;
+- you **send**, or act on mail in a way that has to reach the server (archive, move, delete).
+
+Nothing else about your mail leaves this machine.
 
 For the developer-facing security review, see [`../security-review.md`](../security-review.md).

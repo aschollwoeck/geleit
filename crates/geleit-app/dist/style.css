@@ -309,6 +309,10 @@ iframe.mail { flex: 1; width: 100%; border: 0; background: #fff; }
 }
 .win-head { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--divider); }
 .win-head.raised { background: var(--surface-raised); }
+/* A quiet line under the compose title when the draft being continued is the provider's: saving it
+   removes their copy, and the user should know that before they type, not after. */
+.compose-note { padding: 8px 16px; font-size: 12.5px; line-height: 1.45; color: var(--warning-strong);
+  background: var(--warning-quiet); border-bottom: 1px solid var(--divider); }
 .win-title { font-weight: 600; font-size: 14px; }
 .close-btn { width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center; cursor: pointer; color: var(--text-muted); border: none; background: transparent; }
 .close-btn:hover { background: var(--surface-raised); }
@@ -348,6 +352,10 @@ iframe.mail { flex: 1; width: 100%; border: 0; background: #fff; }
 .row.draft:hover .draftdel { opacity: 1; }
 .row.draft .draftdel:hover { color: var(--danger-strong); }
 .row.draft .draftdel .ic svg { width: 14px; height: 14px; }
+/* Where a draft lives. Only shown on the ones that aren't on this device — the quiet default is that
+   they are, so the marker appears exactly when it says something. */
+.row.draft .draft-where { display: inline-block; margin-top: 6px; padding: 1px 7px; border-radius: 999px;
+  font-size: 11px; line-height: 1.5; color: var(--text-muted); background: var(--surface-raised); border: 1px solid var(--divider); }
 
 /* Address autocomplete dropdown, anchored under the To/Cc input. */
 .field-row.recipient { position: relative; }
