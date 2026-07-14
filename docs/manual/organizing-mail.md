@@ -15,7 +15,8 @@ stay in the same place no matter how long the subject is:
 - **Archive** — move it out of the inbox into your Archive folder.
 - **Delete** — move it to Trash. When the message is **already in Trash**, this button reads **Delete
   forever** and permanently removes it (see below).
-- **Move…** — pick a folder to move the message into.
+- **Move…** — pick a folder to move the message into. The message goes to the folder you picked,
+  whatever it's called and whatever it's for.
 - **Spam** — from the **Move…** menu, send a message to your Junk folder (or move it back to Inbox).
 - **Mark as unread** — bring back the unread dot.
 
@@ -29,8 +30,21 @@ You can make your own folders to sort your mail. At the bottom of the folder lis
   you give it a new name (its messages come along). **Delete** removes the folder — and, after you
   confirm, **all the messages in it** — from your provider and this device; this can't be undone.
 
-Your standard folders — Inbox, Sent, Drafts, Archive, Trash, Junk, and Saved — are kept as they are,
-so they don't show the rename or delete options.
+Your standard folders — Inbox, Sent, Drafts, Archive, Trash, Junk, and Saved, **under whatever names
+your provider gives them** — are kept as they are, so they don't show the rename or delete options.
+
+**Whatever your provider calls them.** GeleitMail asks your provider which folder is which, so if your
+mail is in German, French, or anything else — *Entwürfe*, *Gesendet*, *Papierkorb* — they get the right
+icons, sit in the right place in the folder list, and are protected from being renamed or deleted by
+accident. They're also the folders GeleitMail actually **uses**: the copy of every message you send goes
+to your real Sent folder, **Archive** and **Delete** move mail to your real Archive and Trash, **Empty
+Trash** and **Delete forever** appear when you're in your real Trash, and **Drafts** shows the drafts
+your provider is keeping for you. (For a provider that doesn't say, GeleitMail falls back to recognising
+the usual English names.)
+
+If your provider doesn't keep one of these folders at all — some have no Archive — GeleitMail tells you
+so rather than putting your mail somewhere it doesn't belong. You can always use **Move…** to pick a
+folder yourself.
 
 ## Emptying the Trash
 

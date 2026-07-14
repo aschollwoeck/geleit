@@ -14,6 +14,7 @@ publish = false
 # `scripts/build-ui.sh` into `dist/`, which Tauri serves as static assets.
 
 [dependencies]
+geleit-core = { path = "../geleit-core" }
 geleit-store = { path = "../geleit-store" }
 geleit-engine = { path = "../geleit-engine" }
 geleit-platform = { path = "../geleit-platform" }

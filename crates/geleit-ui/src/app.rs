@@ -7,7 +7,7 @@ use crate::api::{
 };
 use crate::icons::{self, icon};
 use crate::view::{
-    all_selected, elide, format_date, is_protected_folder, merge_addrs, range_ids,
+    all_selected, elide, format_date, is_protected_folder, is_trash_folder, merge_addrs, range_ids,
     rank_suggestions, split_addrs,
 };
 use leptos::either::Either;
@@ -45,7 +45,21 @@ struct FolderForm {
 #[derive(Clone)]
 struct PendingMove {
     ids: Vec<i64>,
-    role: &'static str,
+    to: MoveTo,
+}
+
+/// Where a deferred move is going. The distinction is load-bearing: the toolbar's Archive / Delete /
+/// Spam name a **role** and GeleitMail has to find the folder (the server's `\Trash` flag, then the
+/// name); the Move… menu names the **folder the user picked**, and there is nothing to work out.
+///
+/// They used to be one thing: every folder in the Move… menu was mapped onto one of four roles by
+/// matching English words, and anything that matched none of them — every ordinary folder, and every
+/// folder on a provider that isn't English — fell through to `inbox`. Picking "Work" filed the message
+/// in the Inbox.
+#[derive(Clone, PartialEq, Eq)]
+enum MoveTo {
+    Role(&'static str),
+    Folder(String),
 }
 
 /// Whether a row shows as unread, from the two session sets (see `read_now` / `marked_unread`).
@@ -547,7 +561,7 @@ pub fn App() -> impl IntoView {
                 w.clear_timeout_with_handle(h);
             }
         }
-        let role = pm.role;
+        let to = pm.to;
         // Keep only the affected rows so a failed move re-inserts *those* — not a whole stale snapshot
         // that could resurrect a message a concurrent (overlapping) commit has since removed.
         let saved: Vec<Message> = messages
@@ -561,6 +575,7 @@ pub fn App() -> impl IntoView {
         for id in pm.ids {
             // Each id keeps its own row for a precise re-insert on failure.
             let row = saved.iter().find(|m| m.id == id).cloned();
+            let to = to.clone();
             leptos::task::spawn_local(async move {
                 let restore = move |msg: String| {
                     if let Some(m) = row {
@@ -572,7 +587,11 @@ pub fn App() -> impl IntoView {
                     }
                     error.set(Some(msg));
                 };
-                match api::move_to_role(id, role).await {
+                let done = match &to {
+                    MoveTo::Role(role) => api::move_to_role(id, role).await,
+                    MoveTo::Folder(name) => api::move_to_folder(id, name).await,
+                };
+                match done {
                     Ok(true) => {}
                     Ok(false) => restore("This account has no folder for that.".to_owned()),
                     Err(e) => restore(e),
@@ -597,19 +616,21 @@ pub fn App() -> impl IntoView {
     // Archive / trash / spam the open message. The move is *deferred*: the row is hidden and an Undo
     // toast is shown; the server move only runs when the toast window elapses (see the auto-dismiss
     // Effect), so Undo is a pure local cancel. Any earlier pending move is committed first.
-    let move_open = move |role: &'static str, verb: &'static str| {
+    let move_open_to = move |to: MoveTo, verb: &'static str| {
         let Some(id) = open.get().map(|b| b.id) else {
             return;
         };
         commit_pending(); // only one move can be pending at a time
         open.set(None);
         move_menu.set(false);
-        pending.set(Some(PendingMove {
-            ids: vec![id],
-            role,
-        }));
+        pending.set(Some(PendingMove { ids: vec![id], to }));
         toast.set(Some(verb.to_owned()));
     };
+    // Archive / Delete / Spam: a role, which GeleitMail resolves to a folder.
+    let move_open =
+        move |role: &'static str, verb: &'static str| move_open_to(MoveTo::Role(role), verb);
+    // Move…: the folder the user named. No resolving, no guessing.
+    let move_open_folder = move |name: String| move_open_to(MoveTo::Folder(name), "Moved");
 
     // Archive / delete every selected message under one deferred Undo window (reuses the move machinery
     // above). Clears the selection immediately; the server moves run only when the toast elapses.
@@ -623,7 +644,10 @@ pub fn App() -> impl IntoView {
         selected.set(HashSet::new());
         select_anchor.set(None);
         let toast_text = format!("{} {verb}", ids.len());
-        pending.set(Some(PendingMove { ids, role }));
+        pending.set(Some(PendingMove {
+            ids,
+            to: MoveTo::Role(role),
+        }));
         toast.set(Some(toast_text));
     };
 
@@ -915,7 +939,7 @@ pub fn App() -> impl IntoView {
             .get()
             .iter()
             .find(|f| selected_folder.get() == Some(f.id))
-            .is_some_and(|f| folder_role(&f.name) == "trash")
+            .is_some_and(|f| is_trash_folder(&f.name, f.role.as_deref()))
     };
 
     // Empty the current Trash folder — permanent, confirmed. Re-lists (now empty) on success.
@@ -1600,7 +1624,7 @@ pub fn App() -> impl IntoView {
                     if let Some(f) = folders
                         .get_untracked()
                         .into_iter()
-                        .find(|f| !is_protected_folder(&f.name))
+                        .find(|f| !is_protected_folder(&f.name, f.role.as_deref()))
                     {
                         folder_menu.set(Some(f.id));
                     }
@@ -1807,12 +1831,12 @@ pub fn App() -> impl IntoView {
                         <button class="compose-btn" title="Compose" on:click=move |_| compose_new()>{icon(icons::PLUS)}</button>
                         <For each=move || folders.get() key=|f| f.id let:f>
                             {
-                                let (id, name) = (f.id, f.name.clone());
+                                let (id, name, role) = (f.id, f.name.clone(), f.role.clone());
                                 view! {
                                     <button class="folder" class:active=move || selected_folder.get() == Some(id)
                                         title=name.clone() on:click=move |_| choose_folder(id)>
                                         <span class="guide"></span>
-                                        <span class="fic">{icon(icons::folder_icon(&name))}</span>
+                                        <span class="fic">{icon(icons::folder_icon(&name, role.as_deref()))}</span>
                                     </button>
                                 }
                             }
@@ -1883,7 +1907,8 @@ pub fn App() -> impl IntoView {
                             {
                                 let (id, name, unread) = (f.id, f.name.clone(), f.unread);
                                 let label = name.clone();
-                                let protected = is_protected_folder(&name);
+                                let role = f.role.clone();
+                                let protected = is_protected_folder(&name, role.as_deref());
                                 let rename_name = name.clone();
                                 let del_name = name.clone();
                                 view! {
@@ -1892,7 +1917,7 @@ pub fn App() -> impl IntoView {
                                         on:click=move |_| choose_folder(id)
                                         on:keydown=move |e| { if e.key() == "Enter" || e.key() == " " { e.prevent_default(); choose_folder(id); } }>
                                         <span class="guide"></span>
-                                        <span class="fic">{icon(icons::folder_icon(&name))}</span>
+                                        <span class="fic">{icon(icons::folder_icon(&name, role.as_deref()))}</span>
                                         {label}
                                         <span class="fcount">{move || if unread > 0 { unread.to_string() } else { String::new() }}</span>
                                         <Show when=move || !protected>
@@ -2161,9 +2186,9 @@ pub fn App() -> impl IntoView {
                                                 <For each=move || folders.get() key=|f| f.id let:f>
                                                     {
                                                         let name = f.name.clone();
-                                                        let role = folder_role(&name);
+                                                        let target = name.clone();
                                                         view! {
-                                                            <div class="menu-item" on:click=move |_| move_open(role, "Moved")>{name}</div>
+                                                            <div class="menu-item" on:click=move |_| move_open_folder(target.clone())>{name}</div>
                                                         }
                                                     }
                                                 </For>
@@ -2606,20 +2631,6 @@ fn settings_tabs(tab: RwSignal<String>) -> impl IntoView {
                 }
             }
         </For>
-    }
-}
-
-/// The role a folder maps to for [`api::move_to_role`], inferred from its name.
-fn folder_role(name: &str) -> &'static str {
-    let n = name.to_lowercase();
-    if n.contains("archive") {
-        "archive"
-    } else if n.contains("trash") || n.contains("deleted") || n.contains("bin") {
-        "trash"
-    } else if n.contains("spam") || n.contains("junk") {
-        "spam"
-    } else {
-        "inbox"
     }
 }
 

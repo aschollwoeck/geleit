@@ -19,6 +19,11 @@ pub struct Folder {
     pub name: String,
     #[serde(default)]
     pub unread: i64,
+    /// What the server says this folder is for (`drafts`, `sent`, `trash`, `archive`, `junk`,
+    /// `inbox`), or `None` if it didn't say. A folder called `Entwürfe` still gets the drafts icon and
+    /// the same protection from renaming — neither of which its *name* could tell us.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -349,6 +354,18 @@ pub async fn set_read(id: i64) -> Result<(), String> {
 
 /// Move a message to a role folder: "archive" | "trash" | "spam" | "inbox". Returns whether it acted
 /// (false = the account has no such folder).
+pub async fn move_to_folder(id: i64, folder: &str) -> Result<bool, String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args<'a> {
+        id: i64,
+        folder: &'a str,
+    }
+    call("move_to_folder", &Args { id, folder }).await
+}
+
+/// Move a message to a well-known folder by ROLE (archive / trash / spam / inbox) — the toolbar
+/// actions, where GeleitMail has to find the folder itself.
 pub async fn move_to_role(id: i64, role: &str) -> Result<bool, String> {
     call(
         "move_to_role",

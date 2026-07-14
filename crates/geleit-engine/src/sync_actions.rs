@@ -335,11 +335,21 @@ pub fn run_send(
         },
         allow_invalid_certs: imap.allow_invalid_certs,
     };
-    // A Sent folder to save a copy in (SEND-8), by name (SPECIAL-USE detection is a follow-up).
+    // A Sent folder to save a copy in (SEND-8). By the server's own `\Sent` flag (RFC 6154), falling
+    // back to the English name — the old contains("sent") match found nothing at all on a provider that
+    // calls it `Gesendet`, so sent mail was quietly saved nowhere.
     let sent_folder = store.folders_for_account(account.id).ok().and_then(|fs| {
-        fs.into_iter()
-            .map(|f| f.name)
-            .find(|n| n.eq_ignore_ascii_case("sent") || n.to_ascii_lowercase().contains("sent"))
+        let pairs: Vec<(String, Option<geleit_core::FolderRole>)> = fs
+            .into_iter()
+            .map(|f| {
+                let role = f
+                    .role
+                    .as_deref()
+                    .and_then(geleit_core::FolderRole::from_key);
+                (f.name, role)
+            })
+            .collect();
+        geleit_core::pick_folder(&pairs, geleit_core::FolderRole::Sent).map(str::to_owned)
     });
     // If this draft has a copy on the server (opt-in "sync drafts"), remove it once the mail is away.
     // By the draft's **stored** Message-ID — deriving one from the row id would expunge whatever copy a

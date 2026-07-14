@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Drafts, in one place
+- **One Drafts.** The folder list showed "Drafts" twice — GeleitMail's own drafts and your provider's
+  Drafts folder. Now there is one, and it holds both: the drafts you saved here *and* the ones you
+  started in webmail or on your phone (marked **On your provider**). Continue one and it opens in the
+  compose window, attachments and all; saving or sending it moves it here and removes their copy.
+- **Fixed a way drafts could be destroyed.** A draft's identity on the server was derived from its row
+  id — and those ids get reused. A new draft could inherit a deleted one's identity and, on its next
+  save, wipe that draft's content off your provider. Drafts now keep an identity of their own.
+
+### Your provider's folders, in your language
+- **GeleitMail now asks your provider which folder is which** (IMAP SPECIAL-USE) instead of matching the
+  English words. If your mail is in German, French, or anything else — *Entwürfe*, *Gesendet*,
+  *Papierkorb* — those folders now get the right icons, sit in the right place, are protected from being
+  renamed by accident, and are the folders GeleitMail actually uses. Before this, on such a provider,
+  **the copy of every message you sent was saved nowhere**, and Archive, Delete and Empty Trash didn't
+  work.
+- **Move… moves the message to the folder you picked.** It used to sort every folder into one of four
+  kinds and, for anything it didn't recognise — every ordinary folder — put the message in the Inbox.
+
 ## v0.1.2 — feature parity restored, and then some — 2026-07-13
 
 The v0.1.1 rebuild got the rendering and the design right, but it had quietly left several v0.1.0

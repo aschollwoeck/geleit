@@ -40,7 +40,18 @@ pub const STAR_FILLED: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16"
 pub const MARKDOWN: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="1" y="3" width="14" height="10" rx="1.6" stroke="currentColor" stroke-width="1.3"/><path d="M3.4 10.6V5.6l1.8 2.1 1.8-2.1v5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.9 5.6v5m0 0L9.5 9.1m1.4 1.5 1.4-1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 
 /// Folder icons keyed by a role/name; unknown folders get the generic folder glyph.
-pub fn folder_icon(name: &str) -> &'static str {
+pub fn folder_icon(name: &str, role: Option<&str>) -> &'static str {
+    // The role the server gave it, when it gave one: `Papierkorb` is a bin, and the rail should draw it
+    // as one even though nothing in its name says so.
+    match role.unwrap_or("") {
+        "inbox" => return INBOX,
+        "sent" => return SENT,
+        "archive" => return ARCHIVE,
+        "trash" => return TRASH,
+        "junk" => return JUNK,
+        "drafts" => return DRAFTS,
+        _ => {}
+    }
     match name.to_ascii_lowercase().as_str() {
         "inbox" => INBOX,
         "sent" => SENT,

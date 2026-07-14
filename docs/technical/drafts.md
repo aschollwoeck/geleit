@@ -12,11 +12,11 @@ what gives save/resume/attachments) and the provider's real `Drafts` folder, whi
 other folder at sync. Nearly every provider keeps one, so nearly every user saw the duplicate.
 
 Now there is one **Drafts** entry, and `ipc::list_folders` **hides** the provider's Drafts folder from
-the rail — because that entry *is* it. Which folder that is comes from `dto::pick_drafts_folder`
-(exact name first, then a namespaced form like `INBOX.Drafts` / `[Gmail]/Drafts`). That function is the
-**single** answer to "which folder holds the drafts": it is what `list_drafts` reads, what drafts are
-mirrored to, and what the rail hides. Two different answers would put the folder back in the rail
-beside its own contents.
+the rail — because that entry *is* it. Which folder that is comes from `geleit_core::pick_folder(…,
+FolderRole::Drafts)`: the server's own `\Drafts` flag first, then the name (see `folder-roles.md`).
+That is the **single** answer to "which folder holds the drafts": it is what `list_drafts` reads, what
+drafts are mirrored to, and what the rail hides. Two different answers would put the folder back in the
+rail beside its own contents.
 
 ## De-duplication is the whole trick
 
@@ -118,10 +118,6 @@ and after the sync), so the difference is not academic (P3: latency is a defect)
 
 ## Known limits
 
-- **The Drafts folder is found by name** (`Drafts`, or a path whose last segment is `Drafts`). A
-  provider that localizes it — GMX's `Entwürfe`, for one — keeps its Drafts folder in the rail and its
-  drafts out of the list. The real fix is RFC 6154 SPECIAL-USE (`\Drafts` on the LIST response), which
-  would fix `Sent`/`Trash`/`Archive` the same way; they are *all* name-matched today. Its own slice.
 - **A resumed server draft carries only `In-Reply-To`, not the full `References` chain** — the message
   table has no column for it. A half-written reply, continued here and sent, can break threading in
   clients that thread on `References`.
