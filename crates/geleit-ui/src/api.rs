@@ -271,6 +271,8 @@ extern "C" {
     async fn geleit_invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = geleitOnSyncProgress)]
     fn geleit_on_sync_progress(cb: &wasm_bindgen::JsValue);
+    #[wasm_bindgen(js_name = geleitOnMailArrived)]
+    fn geleit_on_mail_arrived(cb: &wasm_bindgen::JsValue);
 }
 
 /// Call a shell command and decode its reply. Errors come back as the shell's calm, PII-free strings.
@@ -634,6 +636,23 @@ pub fn on_sync_progress(cb: impl Fn(i64) + 'static) {
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub fn on_sync_progress(_cb: impl Fn(i64) + 'static) {}
+
+/// New mail arrived on its own (the background scheduler found it, NOTIF-1). `cb` gets how many
+/// messages are worth announcing. Subscribed once, for the app's lifetime.
+#[cfg(target_arch = "wasm32")]
+pub fn on_mail_arrived(cb: impl Fn(i64) + 'static) {
+    let closure = wasm_bindgen::closure::Closure::<dyn Fn(wasm_bindgen::JsValue)>::new(
+        move |v: wasm_bindgen::JsValue| {
+            if let Some(n) = v.as_f64() {
+                cb(n as i64);
+            }
+        },
+    );
+    geleit_on_mail_arrived(closure.as_ref());
+    closure.forget();
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub fn on_mail_arrived(_cb: impl Fn(i64) + 'static) {}
 
 /// Dev/test seam — see `geleit-app::ipc::dev_compose`. Always `None` in a release build.
 pub async fn dev_compose() -> Result<Option<String>, String> {

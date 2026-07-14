@@ -19,6 +19,7 @@
 use geleit_engine::localstore::open_store;
 use geleit_platform::secret::SecretStore;
 use geleit_store::Store;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::dto::{
@@ -28,7 +29,10 @@ use crate::dto::{
     MessageBodyDto, MessageDto, ResumedDraft,
 };
 
-/// What the shell needs to reach the encrypted store. Cheap to clone into a blocking task.
+/// One async lock per `(account, folder)` — the guard that keeps two syncs of one folder apart.
+type SyncLocks = Arc<Mutex<HashMap<(i64, String), Arc<tokio::sync::Mutex<()>>>>>;
+
+/// What the shell needs to reach the engine. Cheap to clone into a blocking task.
 #[derive(Clone)]
 pub struct AppState {
     pub db_path: String,
@@ -36,6 +40,12 @@ pub struct AppState {
     /// Opened lazily on the first command, then reused. Lazy (rather than opened in `main`) so a
     /// locked keychain surfaces as a calm in-app message instead of the window failing to appear.
     store: Arc<Mutex<Option<Store>>>,
+    /// One lock per `(account, folder)`, so **only one sync of a folder runs at a time** — see
+    /// [`AppState::sync_lock`].
+    sync_locks: SyncLocks,
+    /// Poked when a user-pressed Refresh succeeds, to wake the background scheduler — see
+    /// [`AppState::wake_sync`].
+    wake_sync: Arc<tokio::sync::Notify>,
 }
 
 impl AppState {
@@ -44,7 +54,40 @@ impl AppState {
             db_path,
             secrets,
             store: Arc::new(Mutex::new(None)),
+            sync_locks: Arc::new(Mutex::new(HashMap::new())),
+            wake_sync: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// The scheduler's wake-up call.
+    ///
+    /// A successful **user-pressed Refresh** is the strongest evidence we have that the network is
+    /// back — the user just proved it. So it wakes the scheduler, which resets its backoff and sweeps
+    /// immediately. Without this, a laptop that was offline overnight (backed off to the half-hour
+    /// cap) would leave background mail stale for up to 30 minutes after the lid opens — and
+    /// `tokio::time::sleep` is monotonic, so a suspended machine doesn't even burn that time down
+    /// while it's asleep.
+    pub(crate) fn wake_sync(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.wake_sync)
+    }
+
+    /// The lock for one folder's sync. **Every** sync path takes it — the background scheduler and a
+    /// user-pressed Refresh alike — so the two can never run over each other.
+    ///
+    /// This matters more than it looks. Without it, both would compute "what's new" from the same
+    /// local snapshot, both would fetch the same messages, and (once slice 3 lands) the user would get
+    /// **two notifications for one email**. Serializing also means the second sync sees the mail the
+    /// first one stored, so it simply finds nothing new — which is why waiting, rather than skipping,
+    /// is the right behaviour: a Refresh pressed during a background sync still ends with fresh mail
+    /// on screen, it just queues behind it.
+    ///
+    /// The map only grows with folders actually synced (a handful), so it is never pruned.
+    fn sync_lock(&self, account_id: i64, folder: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .sync_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(locks.entry((account_id, folder.to_owned())).or_default())
     }
 }
 
@@ -1431,6 +1474,39 @@ fn pick_open_eml() -> Result<Option<Vec<u8>>, String> {
         .map_err(|_| "Couldn't read that file.".to_owned())
 }
 
+/// Every account's id, for the background scheduler's sweep.
+pub(crate) async fn account_ids(state: &AppState) -> Result<Vec<i64>, String> {
+    with_store(state.clone(), |store| {
+        store
+            .list_accounts()
+            .map(|accounts| accounts.into_iter().map(|a| a.id).collect())
+            .map_err(|_| "Couldn't read your accounts.".to_owned())
+    })
+    .await
+}
+
+/// Sync one folder's recent mail — the single path **both** a user-pressed Refresh and the background
+/// scheduler go through, so the folder's sync lock is honoured in one place. Returns what arrived
+/// (slice 3 turns that into a notification).
+pub(crate) async fn sync_folder_once(
+    state: &AppState,
+    account_id: i64,
+    folder: &str,
+) -> Result<geleit_engine::imap::SyncOutcome, String> {
+    let lock = state.sync_lock(account_id, folder);
+    let _held = lock.lock().await; // queue behind any sync of this folder already in flight
+    let (db, secrets, folder) = (
+        state.db_path.clone(),
+        state.secrets.clone(),
+        folder.to_owned(),
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_refresh(&db, &*secrets, account_id, &folder)
+    })
+    .await
+    .map_err(|_| "The sync task stopped unexpectedly.".to_owned())?
+}
+
 /// Refresh an account's folder: sync the folder list + the current folder's recent envelopes, then
 /// backfill older mail in the background, emitting `sync-progress` events as batches land (P1 — the
 /// UI never blocks; feedback streams instead). Returns when the *recent* sync is done; the backfill
@@ -1443,16 +1519,18 @@ pub async fn refresh(
     folder: String,
 ) -> Result<(), String> {
     use tauri::Emitter;
+    let st = state.inner().clone();
     let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
 
-    // Phase 1 — recent mail. Await this so the caller can re-list once it's in.
-    let (db1, secrets1, folder1) = (db.clone(), secrets.clone(), folder.clone());
-    let recent = tauri::async_runtime::spawn_blocking(move || {
-        geleit_engine::sync_actions::run_refresh(&db1, &*secrets1, account_id, &folder1)
-    })
-    .await
-    .map_err(|_| "The sync task stopped unexpectedly.".to_owned())?;
-    recent?;
+    // Phase 1 — recent mail. Await this so the caller can re-list once it's in. Behind the folder's
+    // sync lock, so a background sync of the same folder can't run alongside it (see `sync_lock`);
+    // if one is already running, this waits for it and then syncs again — finding nothing new, which
+    // is exactly right.
+    sync_folder_once(&st, account_id, &folder).await?;
+    // That worked, so we're online — which is the one thing the background scheduler can't know while
+    // it sits in a backed-off sleep. Wake it: it resets and sweeps the other accounts at once, rather
+    // than leaving their mail up to half an hour stale after a laptop comes back from a night off.
+    st.wake_sync().notify_waiters();
 
     // Phase 2 — backfill older mail in the background, streaming progress. Detached: it may outlive
     // the command, and the UI shouldn't wait on it.
@@ -1629,7 +1707,45 @@ pub async fn dev_folder() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{materialize_draft_attachments, read_attachments};
+    use super::{materialize_draft_attachments, read_attachments, AppState};
+    use geleit_platform::secret::InMemorySecretStore;
+
+    #[test]
+    fn one_sync_lock_per_folder_shared_by_every_syncer() {
+        // The guard that keeps the background scheduler and a user-pressed Refresh from syncing one
+        // folder at once (which would fetch the same mail twice, and notify twice for one email).
+        // Two callers asking for the same folder must get the SAME lock; different folders must not
+        // block each other.
+        let st = AppState::new(
+            ":memory:".to_owned(),
+            std::sync::Arc::new(InMemorySecretStore::new()),
+        );
+
+        let a1 = st.sync_lock(1, "INBOX");
+        let a2 = st.sync_lock(1, "INBOX"); // the scheduler and Refresh, same folder
+        assert!(
+            std::sync::Arc::ptr_eq(&a1, &a2),
+            "the same folder must share one lock, or two syncs could run over each other"
+        );
+
+        // A different folder — and a different account's same-named folder — are independent, so
+        // syncing two accounts doesn't serialize them behind each other.
+        assert!(!std::sync::Arc::ptr_eq(&a1, &st.sync_lock(1, "Archive")));
+        assert!(!std::sync::Arc::ptr_eq(&a1, &st.sync_lock(2, "INBOX")));
+
+        // Holding one folder's lock leaves the others free.
+        let held = a1.try_lock().expect("free");
+        assert!(
+            st.sync_lock(1, "INBOX").try_lock().is_err(),
+            "same folder is busy"
+        );
+        assert!(
+            st.sync_lock(2, "INBOX").try_lock().is_ok(),
+            "other account is free"
+        );
+        drop(held);
+        assert!(st.sync_lock(1, "INBOX").try_lock().is_ok(), "released");
+    }
     use geleit_store::DraftAttachment;
 
     #[test]

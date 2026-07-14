@@ -48,6 +48,8 @@ pixels from firing without your say-so.
 ## Reading offline
 
 Because your mail lives on your own device, you can read everything you've synced with no internet
-connection. **Refresh** is the only thing that needs the network.
+connection. Talking to your provider is the only part that needs the network — that means the
+automatic check for new mail (every few minutes, in the background) and **Refresh** when you ask for
+it. Nothing else about your mail leaves this machine.
 
 For the developer-facing security review, see [`../security-review.md`](../security-review.md).

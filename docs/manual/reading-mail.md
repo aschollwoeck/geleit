@@ -117,15 +117,19 @@ moving, and Undo.
 
 ## Getting new mail
 
-Choose **Refresh** at the top of the message list to fetch new mail from your provider. While it
-works, the button reads *Refreshing…* and a quiet line shows what's happening — *Checking for new
-mail…*, then *Catching up…* with a count as older messages download in the background. The app
-stays responsive the whole time, so you can keep reading. When it finishes, the list updates with
-anything new. If it can't reach your provider, a short message explains what to try; your existing
-mail stays put.
+**GeleitMail checks for new mail on its own**, every few minutes, for every account you've added. New
+messages simply appear in the list with their unread dot — nothing jumps, nothing interrupts you, and
+whatever you were doing (reading, searching, writing) is left alone. If your machine is asleep or
+offline, it quietly tries again later rather than complaining at you.
 
-Everything you see is kept on your own device, so the list stays fast and works offline — refresh is
-the moment GeleitMail talks to your provider to catch up.
+You can also check **right now**: choose **Refresh** at the top of the message list. While it works,
+the button reads *Refreshing…* and a quiet line shows what's happening — *Checking for new mail…*,
+then *Catching up…* with a count as older messages download in the background. The app stays
+responsive throughout, so you can keep reading. If it can't reach your provider, a short message
+explains what to try; your existing mail stays put.
+
+Everything you see is kept on your own device, so the list stays fast and works offline — talking to
+your provider is the only part that needs the network.
 
 ## Your data is encrypted on this device
 
@@ -137,7 +141,8 @@ add the account again to re-download it.)
 ## Reading offline
 
 Because your mail lives on your own device, you can read everything you've synced with no internet
-connection. Refresh is the only thing that needs the network; the rest keeps working offline.
+connection. Talking to your provider — the automatic check for new mail, and Refresh when you ask
+for it — is the only part that needs the network; the rest keeps working offline.
 
 ## More than one account
 

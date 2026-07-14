@@ -14,8 +14,8 @@ means anything.
 
 ## The milestone, in four slices
 
-1. **New mail is knowable** (this slice) — engine + store; no user-visible change.
-2. **The host syncs on its own** — the scheduler + the collision guard.
+1. **New mail is knowable** ✅ — engine + store; no user-visible change.
+2. **The host syncs on its own** (this slice) — the scheduler + the collision guard.
 3. **Notify** — NOTIF-1 + NOTIF-2.
 4. **Badge** — NOTIF-3 (unread count in the window title).
 
@@ -75,8 +75,33 @@ Two pure functions beside `reconcile` in `sync.rs` (already pure + mutation-test
 - `notifiable(arrived, primed) -> Vec<&Arrived>` — of those, keep the ones not already read elsewhere.
 
 ### Out of scope (later slices)
-The scheduler and its in-flight guard (slice 2); the notification itself and its settings (slice 3);
-the badge (slice 4). IMAP IDLE (push) is **not** in this milestone: it needs a long-lived connection
+The notification itself and its settings (slice 3); the badge (slice 4). IMAP IDLE (push) is **not** in this milestone: it needs a long-lived connection
 per account per folder with re-IDLE/backoff, it doesn't remove the need for polling (servers that
 don't advertise it, reconnects), and it reshapes `sync_actions` (which builds a fresh runtime and
 session per call). Polling first; IDLE plugs into the same "new mail detected" seam later.
+
+
+---
+
+## Slice 2 — The host syncs on its own
+
+A scheduler in the **Tauri host** (not the frontend: a webview throttles timers in a hidden window,
+which is exactly the case this exists for, and the frontend only knows the account you're looking at).
+Every 5 minutes it sweeps each account's INBOX. Failure is ordinary and **silent** — the laptop
+sleeps, the wifi drops — so it backs off (5m → 10m → 20m → 30m cap, reset on success) rather than
+raising a toast for a sync the user didn't start. A sweep only counts as failed if *every* account
+failed, so one dead password can't stall the rest.
+
+### The sync lock — the care-point
+
+**Every** sync goes through `ipc::sync_folder_once`, which holds a per-`(account, folder)` async lock.
+Without it the scheduler and a user-pressed Refresh would compute "what's new" from the same snapshot,
+fetch the same messages, and — once slice 3 lands — **notify twice for one email**. (The UI's
+`refreshing` flag could never have done this: it's per-window UI state, and the engine's workers don't
+even share the store connection.) It **waits** rather than skips, so a Refresh pressed mid-sync still
+ends with fresh mail on screen; it just queues.
+
+### Arrival
+`mail-arrived` fires only when something is worth announcing. The UI re-lists **quietly** — no toast,
+no jump — through the same `request` epoch as every other re-list, so it can't clobber a search being
+typed or a folder just switched to. It skips entirely while a search is open.

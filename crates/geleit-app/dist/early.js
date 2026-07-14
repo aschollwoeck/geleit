@@ -27,3 +27,9 @@ window.geleitInvoke = function (cmd, args) {
 window.geleitOnSyncProgress = function (cb) {
   window.__TAURI__.event.listen('sync-progress', function (e) { cb(e.payload); });
 };
+
+// Subscribe to new-mail events from the background scheduler (NOTIF-1). `cb` gets how many messages
+// arrived that are worth announcing. Same npm-free shim as above.
+window.geleitOnMailArrived = function (cb) {
+  window.__TAURI__.event.listen('mail-arrived', function (e) { cb(e.payload); });
+};

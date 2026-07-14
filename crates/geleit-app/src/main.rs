@@ -17,6 +17,8 @@
 mod dto;
 mod ipc;
 mod mailproto;
+mod schedule;
+mod scheduler;
 
 use geleit_platform::os_secret::OsSecretStore;
 use ipc::AppState;
@@ -235,6 +237,9 @@ fn main() {
                     }
                 })
                 .build()?;
+            // Mail arrives on its own from here — the host polls, so it keeps working while the UI
+            // sits idle (a webview throttles timers in a hidden window).
+            scheduler::spawn(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
