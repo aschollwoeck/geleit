@@ -146,6 +146,11 @@ GeleitMail also shows your unread count **in the window title** — *"GeleitMail
 the taskbar too, even when the window is behind something else. It counts unread messages in your Inbox
 across all your accounts, and reads just "GeleitMail" when you're caught up.
 
+**Read your mail somewhere else — your phone, webmail — and GeleitMail notices.** The next time it
+checks your mail, a message you've already read (or starred) elsewhere stops being unread (or gains its
+star) here too, and the count in the title falls to match. So the number is the mail you actually
+haven't read anywhere, not just here.
+
 Mail you fetched yourself with **Refresh** is never popped up at you afterwards — you asked for it, and
 it's on your screen.
 

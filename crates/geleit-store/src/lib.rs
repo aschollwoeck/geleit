@@ -221,6 +221,21 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE message ADD COLUMN notified INTEGER NOT NULL DEFAULT 1;
     ",
+    // 18 — has a local read/star change been confirmed on the server yet? (SYNC-5.)
+    //
+    // A sync now PULLS the server's `\Seen`/`\Flagged` for mail we already hold, so "read on another
+    // device" reaches this one. But that same pull must not UNDO a change the user just made here whose
+    // write-back to the server hasn't landed (or failed): reading a message marks it read locally and
+    // writes `\Seen` back on a worker — if a sync runs before that lands, the server still says unread,
+    // and a naive server-wins pull would flip the user's read straight back off.
+    //
+    // `1` = this message has a local flag change the server hasn't confirmed → the pull leaves it
+    // alone. Set when a local change is made, cleared when its write-back succeeds. A write-back that
+    // never succeeds keeps the flag dirty forever, so local intent wins — which is exactly the old
+    // behaviour, preserved.
+    "
+    ALTER TABLE message ADD COLUMN flags_dirty INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
 
 /// A parsed search query (SEARCH-1/4): an FTS5 `MATCH` string (`None` when there are no full-text
@@ -1571,6 +1586,66 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Every held message's `(uid, seen, flagged)` in a folder that is **safe to reconcile** against the
+    /// server — the local side of the SYNC-5 flag pull.
+    ///
+    /// Messages with a **pending local change** (`flags_dirty = 1`) are deliberately excluded: the user
+    /// touched their flag here and the write-back to the server may not have landed, so letting the
+    /// server's (stale) view win would undo the user's action. Once the write-back confirms, the row is
+    /// no longer dirty and the next pull includes it — finding local and server already agree.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn flags_in_folder(&self, folder_id: i64) -> Result<Vec<(i64, bool, bool)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid, seen, flagged FROM message \
+             WHERE folder_id = ?1 AND uid IS NOT NULL AND flags_dirty = 0",
+        )?;
+        let rows = stmt.query_map([folder_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Mark a message's local flag change as confirmed on the server (SYNC-5) — called by the write-back
+    /// worker on success. From here the SYNC-5 pull will reconcile it again like any other message.
+    ///
+    /// # Errors
+    /// The update failing (a corrupt or unreadable database).
+    pub fn clear_flags_dirty(&self, message_id: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE message SET flags_dirty = 0 WHERE id = ?1",
+            [message_id],
+        )?;
+        Ok(())
+    }
+
+    /// Apply server flag changes to the messages we hold, by UID (SYNC-5) — the write half of the
+    /// reconciliation. Atomic; a no-op for an empty list. Only `seen`/`flagged` move — never the
+    /// envelope, the body, or `notified` (a message read elsewhere settles its own notification debt
+    /// simply by becoming `seen`, which `pending_notifications` already filters on).
+    ///
+    /// # Errors
+    /// The update failing (a corrupt or unreadable database).
+    pub fn apply_flag_changes(
+        &self,
+        folder_id: i64,
+        changes: &[(i64, bool, bool)],
+    ) -> Result<(), StoreError> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE message SET seen = ?2, flagged = ?3 WHERE folder_id = ?1 AND uid = ?4",
+            )?;
+            for &(uid, seen, flagged) in changes {
+                stmt.execute((folder_id, seen, flagged, uid))?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Delete messages in a folder by UID (bodies cascade). No-op for an empty list; atomic.
     pub fn delete_messages_by_uid(&self, folder_id: i64, uids: &[i64]) -> Result<(), StoreError> {
         if uids.is_empty() {
@@ -1623,8 +1698,11 @@ impl Store {
 
     /// Set a message's local read state. Server write-back of `\Seen` is the engine's job (SYNC-5).
     pub fn set_seen(&self, message_id: i64, seen: bool) -> Result<(), StoreError> {
+        // Mark the flag dirty: this is a local change the server doesn't know about yet, so the SYNC-5
+        // flag pull must not revert it until its write-back confirms (or, if that never happens, ever —
+        // local intent wins). Cleared by [`Self::clear_flags_dirty`] on a successful write-back.
         self.conn.execute(
-            "UPDATE message SET seen = ?2 WHERE id = ?1",
+            "UPDATE message SET seen = ?2, flags_dirty = 1 WHERE id = ?1",
             (message_id, seen),
         )?;
         Ok(())
@@ -1634,7 +1712,7 @@ impl Store {
     /// engine's job. Returns the message's IMAP `uid` (for that write-back), or `None`.
     pub fn set_flagged(&self, message_id: i64, flagged: bool) -> Result<Option<i64>, StoreError> {
         self.conn.execute(
-            "UPDATE message SET flagged = ?2 WHERE id = ?1",
+            "UPDATE message SET flagged = ?2, flags_dirty = 1 WHERE id = ?1",
             (message_id, flagged),
         )?;
         Ok(self
@@ -3568,6 +3646,103 @@ mod tests {
         assert!(s.messages_in_folder(fld, 1).unwrap()[0].seen);
         s.set_seen(mid, false).unwrap();
         assert!(!s.messages_in_folder(fld, 1).unwrap()[0].seen);
+    }
+
+    #[test]
+    fn pulling_server_flag_changes_moves_only_seen_and_flagged_and_only_where_they_differ() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let fld = s.upsert_folder(acc, "INBOX").unwrap();
+        let add = |uid: i64, seen: bool, flagged: bool| {
+            s.upsert_message(
+                acc,
+                fld,
+                &NewMessage {
+                    uid: Some(uid),
+                    subject: Some(format!("m{uid}")),
+                    seen,
+                    flagged,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let m1 = add(1, false, false); // will be read elsewhere
+        let m2 = add(2, true, true); // will be unstarred elsewhere
+        let m3 = add(3, true, false); // untouched
+
+        let mut flags = s.flags_in_folder(fld).unwrap();
+        flags.sort();
+        assert_eq!(
+            flags,
+            vec![(1, false, false), (2, true, true), (3, true, false)]
+        );
+
+        // Apply what the reconciliation computed: m1 now read, m2 now unstarred.
+        s.apply_flag_changes(fld, &[(1, true, false), (2, true, false)])
+            .unwrap();
+
+        let seen_of = |id: i64| s.header_by_id(id).unwrap().unwrap().seen;
+        let flagged_of = |id: i64| s.header_by_id(id).unwrap().unwrap().flagged;
+        assert!(seen_of(m1), "read on another device → read here");
+        assert!(!flagged_of(m2), "unstarred elsewhere → unstarred here");
+        assert!(seen_of(m2), "…but still read");
+        assert!(
+            seen_of(m3) && !flagged_of(m3),
+            "untouched message unchanged"
+        );
+
+        // The envelope is never touched by a flag pull.
+        assert_eq!(
+            s.header_by_id(m1).unwrap().unwrap().subject.as_deref(),
+            Some("m1")
+        );
+        // An empty change set is a no-op, not an error.
+        s.apply_flag_changes(fld, &[]).unwrap();
+    }
+
+    #[test]
+    fn a_local_flag_change_is_shielded_from_the_pull_until_its_writeback_confirms() {
+        // The blocker SYNC-5 review caught: reading a message marks it read locally and writes `\Seen`
+        // back on a worker. If a sync's flag pull ran before that landed, a naive server-wins pull
+        // would flip the read straight back off. `set_seen` marks the flag dirty, and `flags_in_folder`
+        // (the pull's local side) excludes dirty rows — so a just-made local change is never reverted.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let fld = s.upsert_folder(acc, "INBOX").unwrap();
+        let id = s
+            .upsert_message(
+                acc,
+                fld,
+                &NewMessage {
+                    uid: Some(1),
+                    seen: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // Fresh from a sync: not dirty, so the pull would consider it.
+        assert_eq!(s.flags_in_folder(fld).unwrap(), vec![(1, false, false)]);
+
+        // The user reads it here. Now dirty → the pull leaves it alone (the server hasn't been told).
+        s.set_seen(id, true).unwrap();
+        assert!(
+            s.flags_in_folder(fld).unwrap().is_empty(),
+            "a message with an unconfirmed local change is shielded from the pull"
+        );
+        assert!(
+            s.header_by_id(id).unwrap().unwrap().seen,
+            "…and it IS read locally"
+        );
+
+        // The write-back confirms → no longer dirty → the pull reconciles it again, now finding
+        // local and server in agreement.
+        s.clear_flags_dirty(id).unwrap();
+        assert_eq!(s.flags_in_folder(fld).unwrap(), vec![(1, true, false)]);
+
+        // A star is shielded the same way.
+        s.set_flagged(id, true).unwrap();
+        assert!(s.flags_in_folder(fld).unwrap().is_empty());
     }
 
     #[test]
