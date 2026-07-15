@@ -16,8 +16,13 @@ Choose **Compose** on the left. Fill in:
 
 Then choose **Send**. GeleitMail sends through your account's outgoing (SMTP) server (set up when you
 added the account) and saves a copy to your **Sent** folder. Sending happens in the background, so
-the app stays responsive; if something goes wrong you get a short, plain explanation and the message
-stays open to try again. To throw a message away, choose **Discard**.
+the app stays responsive. To throw a message away, choose **Discard**.
+
+**No connection?** Your message isn't lost. GeleitMail keeps it in an **outbox** and sends it the next
+time it reaches your provider — a quiet line under **Compose** shows how many are waiting to go. You can
+close GeleitMail in the meantime; the outbox is remembered. If your provider actually *rejects* a
+message — a mistyped address, say — GeleitMail tells you (*"couldn't send"*) rather than trying forever,
+so you can fix it.
 
 ![The compose window: From, To and Cc recipient chips, Subject, body, and a footer with Send, Attach, Discard, a Markdown toggle, and Save draft.](images/compose.png)
 

@@ -19,7 +19,7 @@
 use geleit_engine::localstore::open_store;
 use geleit_platform::secret::SecretStore;
 use geleit_store::Store;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tauri::Manager; // get_webview_window, for the unread badge
 
@@ -55,6 +55,10 @@ pub struct AppState {
     /// flush thread *per message*, each pushing the whole account queue — a thundering herd. See
     /// [`spawn_flush`].
     flushing: Arc<Mutex<HashMap<i64, bool>>>,
+    /// Accounts whose outbox is currently being drained. A scheduler sweep and a user Refresh can both
+    /// drain at once; without this, both would read the same pending rows and **send each message
+    /// twice**. Whoever holds the account drains it; the other skips (the holder sends everything).
+    draining_outbox: Arc<Mutex<HashSet<i64>>>,
 }
 
 impl AppState {
@@ -81,6 +85,7 @@ impl AppState {
             wake_sync: Arc::new(tokio::sync::Notify::new()),
             notifier,
             flushing: Arc::new(Mutex::new(HashMap::new())),
+            draining_outbox: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -977,7 +982,7 @@ pub async fn send_message(
     attachments: Vec<String>,
     markdown: bool,
     draft_id: Option<i64>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     // Append the account's signature (SEND-7). Read it up front on the store thread.
     let signature = with_store(state.inner().clone(), move |store| {
         Ok(store
@@ -993,7 +998,7 @@ pub async fn send_message(
     );
 
     let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
-    tauri::async_runtime::spawn_blocking(move || {
+    let status = tauri::async_runtime::spawn_blocking(move || {
         let attachments = read_attachments(&attachments)?;
         geleit_engine::sync_actions::run_send(
             &db,
@@ -1011,7 +1016,46 @@ pub async fn send_message(
         )
     })
     .await
-    .map_err(|_| "The send task stopped unexpectedly.".to_owned())?
+    .map_err(|_| "The send task stopped unexpectedly.".to_owned())??;
+    // `true` = queued in the outbox (offline), so the UI can say so instead of "Sent".
+    Ok(status == geleit_engine::sync_actions::SendStatus::Queued)
+}
+
+/// How many messages are waiting to send, and how many the server rejected — for the outbox indicator
+/// (SEND-10). `(queued, failed)`.
+#[tauri::command]
+pub async fn outbox_status(state: tauri::State<'_, AppState>) -> Result<(i64, i64), String> {
+    with_store(state.inner().clone(), |store| {
+        store
+            .outbox_counts()
+            .map_err(|_| "Couldn't read the outbox.".to_owned())
+    })
+    .await
+}
+
+/// Drain an account's outbox — a worker-awaited version for the scheduler and Refresh (SEND-10).
+///
+/// Single-flight per account: if a drain is already running (a sweep and a Refresh overlapping), this
+/// one skips rather than deliver the same messages a second time — the running drain sends them all.
+pub(crate) async fn flush_outbox(state: &AppState, account_id: i64) -> usize {
+    {
+        let mut g = state.draining_outbox.lock().expect("outbox guard");
+        if !g.insert(account_id) {
+            return 0; // already draining this account
+        }
+    }
+    let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
+    let sent = tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_flush_outbox(&db, &*secrets, account_id).unwrap_or(0)
+    })
+    .await
+    .unwrap_or(0);
+    state
+        .draining_outbox
+        .lock()
+        .expect("outbox guard")
+        .remove(&account_id);
+    sent
 }
 
 /// Save (or update) a local draft (SEND-5). Returns the draft's id so the composer can keep editing
@@ -2020,6 +2064,7 @@ pub async fn refresh(
         }
     }
     flush_flags(&st, account_id).await; // push any queued read/star changes now that we're online
+    flush_outbox(&st, account_id).await; // and send anything waiting in the outbox
     set_badge(&app, &st).await;
     // That worked, so we're online — which is the one thing the background scheduler can't know while
     // it sits in a backed-off sleep. Wake it: it resets and sweeps the other accounts at once, rather

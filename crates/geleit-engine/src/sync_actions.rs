@@ -13,7 +13,8 @@ use crate::localstore::open_store;
 use crate::message::{self, Draft};
 use crate::smtp::{self, SmtpSecurity, SmtpSettings};
 use geleit_platform::secret::SecretStore;
-use geleit_store::{ImapSettings, SmtpConfig, SmtpSecurityKind, StoreError};
+use geleit_store::{ImapSettings, SmtpConfig, SmtpSecurityKind, Store, StoreError};
+use lettre::address::Envelope;
 
 /// Map stored IMAP settings to a connection config.
 pub fn to_config(s: &ImapSettings) -> ImapConfig {
@@ -303,6 +304,94 @@ pub fn parse_addrs(field: &str) -> Vec<String> {
 /// store and reuses the IMAP username/password from the keychain. Blocking + network: **run on a
 /// worker thread.** Calm, PII-free errors.
 #[allow(clippy::too_many_arguments)]
+/// What became of a send (SEND-10): it went out, or it couldn't be delivered now and is waiting in the
+/// outbox to be retried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendStatus {
+    Sent,
+    Queued,
+}
+
+/// Everything an SMTP delivery needs for an account: the transport settings, the password, an IMAP
+/// config + the Sent folder to file a copy in. Resolved once, shared by the compose path and the
+/// outbox drain.
+struct SendContext {
+    settings: SmtpSettings,
+    password: String,
+    imap_config: ImapConfig,
+    sent_folder: Option<String>,
+}
+
+fn send_context(
+    store: &Store,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+) -> Result<SendContext, String> {
+    let imap = store
+        .imap_settings(account_id)
+        .ok()
+        .flatten()
+        .ok_or_else(|| "This account isn't set up.".to_owned())?;
+    let smtp = store
+        .smtp_settings(account_id)
+        .ok()
+        .flatten()
+        .ok_or_else(|| "No outgoing (SMTP) server is configured for this account.".to_owned())?;
+    let password = imap::password(secrets, &imap.username)
+        .map_err(|_| "Couldn't read your saved password.".to_owned())?
+        .ok_or_else(|| "Enter your password (Refresh to reconnect) before sending.".to_owned())?;
+    let password =
+        String::from_utf8(password).map_err(|_| "The saved password looks corrupt.".to_owned())?;
+    let settings = SmtpSettings {
+        host: smtp.host,
+        port: smtp.port,
+        username: imap.username.clone(),
+        security: match smtp.security {
+            SmtpSecurityKind::Implicit => SmtpSecurity::Implicit,
+            SmtpSecurityKind::StartTls => SmtpSecurity::StartTls,
+        },
+        allow_invalid_certs: imap.allow_invalid_certs,
+    };
+    // A Sent folder to save a copy in (SEND-8), by the server's own `\Sent` flag (RFC 6154) with the
+    // English name as fallback — so `Gesendet` etc. still resolve.
+    let sent_folder = store.folders_for_account(account_id).ok().and_then(|fs| {
+        let pairs: Vec<(String, Option<geleit_core::FolderRole>)> = fs
+            .into_iter()
+            .map(|f| {
+                let role = f
+                    .role
+                    .as_deref()
+                    .and_then(geleit_core::FolderRole::from_key);
+                (f.name, role)
+            })
+            .collect();
+        geleit_core::pick_folder(&pairs, geleit_core::FolderRole::Sent).map(str::to_owned)
+    });
+    Ok(SendContext {
+        settings,
+        password,
+        imap_config: to_config(&imap),
+        sent_folder,
+    })
+}
+
+/// Deliver already-built bytes to an SMTP server and, on success, file a copy in Sent (best-effort:
+/// the mail is gone, so a failed Sent-save must not report failure). The one delivery choke-point,
+/// shared by the compose path and the outbox drain.
+async fn deliver(
+    ctx: &SendContext,
+    secrets: &dyn SecretStore,
+    envelope: &Envelope,
+    bytes: &[u8],
+) -> Result<(), smtp::SendError> {
+    smtp::send(&ctx.settings, &ctx.password, envelope, bytes).await?;
+    if let Some(folder) = &ctx.sent_folder {
+        let _ = imap::append_message(&ctx.imap_config, secrets, folder, "(\\Seen)", bytes).await;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn run_send(
     db_path: &str,
     secrets: &dyn SecretStore,
@@ -316,28 +405,13 @@ pub fn run_send(
     attachments: Vec<message::Attachment>,
     markdown: bool,
     draft_id: Option<i64>,
-) -> Result<(), String> {
+) -> Result<SendStatus, String> {
     let store = open_store(db_path, secrets)?;
     let account = store
         .account_by_id(account_id)
         .map_err(|_| "Couldn't read the local mailbox.".to_owned())?
         .ok_or_else(|| "No account is set up yet.".to_owned())?;
-    let imap = store
-        .imap_settings(account.id)
-        .ok()
-        .flatten()
-        .ok_or_else(|| "This account isn't set up.".to_owned())?;
-    let smtp = store
-        .smtp_settings(account.id)
-        .ok()
-        .flatten()
-        .ok_or_else(|| "No outgoing (SMTP) server is configured for this account.".to_owned())?;
-
-    let password = imap::password(secrets, &imap.username)
-        .map_err(|_| "Couldn't read your saved password.".to_owned())?
-        .ok_or_else(|| "Enter your password (Refresh to reconnect) before sending.".to_owned())?;
-    let password =
-        String::from_utf8(password).map_err(|_| "The saved password looks corrupt.".to_owned())?;
+    let ctx = send_context(&store, secrets, account_id)?;
 
     let draft = Draft {
         from_name: account.display_name.clone(),
@@ -352,33 +426,8 @@ pub fn run_send(
         html_body: markdown.then(|| message::render_markdown(body)),
     };
     let bytes = message::build(&draft)?;
-    let envelope = smtp::envelope(&draft.from_addr, &message::recipients(&draft))?;
-    let settings = SmtpSettings {
-        host: smtp.host,
-        port: smtp.port,
-        username: imap.username.clone(),
-        security: match smtp.security {
-            SmtpSecurityKind::Implicit => SmtpSecurity::Implicit,
-            SmtpSecurityKind::StartTls => SmtpSecurity::StartTls,
-        },
-        allow_invalid_certs: imap.allow_invalid_certs,
-    };
-    // A Sent folder to save a copy in (SEND-8). By the server's own `\Sent` flag (RFC 6154), falling
-    // back to the English name — the old contains("sent") match found nothing at all on a provider that
-    // calls it `Gesendet`, so sent mail was quietly saved nowhere.
-    let sent_folder = store.folders_for_account(account.id).ok().and_then(|fs| {
-        let pairs: Vec<(String, Option<geleit_core::FolderRole>)> = fs
-            .into_iter()
-            .map(|f| {
-                let role = f
-                    .role
-                    .as_deref()
-                    .and_then(geleit_core::FolderRole::from_key);
-                (f.name, role)
-            })
-            .collect();
-        geleit_core::pick_folder(&pairs, geleit_core::FolderRole::Sent).map(str::to_owned)
-    });
+    let recipients = message::recipients(&draft);
+    let envelope = smtp::envelope(&draft.from_addr, &recipients)?;
     // If this draft has a copy on the server (opt-in "sync drafts"), remove it once the mail is away.
     // By the draft's **stored** Message-ID — deriving one from the row id would expunge whatever copy a
     // long-dead draft with the same (reused) id left behind (store migration 15).
@@ -386,27 +435,104 @@ pub fn run_send(
         let row = store.draft_by_id(id).ok().flatten()?;
         Some((row.server_folder?, row.msgid))
     });
-    let imap_config = to_config(&imap);
-    runtime()?.block_on(async {
-        smtp::send(&settings, &password, &envelope, &bytes).await?;
-        // Best-effort from here: the message is already sent; a failed Sent-save or draft cleanup
-        // must not report failure (it would mislead the person into resending).
-        if let Some(folder) = sent_folder {
-            let _ = imap::append_message(&imap_config, secrets, &folder, "(\\Seen)", &bytes).await;
+
+    // Try to deliver now. A `permanent` failure (the server rejected it) is surfaced — queuing a
+    // rejected message would loop forever; the user must fix or drop it. Any other failure is the
+    // ordinary offline case, so the message goes to the outbox and the scheduler retries it.
+    let result = runtime()?.block_on(async {
+        match deliver(&ctx, secrets, &envelope, &bytes).await {
+            Ok(()) => {
+                if let Some((folder, mid)) = &server_draft {
+                    let _ = imap::expunge_draft(&ctx.imap_config, secrets, folder, mid).await;
+                }
+                Ok(SendStatus::Sent)
+            }
+            Err(e) if e.permanent => Err(e.message),
+            Err(_) => Ok(SendStatus::Queued),
         }
-        if let Some((folder, mid)) = server_draft {
-            let _ = imap::expunge_draft(&imap_config, secrets, &folder, &mid).await;
-        }
-        Ok::<(), String>(())
     })?;
-    // The message went out — drop the draft it came from (best-effort).
+
+    if result == SendStatus::Queued {
+        let now = now_secs();
+        let sd = server_draft
+            .as_ref()
+            .map(|(folder, mid)| (folder.as_str(), mid.as_str()));
+        store
+            .enqueue_outbox(
+                account.id,
+                &draft.from_addr,
+                &recipients,
+                &draft.subject,
+                &bytes,
+                sd,
+                now,
+            )
+            .map_err(|_| "Couldn't queue the message to send.".to_owned())?;
+    }
+    // The message is either sent or safely queued — either way drop the draft it came from
+    // (best-effort; its content lives on in the outbox if queued).
     if let Some(id) = draft_id {
         let _ = store.delete_draft(id);
     }
-    Ok(())
+    Ok(result)
 }
 
-/// Save a draft's copy to the server's Drafts folder (SEND-5, opt-in): replaces whatever copy of this
+/// Drain an account's outbox (SEND-10): try to deliver each queued message; a delivered one leaves the
+/// outbox, a rejected one is marked failed (so it stops retrying and can be surfaced), a
+/// still-unreachable one stays for the next sweep. Returns how many went out. Blocking + network:
+/// **worker thread.**
+pub fn run_flush_outbox(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+) -> Result<usize, String> {
+    let store = open_store(db_path, secrets)?;
+    let pending = store
+        .pending_outbox(account_id)
+        .map_err(|_| "Couldn't read the outbox.".to_owned())?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    // Resolve settings once; if the account can't even be set up (no SMTP configured), there's nothing
+    // to retry against — leave the messages queued rather than marking them failed.
+    let Ok(ctx) = send_context(&store, secrets, account_id) else {
+        return Ok(0);
+    };
+    let rt = runtime()?;
+
+    let mut sent = 0usize;
+    for msg in pending {
+        let Ok(envelope) = smtp::envelope(&msg.mail_from, &msg.recipients) else {
+            // A stored envelope that no longer parses can never send — surface it rather than loop.
+            let _ = store.mark_outbox_failed(msg.id, "The saved recipients are invalid.");
+            continue;
+        };
+        match rt.block_on(deliver(&ctx, secrets, &envelope, &msg.raw)) {
+            Ok(()) => {
+                let _ = store.delete_outbox(msg.id);
+                sent += 1;
+            }
+            // Rejected on retry (rare — it was queued for a connection problem): stop retrying it.
+            Err(e) if e.permanent => {
+                let _ = store.mark_outbox_failed(msg.id, &e.message);
+            }
+            // Still can't reach the server — leave it queued for the next sweep.
+            Err(_) => {}
+        }
+    }
+    Ok(sent)
+}
+
+/// Unix seconds now, for stamping an outbox row. A worker thread, so the real clock is fine (unlike
+/// the workflow scripts).
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Save a draft's copy to the server's Drafts folder (SEND-5, opt-in)/// Save a draft's copy to the server's Drafts folder (SEND-5, opt-in): replaces whatever copy of this
 /// draft is there (matched by its stable Message-ID) with fresh `\Draft` bytes, in one session.
 /// Blocking + network: **worker.**
 pub fn run_sync_draft(
