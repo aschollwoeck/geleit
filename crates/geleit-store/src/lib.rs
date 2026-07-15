@@ -476,6 +476,16 @@ pub struct NewMessage {
     pub owed_notification: bool,
 }
 
+/// A read/star change this account owes the server (SYNC-5) — a row in the durable write-back queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingFlagWriteback {
+    pub id: i64,
+    pub folder: String,
+    pub uid: i64,
+    pub seen: bool,
+    pub flagged: bool,
+}
+
 /// A message the user has not been told about yet — what a notification needs, and nothing more.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingNotification {
@@ -1605,17 +1615,59 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Mark a message's local flag change as confirmed on the server (SYNC-5) — called by the write-back
-    /// worker on success. From here the SYNC-5 pull will reconcile it again like any other message.
+    /// The flag changes this account still owes the server — every message with an unconfirmed local
+    /// read/star change (SYNC-5), as `(message_id, folder_name, uid, seen, flagged)`.
+    ///
+    /// This IS the durable offline write-back queue: a flag change is written locally and marked dirty,
+    /// and stays dirty (survives restarts) until its write-back to the server confirms. The scheduler
+    /// drains this every sweep, so a change made offline reaches the server the next time we're online,
+    /// rather than being lost when the one fire-and-forget attempt failed.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn pending_flag_writebacks(
+        &self,
+        account_id: i64,
+    ) -> Result<Vec<PendingFlagWriteback>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, f.name, m.uid, m.seen, m.flagged \
+             FROM message m JOIN folder f ON f.id = m.folder_id \
+             WHERE m.account_id = ?1 AND m.flags_dirty = 1 AND m.uid IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([account_id], |r| {
+            Ok(PendingFlagWriteback {
+                id: r.get(0)?,
+                folder: r.get(1)?,
+                uid: r.get(2)?,
+                seen: r.get(3)?,
+                flagged: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Mark a message's local flag change as confirmed on the server (SYNC-5) — but **only if its flags
+    /// still match what was pushed** (`seen`/`flagged`).
+    ///
+    /// The write-back worker reads a message's flags, pushes them, then calls this. If the user changed
+    /// the flags again in between (read, then immediately marked unread), clearing unconditionally would
+    /// settle the debt for a value the server no longer reflects — and the SYNC-5 pull would then revert
+    /// the user's *newer* change. The condition makes the clear a no-op in that case, so the message
+    /// stays queued and the next flush pushes the current value. Returns whether it cleared.
     ///
     /// # Errors
     /// The update failing (a corrupt or unreadable database).
-    pub fn clear_flags_dirty(&self, message_id: i64) -> Result<(), StoreError> {
-        self.conn.execute(
-            "UPDATE message SET flags_dirty = 0 WHERE id = ?1",
-            [message_id],
+    pub fn clear_flags_dirty(
+        &self,
+        message_id: i64,
+        seen: bool,
+        flagged: bool,
+    ) -> Result<bool, StoreError> {
+        let n = self.conn.execute(
+            "UPDATE message SET flags_dirty = 0 WHERE id = ?1 AND seen = ?2 AND flagged = ?3",
+            (message_id, seen, flagged),
         )?;
-        Ok(())
+        Ok(n > 0)
     }
 
     /// Apply server flag changes to the messages we hold, by UID (SYNC-5) — the write half of the
@@ -3702,6 +3754,111 @@ mod tests {
     }
 
     #[test]
+    fn the_writeback_queue_holds_every_unconfirmed_flag_change_across_folders_and_accounts() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let other = s.add_account("b@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let archive = s.upsert_folder(acc, "Archive").unwrap();
+        let add = |account: i64, folder: i64, uid: i64| {
+            s.upsert_message(
+                account,
+                folder,
+                &NewMessage {
+                    uid: Some(uid),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let m_read = add(acc, inbox, 1); // will be read here
+        let m_star = add(acc, archive, 2); // starred in another folder
+        add(acc, inbox, 3); // untouched → not owed
+        let m_other = add(other, inbox, 9); // a different account's change
+
+        // Nothing owed until a local change is made.
+        assert!(s.pending_flag_writebacks(acc).unwrap().is_empty());
+
+        s.set_seen(m_read, true).unwrap();
+        s.set_flagged(m_star, true).unwrap();
+        s.set_seen(m_other, true).unwrap();
+
+        let mut owed = s.pending_flag_writebacks(acc).unwrap();
+        owed.sort_by_key(|p| p.uid);
+        assert_eq!(
+            owed.len(),
+            2,
+            "this account's two changes, across two folders — not the other's"
+        );
+        assert_eq!(owed[0].folder, "INBOX");
+        assert_eq!(
+            (owed[0].uid, owed[0].seen, owed[0].flagged),
+            (1, true, false)
+        );
+        assert_eq!(owed[1].folder, "Archive");
+        assert_eq!(
+            (owed[1].uid, owed[1].seen, owed[1].flagged),
+            (2, false, true),
+            "starred but not read"
+        );
+
+        // The other account's queue holds only its own.
+        assert_eq!(s.pending_flag_writebacks(other).unwrap().len(), 1);
+
+        // Confirming one drains it from the queue; the rest stay owed until they land. The clear is
+        // conditional on the pushed flags — passing the wrong ones would be a no-op.
+        assert!(
+            !s.clear_flags_dirty(m_read, false, false).unwrap(),
+            "stale flags don't clear"
+        );
+        assert!(
+            s.clear_flags_dirty(m_read, true, false).unwrap(),
+            "the flags we pushed clear it"
+        );
+        let left = s.pending_flag_writebacks(acc).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, m_star);
+    }
+
+    #[test]
+    fn a_change_made_while_the_writeback_is_in_flight_is_not_wrongly_settled() {
+        // The race: the flush reads a message's flags to push them, the user changes them again, then
+        // the flush tries to clear the marker. Clearing on the OLD value would settle a debt the server
+        // doesn't reflect — and the pull would revert the user's newer change. The conditional clear
+        // makes it a no-op, so the newer value stays queued.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let fld = s.upsert_folder(acc, "INBOX").unwrap();
+        let id = s
+            .upsert_message(
+                acc,
+                fld,
+                &NewMessage {
+                    uid: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        s.set_seen(id, true).unwrap(); // read it — the flush would read (seen=true)
+                                       // …the user marks it unread again before the flush clears the marker.
+        s.set_seen(id, false).unwrap();
+        // The flush, holding the stale (seen=true), tries to settle — and must NOT.
+        assert!(
+            !s.clear_flags_dirty(id, true, false).unwrap(),
+            "the message moved on; the stale confirmation must not clear it"
+        );
+        assert_eq!(
+            s.pending_flag_writebacks(acc).unwrap().len(),
+            1,
+            "still queued, so the next flush pushes the newer (unread) value"
+        );
+        // The next flush, with the current value, does settle it.
+        assert!(s.clear_flags_dirty(id, false, false).unwrap());
+        assert!(s.pending_flag_writebacks(acc).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_local_flag_change_is_shielded_from_the_pull_until_its_writeback_confirms() {
         // The blocker SYNC-5 review caught: reading a message marks it read locally and writes `\Seen`
         // back on a worker. If a sync's flag pull ran before that landed, a naive server-wins pull
@@ -3737,7 +3894,7 @@ mod tests {
 
         // The write-back confirms → no longer dirty → the pull reconciles it again, now finding
         // local and server in agreement.
-        s.clear_flags_dirty(id).unwrap();
+        assert!(s.clear_flags_dirty(id, true, false).unwrap());
         assert_eq!(s.flags_in_folder(fld).unwrap(), vec![(1, true, false)]);
 
         // A star is shielded the same way.

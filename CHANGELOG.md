@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Mail tells you it's here
+- **Marking mail read or starred works offline.** A read or star you make with no connection is now
+  remembered and sent to your provider the next time GeleitMail syncs, rather than being lost if the
+  first attempt didn't get through.
 - **Read your mail elsewhere and GeleitMail keeps up.** A message you read (or star) on your phone or in
   webmail stops being unread (or gains its star) here on the next check, and the unread count falls to
   match — so it reflects what you actually haven't read *anywhere*, not just on this device.
