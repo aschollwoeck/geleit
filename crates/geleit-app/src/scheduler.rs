@@ -56,6 +56,10 @@ pub(crate) fn spawn(app: tauri::AppHandle) {
             match sweep(&app, tick, &mut account_failures).await {
                 Ok(new_mail) => {
                     failures = 0;
+                    // The badge is set every sweep, not only when mail arrives: a sweep is also when
+                    // mail read on another device comes back `\Seen`, and the count should fall for
+                    // that too.
+                    crate::ipc::set_badge(&app, app.state::<AppState>().inner()).await;
                     if new_mail > 0 {
                         // Tell the UI to re-list. It goes through the same `request` epoch as every
                         // other re-list, so an arrival can never clobber a search being typed or a

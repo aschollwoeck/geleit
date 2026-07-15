@@ -329,6 +329,15 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    // Recompute the window's unread badge from the store (NOTIF-3). Fire-and-forget: it lags the
+    // optimistic on-screen change by a store round-trip, which the badge — a taskbar glance, not a live
+    // counter — can well afford. Call it after anything that changes what's unread.
+    let bump_badge = move || {
+        leptos::task::spawn_local(async move {
+            let _ = api::update_badge().await;
+        });
+    };
+
     // The background scheduler found new mail (NOTIF-1). Slip it into the list quietly — no toast, no
     // jump: it just appears, with its unread dot, the way mail should. The re-list goes through the
     // `request` epoch like every other one, so it can never clobber a search the user is mid-way
@@ -341,6 +350,7 @@ pub fn App() -> impl IntoView {
         if drafts_open.get_untracked() {
             return; // the drafts pane isn't a mail list
         }
+        // (No bump here: the scheduler set the badge host-side before emitting this event.)
         let epoch = request.get_untracked() + 1;
         request.set(epoch);
         let is_unified = unified.get_untracked();
@@ -424,6 +434,7 @@ pub fn App() -> impl IntoView {
                         }
                         load_folders(aid, folders, selected_folder, messages, error, request).await;
                         loaded.set(true);
+                        bump_badge(); // the title is right from the first frame, not 30s later
                     }
                     None => {
                         accounts.set(list);
@@ -515,6 +526,7 @@ pub fn App() -> impl IntoView {
                         marked_unread.update(|s| {
                             s.remove(&id);
                         });
+                        bump_badge();
                     }
                 }
                 Err(e) => error.set(Some(e)),
@@ -558,6 +570,8 @@ pub fn App() -> impl IntoView {
         leptos::task::spawn_local(async move {
             if let Err(e) = api::set_unread(id).await {
                 error.set(Some(e));
+            } else {
+                bump_badge(); // only now the store says seen=0 — bumping earlier would read stale
             }
         });
     };
@@ -605,7 +619,7 @@ pub fn App() -> impl IntoView {
                     MoveTo::Folder(name) => api::move_to_folder(id, name).await,
                 };
                 match done {
-                    Ok(true) => {}
+                    Ok(true) => bump_badge(), // one fewer (maybe unread) message in the inbox
                     Ok(false) => restore("This account has no folder for that.".to_owned()),
                     Err(e) => restore(e),
                 }
@@ -682,13 +696,14 @@ pub fn App() -> impl IntoView {
             });
         }
         let toast_text = format!("{} marked unread", ids.len());
-        for id in ids {
-            leptos::task::spawn_local(async move {
+        leptos::task::spawn_local(async move {
+            for id in ids {
                 if let Err(e) = api::set_unread(id).await {
                     error.set(Some(e));
                 }
-            });
-        }
+            }
+            bump_badge(); // once every write has landed, so the count reflects all of them
+        });
         toast.set(Some(toast_text));
     };
 
@@ -709,13 +724,14 @@ pub fn App() -> impl IntoView {
             });
         }
         let toast_text = format!("{} marked read", ids.len());
-        for id in ids {
-            leptos::task::spawn_local(async move {
+        leptos::task::spawn_local(async move {
+            for id in ids {
                 if let Err(e) = api::set_read(id).await {
                     error.set(Some(e));
                 }
-            });
-        }
+            }
+            bump_badge();
+        });
         toast.set(Some(toast_text));
     };
 

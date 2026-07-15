@@ -347,6 +347,12 @@ pub async fn set_unread(id: i64) -> Result<(), String> {
     call("set_unread", &IdArgs { id }).await
 }
 
+/// Recompute the window's unread badge (NOTIF-3) from the store. Cheap and idempotent — call it after
+/// anything that changes what's unread (reading a message, marking read/unread, a move or delete).
+pub async fn update_badge() -> Result<(), String> {
+    call("update_badge", &NoArgs {}).await
+}
+
 /// Mark a message read (server + local) — for bulk mark-read.
 pub async fn set_read(id: i64) -> Result<(), String> {
     call("set_read", &IdArgs { id }).await

@@ -16,8 +16,8 @@ means anything.
 
 1. **New mail is knowable** ✅ — engine + store; no user-visible change.
 2. **The host syncs on its own** ✅ — the scheduler + the collision guard.
-3. **Notify** ✅ (this slice) — NOTIF-1 + NOTIF-2.
-4. **Badge** — NOTIF-3 (unread count in the window title).
+3. **Notify** ✅ — NOTIF-1 + NOTIF-2.
+4. **Badge** ✅ (this slice) — NOTIF-3 (unread count in the window title).
 
 ---
 
@@ -153,3 +153,28 @@ accident either.
 `org.freedesktop.Notifications` over D-Bus, through **zbus** — already in the tree (the secret-service
 keyring is built on it), so this costs **no new dependency**. A [`Notifier`] trait keeps D-Bus out of
 the app and lets the tests run without a desktop, exactly as `SecretStore` does for the keychain.
+
+
+---
+
+## Slice 4 — The badge
+
+The window title carries the unread count — *"GeleitMail — 3 unread"* — so a glance at the titlebar or
+the taskbar says whether anything is waiting. Zero unread is the bare name: a badge that is always on
+is decoration, not a signal. Capped at `999+`, so an enormous inbox can't push the app's own name out
+of a short title.
+
+**Inbox-scoped, across every account.** Mail a server-side rule filed straight into a folder, and
+anything in Junk, is not what "you have unread mail" means to someone glancing at the taskbar. The
+count is `Store::total_inbox_unread` — one query over every account's `INBOX`.
+
+**The title is a projection of the store.** `dto::window_title(n)` is pure (mutation-tested); the
+count comes from the store, never from the frontend's optimistic view — so the badge can't drift from
+the truth. It is recomputed after anything that changes what's unread: the frontend fires it on load
+and after a read / mark-unread / bulk / move (a store round-trip behind the on-screen change, which a
+taskbar glance can afford), and the scheduler resets it after every sweep — which is also when mail
+read on another device could have come back, so the number falls for that too.
+
+No tray icon and no OS badge count: those need `libayatana-appindicator3`, a new system dependency.
+`WebviewWindow::set_title` is core Tauri, and the title is where the number already reads in the
+taskbar. The tray is its own slice if it's ever wanted.
