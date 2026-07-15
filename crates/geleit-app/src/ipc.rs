@@ -50,6 +50,11 @@ pub struct AppState {
     /// Where new-mail notifications go. Injected (like [`Self::secrets`]) so the tests never need a
     /// desktop, and so the app never talks to D-Bus directly.
     pub notifier: Arc<dyn geleit_platform::notify::Notifier>,
+    /// Single-flight for the flag-write-back flush, per account: the value is "run once more when the
+    /// current flush finishes". Without it, a bulk mark-read (one `set_read` per message) would spawn a
+    /// flush thread *per message*, each pushing the whole account queue — a thundering herd. See
+    /// [`spawn_flush`].
+    flushing: Arc<Mutex<HashMap<i64, bool>>>,
 }
 
 impl AppState {
@@ -75,6 +80,7 @@ impl AppState {
             sync_locks: Arc::new(Mutex::new(HashMap::new())),
             wake_sync: Arc::new(tokio::sync::Notify::new()),
             notifier,
+            flushing: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -341,7 +347,7 @@ pub async fn open_message(
     mark_read: bool,
 ) -> Result<MessageBodyDto, String> {
     let st = state.inner().clone();
-    let (dto, loc) = with_store(st.clone(), move |store| {
+    let (dto, account) = with_store(st.clone(), move |store| {
         let header = store
             .header_by_id(id)
             .map_err(|_| "Couldn't open this message.".to_owned())?
@@ -355,9 +361,9 @@ pub async fn open_message(
         // it must not stop the user reading their mail, so it is best-effort. When the "mark as read
         // when opened" preference is off, the read is skipped entirely. `set_seen` marks the flag
         // dirty, so the SYNC-5 pull won't revert it before the write-back below confirms.
-        let loc = if mark_read {
+        let account = if mark_read {
             let _ = store.set_seen(id, true);
-            store.message_location(id).ok().flatten()
+            store.account_for_message(id).ok().flatten()
         } else {
             None
         };
@@ -394,25 +400,16 @@ pub async fn open_message(
                 has_remote,
                 attachments,
             },
-            loc,
+            account,
         ))
     })
     .await?;
 
-    // Write the read back to the server (`\Seen`), so a message read here shows as read on the user's
-    // other devices too — and, once it confirms, clears the dirty marker so the SYNC-5 pull resumes
-    // reconciling it. Best-effort on a worker: reading mail must never wait on the network (P1).
-    if let Some((folder, uid)) = loc {
-        spawn_writeback(&st, id, move |db, secrets| {
-            geleit_engine::sync_actions::run_set_seen(
-                db,
-                secrets,
-                account_of(db, secrets, id)?,
-                &folder,
-                uid as u32,
-                true,
-            )
-        });
+    // Write the read back to the server (`\Seen`) so it shows as read on the user's other devices too,
+    // via the durable queue — an immediate attempt now, retried every sweep until it lands. Reading
+    // mail must never wait on the network (P1), so it's off the UI thread.
+    if let Some(account_id) = account {
+        spawn_flush(&st, account_id);
     }
     Ok(dto)
 }
@@ -440,18 +437,36 @@ pub fn message_html(state: &AppState, id: i64, allow_remote: bool) -> Option<Str
 /// already updated optimistically; this reconciles the server and may outlive the command. A failure
 /// is swallowed here — the next refresh restores truth — but never lets it lose mail (the callers
 /// never expunge on the optimistic path).
-fn spawn_writeback<F>(state: &AppState, id: i64, f: F)
-where
-    F: FnOnce(&str, &dyn SecretStore) -> Result<(), String> + Send + 'static,
-{
-    let (db_path, secrets) = (state.db_path.clone(), state.secrets.clone());
-    std::thread::spawn(move || {
-        // Only on success do we clear the pending-change marker (SYNC-5): the server now agrees, so the
-        // flag pull may reconcile this message again. A failed write-back leaves it dirty, so the pull
-        // never reverts the user's local change — local intent wins, as it did before SYNC-5.
-        if f(&db_path, &*secrets).is_ok() {
-            if let Ok(store) = open_store(&db_path, &*secrets) {
-                let _ = store.clear_flags_dirty(id);
+/// Drain this account's pending flag write-backs now, off the UI thread (SYNC-5). Fire-and-forget for
+/// low latency: the change reaches the server within moments when online, and if this attempt fails the
+/// row stays dirty and the scheduler retries it every sweep — so nothing is lost. `run_flush_flags`
+/// clears the dirty marker for each message it confirms.
+fn spawn_flush(state: &AppState, account_id: i64) {
+    // Single-flight: if a flush for this account is already running, just ask it to run once more when
+    // it's done (so a change made mid-flush still goes out) and return — no second thread, no herd.
+    {
+        let mut guard = state.flushing.lock().expect("flush guard");
+        if let Some(rerun) = guard.get_mut(&account_id) {
+            *rerun = true;
+            return;
+        }
+        guard.insert(account_id, false);
+    }
+    let (db_path, secrets, flushing) = (
+        state.db_path.clone(),
+        state.secrets.clone(),
+        state.flushing.clone(),
+    );
+    std::thread::spawn(move || loop {
+        let _ = geleit_engine::sync_actions::run_flush_flags(&db_path, &*secrets, account_id);
+        let mut guard = flushing.lock().expect("flush guard");
+        match guard.get_mut(&account_id) {
+            // Work arrived while we were flushing — clear the request and go round once more.
+            Some(rerun) if *rerun => *rerun = false,
+            // Nothing new; release the account so the next change can start a fresh flush.
+            _ => {
+                guard.remove(&account_id);
+                break;
             }
         }
     });
@@ -461,26 +476,15 @@ where
 #[tauri::command]
 pub async fn set_star(state: tauri::State<'_, AppState>, id: i64, on: bool) -> Result<(), String> {
     let st = state.inner().clone();
-    let loc = with_store(st.clone(), move |store| {
+    let account = with_store(st.clone(), move |store| {
         store
             .set_flagged(id, on)
             .map_err(|_| "Couldn't update the star.".to_owned())?;
-        store
-            .message_location(id)
-            .map_err(|_| "Couldn't update the star.".to_owned())
+        Ok(store.account_for_message(id).ok().flatten())
     })
     .await?;
-    if let Some((folder, uid)) = loc {
-        spawn_writeback(&st, id, move |db, secrets| {
-            geleit_engine::sync_actions::run_set_flag(
-                db,
-                secrets,
-                account_of(db, secrets, id)?,
-                &folder,
-                uid as u32,
-                on,
-            )
-        });
+    if let Some(account_id) = account {
+        spawn_flush(&st, account_id);
     }
     Ok(())
 }
@@ -506,22 +510,13 @@ async fn set_seen_and_writeback(
     err: &'static str,
 ) -> Result<(), String> {
     let st = state.inner().clone();
-    let loc = with_store(st.clone(), move |store| {
+    let account = with_store(st.clone(), move |store| {
         store.set_seen(id, seen).map_err(|_| err.to_owned())?;
-        store.message_location(id).map_err(|_| err.to_owned())
+        Ok(store.account_for_message(id).ok().flatten())
     })
     .await?;
-    if let Some((folder, uid)) = loc {
-        spawn_writeback(&st, id, move |db, secrets| {
-            geleit_engine::sync_actions::run_set_seen(
-                db,
-                secrets,
-                account_of(db, secrets, id)?,
-                &folder,
-                uid as u32,
-                seen,
-            )
-        });
+    if let Some(account_id) = account {
+        spawn_flush(&st, account_id);
     }
     Ok(())
 }
@@ -828,16 +823,6 @@ pub async fn delete_folder(
             .map_err(|_| "Deleted on the server, but couldn't remove it locally.".to_owned())
     })
     .await
-}
-
-/// The account a message belongs to — read once inside a write-back (its own store connection).
-fn account_of(db: &str, secrets: &dyn SecretStore, id: i64) -> Result<i64, String> {
-    let store = open_store(db, secrets)?;
-    store
-        .account_for_message(id)
-        .ok()
-        .flatten()
-        .ok_or_else(|| "unknown account".to_owned())
 }
 
 /// Add (or reconnect) an account: validate the form, create the account, store the password in the
@@ -1959,6 +1944,17 @@ pub async fn update_badge(
     Ok(())
 }
 
+/// Drain an account's durable flag-write-back queue (SYNC-5), awaiting the result. The scheduler calls
+/// this every sweep and Refresh calls it too, so a read/star made while offline reaches the server the
+/// next time we're online — the queue survives restarts because it's just the store's dirty rows.
+pub(crate) async fn flush_flags(state: &AppState, account_id: i64) {
+    let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_flush_flags(&db, &*secrets, account_id)
+    })
+    .await;
+}
+
 /// Every account's id, for the background scheduler's sweep.
 pub(crate) async fn account_ids(state: &AppState) -> Result<Vec<i64>, String> {
     with_store(state.clone(), |store| {
@@ -2023,6 +2019,7 @@ pub async fn refresh(
             let _ = settle(&st, account_id, max_id).await;
         }
     }
+    flush_flags(&st, account_id).await; // push any queued read/star changes now that we're online
     set_badge(&app, &st).await;
     // That worked, so we're online — which is the one thing the background scheduler can't know while
     // it sits in a backed-off sleep. Wake it: it resets and sweeps the other accounts at once, rather

@@ -83,7 +83,10 @@ type ImapSession = async_imap::Session<tokio_rustls::client::TlsStream<TcpStream
 
 /// Open a TLS connection and log in, returning a ready session. The password comes from the
 /// `SecretStore` seam and is never logged (P2).
-async fn connect(config: &ImapConfig, secrets: &dyn SecretStore) -> Result<ImapSession, ImapError> {
+pub(crate) async fn connect(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+) -> Result<ImapSession, ImapError> {
     // Fetch the password first: missing → fail before opening any socket.
     // NOTE: `SecretStore::get` is sync and the real backend (OsSecretStore, S2.1) makes a blocking
     // D-Bus call. It's safe today — `run_setup`/`run_refresh` drive this on a dedicated worker
@@ -305,6 +308,43 @@ async fn store_flag(
     .await;
     let _ = session.logout().await; // best-effort
     result
+}
+
+/// Push a batch of read/star states to the server in **one session** (SYNC-5 durable write-back).
+///
+/// For each `(uid, seen, flagged)` it brings the server's `\Seen` and `\Flagged` for that message into
+/// line with what we hold — `+FLAGS`/`-FLAGS` per flag, so **other** flags (`\Answered`, `\Draft`, …)
+/// are never touched. Returns the UIDs that were pushed successfully, so the caller clears the dirty
+/// marker for exactly those and leaves the rest to the next sweep. A message no longer on the server is
+/// counted as done (its `STORE` is a harmless no-op) rather than blocking the queue forever.
+pub async fn push_flags(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    items: &[(u32, bool, bool)],
+) -> Result<Vec<u32>, ImapError> {
+    let mut session = connect(config, secrets).await?;
+    session.select(folder).await?;
+    let mut pushed = Vec::new();
+    for &(uid, seen, flagged) in items {
+        let seen_op = if seen {
+            "+FLAGS (\\Seen)"
+        } else {
+            "-FLAGS (\\Seen)"
+        };
+        let flag_op = if flagged {
+            "+FLAGS (\\Flagged)"
+        } else {
+            "-FLAGS (\\Flagged)"
+        };
+        let a = drain(session.uid_store(uid.to_string(), seen_op).await).await;
+        let b = drain(session.uid_store(uid.to_string(), flag_op).await).await;
+        if a.is_ok() && b.is_ok() {
+            pushed.push(uid);
+        }
+    }
+    let _ = session.logout().await; // best-effort
+    Ok(pushed)
 }
 
 /// Set or clear the `\Flagged` (star) flag on a message by UID in `folder` (ORG-4 write-back).
@@ -1709,7 +1749,7 @@ mod tests {
 
         // Once the write-back confirms (server now agrees), the message is reconciled normally and
         // stays read — no thrash.
-        store.clear_flags_dirty(id).unwrap();
+        store.clear_flags_dirty(id, true, false).unwrap();
         set_seen(
             &cfg,
             &secrets,

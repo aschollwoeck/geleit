@@ -301,8 +301,43 @@ dirty rows, and the write-back worker clears the marker **only on success**. So:
 
 Opening a message now **also writes `\Seen` back** (completing S9.4), so a read here reaches the user's
 other devices too. Among confirmed messages there is no per-flag modification sequence (no CONDSTORE),
-so it is last-writer-wins with the server as the reconciler; a durable offline write-back queue that
-also retries and surfaces failures is still a separate, later concern.
+so it is last-writer-wins with the server as the reconciler.
+
+### The durable write-back queue
+
+The write-back is no longer one fire-and-forget attempt that's lost if it fails. **The queue *is* the
+`flags_dirty` rows**: a read/star made here is written locally, marked dirty, and stays dirty across
+restarts until its push to the server confirms (`Store::pending_flag_writebacks` reads the queue;
+`clear_flags_dirty` drains an entry). `run_flush_flags` pushes every dirty message's current flag state
+— one session per folder, `+FLAGS`/`-FLAGS` per flag so other flags (`\Answered`, `\Draft`) are never
+touched — and clears the marker only for the UIDs that landed.
+
+It is drained from three places: immediately after a local change (low latency when online), by the
+scheduler **every sweep**, and by Refresh. So a change made offline reaches the server the next time
+we're online, rather than being lost — and because the immediate push and the sweep both go through the
+same queue, a failed attempt is simply retried, never dropped. The queue and the SYNC-5 pull compose
+cleanly: the sweep flushes *before* it pulls, so the pull sees a server that already agrees.
+
+**Clear is compare-and-clear, not unconditional.** The flush reads a message's flags, pushes them over
+the network, then settles the debt — and the user can change the flag again in that window (read, then
+immediately unread). `clear_flags_dirty(id, seen, flagged)` therefore only clears if the flags still
+match what was pushed; if they moved, it's a no-op and the row stays queued for the next flush with the
+*new* value. Without this the stale confirmation would settle a debt the server doesn't reflect, and the
+pull would revert the user's newer change — a silent lost update.
+
+**Single-flight per account.** A bulk mark-read fires one local change per message; without a guard each
+would spawn its own flush thread, each pushing the whole queue — O(N²) round-trips and N logins. So
+`spawn_flush` coalesces: if a flush is already running for the account, it just asks it to run once more
+when it finishes.
+
+A UID the server has since dropped is counted as done (its `STORE` is a harmless tagged-OK no-op on an
+RFC 3501 server like Dovecot), so a deleted message never wedges the queue — pinned by a live test. A
+non-standard server that answered `NO` to that `STORE` would leave the row dirty until the sync deletes
+it; not the target server, and it self-heals on the next sync's delete.
+
+Still out of scope (named, not smuggled): the queue does not yet **surface** a persistently-failing
+write-back to the user (a message stuck dirty for days), and it covers flags only — a *move* or
+*delete* is server-first, so a failed one doesn't diverge and isn't queued.
 
 The **delete-then-pull** order matters: messages the server dropped are removed *before* the pull, so a
 soon-to-vanish UID is neither reconciled (a wasted write) nor counted in `flag_updates` (a spurious

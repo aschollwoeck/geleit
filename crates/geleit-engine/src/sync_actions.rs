@@ -48,34 +48,62 @@ pub fn account_imap(
     Ok(to_config(&imap))
 }
 
-/// Write a star (`\Flagged`) change back to the server (ORG-4). Blocking + network: **worker thread.**
-pub fn run_set_flag(
+/// Drain the account's durable flag-write-back queue (SYNC-5): push every message with an unconfirmed
+/// local read/star change to the server, clearing the dirty marker on the ones that land.
+///
+/// This is what makes a flag change made **offline** eventually reach the server — the scheduler calls
+/// it every sweep, and it survives restarts because the queue is just the `flags_dirty` rows in the
+/// store. One session per folder; a folder we can't reach leaves its messages dirty for next time.
+/// Returns how many messages were confirmed. Blocking + network: **worker thread.**
+pub fn run_flush_flags(
     db_path: &str,
     secrets: &dyn SecretStore,
     account_id: i64,
-    folder: &str,
-    uid: u32,
-    flagged: bool,
-) -> Result<(), String> {
+) -> Result<usize, String> {
+    let store = open_store(db_path, secrets)?;
+    let pending = store
+        .pending_flag_writebacks(account_id)
+        .map_err(|_| "Couldn't read pending changes.".to_owned())?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
     let config = account_imap(db_path, secrets, account_id)?;
-    runtime()?
-        .block_on(imap::set_flag(&config, secrets, folder, uid, flagged))
-        .map_err(|_| "Couldn't update the star on the server.".to_owned())
-}
+    let rt = runtime()?;
 
-/// Write a read-state (`\Seen`) change back to the server (SYNC-5). Blocking + network: **worker thread.**
-pub fn run_set_seen(
-    db_path: &str,
-    secrets: &dyn SecretStore,
-    account_id: i64,
-    folder: &str,
-    uid: u32,
-    seen: bool,
-) -> Result<(), String> {
-    let config = account_imap(db_path, secrets, account_id)?;
-    runtime()?
-        .block_on(imap::set_seen(&config, secrets, folder, uid, seen))
-        .map_err(|_| "Couldn't update read state on the server.".to_owned())
+    // Group by folder so each folder is one session; keep a (folder, uid) → message-id map to clear
+    // the dirty marker for exactly the messages that were pushed.
+    let mut by_folder: std::collections::HashMap<String, Vec<(u32, bool, bool)>> =
+        std::collections::HashMap::new();
+    // (folder, uid) → (message id, the flags we pushed) so the clear is conditional on those exact
+    // flags — see `clear_flags_dirty`.
+    let mut meta: std::collections::HashMap<(String, u32), (i64, bool, bool)> =
+        std::collections::HashMap::new();
+    for p in pending {
+        let uid = p.uid as u32;
+        by_folder
+            .entry(p.folder.clone())
+            .or_default()
+            .push((uid, p.seen, p.flagged));
+        meta.insert((p.folder, uid), (p.id, p.seen, p.flagged));
+    }
+
+    let mut confirmed = 0usize;
+    for (folder, items) in by_folder {
+        // A folder that won't push (offline, gone) leaves its messages dirty — the queue retries them.
+        let Ok(pushed) = rt.block_on(imap::push_flags(&config, secrets, &folder, &items)) else {
+            continue;
+        };
+        for uid in pushed {
+            if let Some(&(id, seen, flagged)) = meta.get(&(folder.clone(), uid)) {
+                // Clears only if the flags haven't moved since we read them — if the user changed them
+                // again mid-flush, the row stays queued and the next flush pushes the newer value.
+                if store.clear_flags_dirty(id, seen, flagged).unwrap_or(false) {
+                    confirmed += 1;
+                }
+            }
+        }
+    }
+    Ok(confirmed)
 }
 
 /// Move a message by UID from `source` to `target` on the server (ORG-1/2/3 write-back). Blocking +
@@ -614,6 +642,206 @@ mod tests {
     use super::*;
     use geleit_platform::secret::InMemorySecretStore;
     use geleit_store::ImapSettings;
+
+    /// The durable flag-write-back queue reaches the server (SYNC-5), end to end against Dovecot.
+    ///
+    /// A read made **here** marks the message dirty (queued); `run_flush_flags` pushes it to the
+    /// server and clears the marker. This is what makes a change survive a failed first attempt — the
+    /// scheduler retries the queue every sweep. Simulated by marking read locally (no immediate push)
+    /// then draining the queue, and confirming the server's `\Seen` from a fresh connection.
+    #[test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    fn the_flag_queue_pushes_a_local_change_to_the_server_and_clears_it() {
+        let path = std::env::temp_dir().join(format!("geleit-syncq-{}.db", std::process::id()));
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+        let secrets = InMemorySecretStore::new();
+        let (email, imap) = build_settings(
+            "geleittest@localhost",
+            "127.0.0.1",
+            "993",
+            "geleittest",
+            true,
+        )
+        .unwrap();
+        let smtp = build_smtp_settings("127.0.0.1", "465", false).unwrap();
+        let acc = run_setup(
+            path,
+            &secrets,
+            &email,
+            Some("geleittest"),
+            imap,
+            smtp,
+            "",
+            "testpass123",
+        )
+        .expect("setup + first sync");
+
+        let cfg = imap::ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let folder = format!("GeleitQueue{}", std::process::id());
+        let rt = runtime().unwrap();
+        rt.block_on(async {
+            let _ = imap::delete_folder(&cfg, &secrets, &folder).await;
+            imap::create_folder(&cfg, &secrets, &folder).await.unwrap();
+            imap::append_message(
+                &cfg,
+                &secrets,
+                &folder,
+                "()",
+                b"Subject: unread\r\nFrom: A <a@example.com>\r\n\r\nBody.\r\n",
+            )
+            .await
+            .unwrap();
+        });
+
+        let store = open_store(path, &secrets).unwrap();
+        rt.block_on(imap::sync_folder_incremental(
+            &cfg, &secrets, &store, acc, &folder, 50,
+        ))
+        .expect("sync the new folder");
+        let folder_id = store
+            .folders_for_account(acc)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.name == folder)
+            .unwrap()
+            .id;
+        let id = store.messages_in_folder(folder_id, 10).unwrap()[0].id;
+
+        // Read it HERE, local-only (as open_message does) → queued, server still says unread.
+        store.set_seen(id, true).unwrap();
+        assert_eq!(
+            store.pending_flag_writebacks(acc).unwrap().len(),
+            1,
+            "queued"
+        );
+        drop(store);
+
+        // Drain the queue — the change goes to the server, and the marker clears.
+        let confirmed = run_flush_flags(path, &secrets, acc).expect("flush");
+        assert_eq!(confirmed, 1);
+        let store = open_store(path, &secrets).unwrap();
+        assert!(
+            store.pending_flag_writebacks(acc).unwrap().is_empty(),
+            "the queue is drained once the server confirms"
+        );
+        drop(store);
+
+        // The server really is `\Seen` now — read it back from a fresh connection.
+        let server_seen: std::collections::HashSet<u32> = rt.block_on(async {
+            let mut sess = imap::connect(&cfg, &secrets).await.unwrap();
+            sess.select(&folder).await.unwrap();
+            let s = sess.uid_search("SEEN").await.unwrap();
+            let _ = sess.logout().await;
+            s.into_iter().collect()
+        });
+        let uid = store_uid(path, &secrets, folder_id);
+        assert!(server_seen.contains(&uid), "the read reached the server");
+
+        // A second flush is a no-op (nothing owed).
+        assert_eq!(run_flush_flags(path, &secrets, acc).unwrap(), 0);
+        rt.block_on(async {
+            let _ = imap::delete_folder(&cfg, &secrets, &folder).await;
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A queued flag change for a message the server has since **deleted** must not wedge the queue
+    /// (SYNC-5): its `STORE` is a harmless no-op on an RFC 3501 server, so the flush counts it done.
+    #[test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    fn the_flag_queue_does_not_get_stuck_on_a_message_deleted_on_the_server() {
+        let path = std::env::temp_dir().join(format!("geleit-syncqd-{}.db", std::process::id()));
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+        let secrets = InMemorySecretStore::new();
+        let (email, imap) = build_settings(
+            "geleittest@localhost",
+            "127.0.0.1",
+            "993",
+            "geleittest",
+            true,
+        )
+        .unwrap();
+        let smtp = build_smtp_settings("127.0.0.1", "465", false).unwrap();
+        let acc = run_setup(
+            path,
+            &secrets,
+            &email,
+            Some("geleittest"),
+            imap,
+            smtp,
+            "",
+            "testpass123",
+        )
+        .expect("setup");
+        let cfg = imap::ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let folder = format!("GeleitQueueDel{}", std::process::id());
+        let rt = runtime().unwrap();
+        rt.block_on(async {
+            let _ = imap::delete_folder(&cfg, &secrets, &folder).await;
+            imap::create_folder(&cfg, &secrets, &folder).await.unwrap();
+            imap::append_message(
+                &cfg,
+                &secrets,
+                &folder,
+                "()",
+                b"Subject: doomed\r\nFrom: A <a@example.com>\r\n\r\nBody.\r\n",
+            )
+            .await
+            .unwrap();
+        });
+        let store = open_store(path, &secrets).unwrap();
+        rt.block_on(imap::sync_folder_incremental(
+            &cfg, &secrets, &store, acc, &folder, 50,
+        ))
+        .unwrap();
+        let folder_id = store
+            .folders_for_account(acc)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.name == folder)
+            .unwrap()
+            .id;
+        let msg = &store.messages_in_folder(folder_id, 10).unwrap()[0];
+        let (id, uid) = (msg.id, msg.uid.unwrap() as u32);
+        store.set_seen(id, true).unwrap(); // queue a read for it…
+        drop(store);
+
+        // …then delete it on the server, so its UID is gone before the flush runs.
+        rt.block_on(imap::delete_permanently(&cfg, &secrets, &folder, uid))
+            .unwrap();
+
+        // The flush must count it done and drain the queue, not retry it forever.
+        assert_eq!(run_flush_flags(path, &secrets, acc).expect("flush"), 1);
+        let store = open_store(path, &secrets).unwrap();
+        assert!(
+            store.pending_flag_writebacks(acc).unwrap().is_empty(),
+            "a deleted message does not wedge the queue"
+        );
+        drop(store);
+        rt.block_on(async {
+            let _ = imap::delete_folder(&cfg, &secrets, &folder).await;
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn store_uid(path: &str, secrets: &InMemorySecretStore, folder_id: i64) -> u32 {
+        let store = open_store(path, secrets).unwrap();
+        store.messages_in_folder(folder_id, 10).unwrap()[0]
+            .uid
+            .unwrap() as u32
+    }
 
     /// The exact refresh + backfill path the Tauri `refresh` command drives (minus the event
     /// wrapper, which only forwards the `on_batch` count), against a local Dovecot. Proves the S9.3
