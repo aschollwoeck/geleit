@@ -142,6 +142,10 @@ identifies itself properly so those controls apply to it.
 - Mail you've **already read somewhere else** — on your phone, in webmail — is never announced here.
   You already know about it.
 
+GeleitMail also shows your unread count **in the window title** — *"GeleitMail — 3 unread"* — so it's in
+the taskbar too, even when the window is behind something else. It counts unread messages in your Inbox
+across all your accounts, and reads just "GeleitMail" when you're caught up.
+
 Mail you fetched yourself with **Refresh** is never popped up at you afterwards — you asked for it, and
 it's on your screen.
 

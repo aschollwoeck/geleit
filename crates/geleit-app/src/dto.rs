@@ -79,6 +79,23 @@ pub struct AttachmentDto {
     pub size: String,
 }
 
+/// The window title, carrying the unread count (NOTIF-3) — what you see in the titlebar and, when the
+/// window is minimised, in the taskbar.
+///
+/// Zero unread is just the app's name: a badge that is *always* there is decoration, not a signal, and
+/// the point of this is to catch the eye only when it should. The count is spelled out ("3 unread")
+/// rather than a bare "(3)", because in the taskbar there is no envelope icon beside it to say what the
+/// number means. Capped at `999+`: past a few hundred the exact figure is noise, and an unbounded
+/// number can push the app's own name out of a short title.
+#[must_use]
+pub fn window_title(unread: i64) -> String {
+    match unread {
+        n if n <= 0 => "GeleitMail".to_owned(),
+        n if n > 999 => "GeleitMail — 999+ unread".to_owned(),
+        n => format!("GeleitMail — {n} unread"),
+    }
+}
+
 /// A human-readable byte size (e.g. `540 bytes`, `12.4 KB`, `3.1 MB`). Pure. Uses 1024-based units;
 /// bytes stay exact, larger units get one decimal (trimmed if `.0`).
 #[must_use]
@@ -535,6 +552,24 @@ mod tests {
         assert!(validate_folder_name("   ").is_err());
         assert!(validate_folder_name("a/b").is_err());
         assert!(validate_folder_name("a\\b").is_err());
+    }
+
+    #[test]
+    fn the_window_title_shows_the_unread_count_only_when_there_is_one() {
+        // Zero is the bare name — a badge that's always on is decoration, not a signal.
+        assert_eq!(window_title(0), "GeleitMail");
+        assert_eq!(
+            window_title(-1),
+            "GeleitMail",
+            "a nonsense count is not a badge"
+        );
+        assert_eq!(window_title(1), "GeleitMail — 1 unread");
+        assert_eq!(window_title(3), "GeleitMail — 3 unread");
+        assert_eq!(window_title(999), "GeleitMail — 999 unread");
+        // Past a few hundred the exact number is noise, and mustn't shove the app's name off a short
+        // title.
+        assert_eq!(window_title(1000), "GeleitMail — 999+ unread");
+        assert_eq!(window_title(50_000), "GeleitMail — 999+ unread");
     }
 
     #[test]

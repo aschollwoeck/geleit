@@ -1126,6 +1126,23 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// The total unread across **every account's INBOX** (NOTIF-3) — the number for the window badge.
+    ///
+    /// Inbox-scoped on purpose: mail a server-side rule filed straight into a folder, and things
+    /// sitting in Junk, are not what "you have unread mail" means to a person glancing at the taskbar.
+    /// `INBOX` is IMAP's one reserved folder name (RFC 3501), matched case-insensitively.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn total_inbox_unread(&self) -> Result<i64, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM message m JOIN folder f ON f.id = m.folder_id \
+             WHERE m.seen = 0 AND f.name = 'INBOX' COLLATE NOCASE",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Insert or update a message envelope, keyed by `(account_id, folder_id, uid)`. On re-sync the
     /// envelope fields and seen flag are refreshed. `flagged`, `has_attachments`, and `snippet` are
     /// **not** overwritten on conflict: `flagged` is local state and the other two are body-derived
@@ -1393,7 +1410,7 @@ impl Store {
             "SELECT m.id, m.uid, m.message_id, m.in_reply_to, m.subject, m.from_name, m.from_addr, \
              m.date, m.seen, m.has_attachments, m.snippet, m.flagged, m.account_id \
              FROM message m JOIN folder f ON f.id = m.folder_id \
-             WHERE f.name = 'INBOX' ORDER BY m.date DESC, m.id DESC LIMIT ?1",
+             WHERE f.name = 'INBOX' COLLATE NOCASE ORDER BY m.date DESC, m.id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit], |r| Ok((header_from_row(r)?, r.get::<_, i64>(12)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -2541,6 +2558,47 @@ mod tests {
         let mut want = vec![(inbox, 2), (archive, 1)];
         want.sort();
         assert_eq!(got, want);
+
+        // The window badge sums INBOX unread across BOTH accounts and nothing else: the archive unread
+        // and everything in Sent are excluded, this account's inbox has 2 and the other's has 1.
+        assert_eq!(
+            s.total_inbox_unread().unwrap(),
+            3,
+            "2 in this account's inbox + 1 in the other's — archive and sent excluded"
+        );
+    }
+
+    #[test]
+    fn the_badge_counts_only_the_real_inbox_whatever_its_case_and_never_a_namespaced_lookalike() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.total_inbox_unread().unwrap(), 0, "nothing yet");
+        let acc = s.add_account("a@example.com", None).unwrap();
+        // A server that lower-cases the name is still the inbox (IMAP reserves it case-insensitively).
+        let inbox = s.upsert_folder(acc, "inbox").unwrap();
+        // These are NOT the inbox: a namespaced child (`INBOX.Archive`, the dovecot layout this project
+        // develops against) and a folder that merely contains the word.
+        let namespaced = s.upsert_folder(acc, "INBOX.Archive").unwrap();
+        let lookalike = s.upsert_folder(acc, "Inbox archive").unwrap();
+        let mut uid = 0;
+        let mut add = |folder: i64, seen: bool| {
+            uid += 1;
+            s.upsert_message(
+                acc,
+                folder,
+                &NewMessage {
+                    uid: Some(uid),
+                    seen,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        add(inbox, false);
+        add(inbox, false);
+        add(inbox, true); // read → not counted
+        add(namespaced, false); // INBOX.Archive → a different folder, not the inbox
+        add(lookalike, false); // "Inbox archive" → not the inbox
+        assert_eq!(s.total_inbox_unread().unwrap(), 2);
     }
 
     #[test]

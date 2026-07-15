@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Mail tells you it's here
+- **The window title shows your unread count** — *"GeleitMail — 3 unread"* — so a glance at the titlebar
+  or taskbar says whether anything's waiting. It counts unread in your Inbox across every account, and
+  reads just "GeleitMail" when you're all caught up.
 - **New-mail notifications.** GeleitMail now shows a quiet desktop notification when mail arrives —
   the sender and the subject. The **Settings → Notifications** toggle finally does something: until now
   it saved a setting that nothing read.

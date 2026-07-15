@@ -246,3 +246,25 @@ no timeout, and the scheduler is an async task on Tauri's runtime. A notificatio
 start would otherwise stall a runtime worker — and if a future dependency bump ever *did* pull in
 `zbus/tokio`, the panic would unwind the scheduler's loop and silently stop background sync for every
 account, for the rest of the session. Blocking work belongs on a blocking thread.
+
+
+---
+
+## The unread badge (slice 4)
+
+The window title carries the unread count (*"GeleitMail — 3 unread"*), via `WebviewWindow::set_title`
+— core Tauri, no plugin, no new system dependency (a tray icon would need `libayatana-appindicator3`).
+
+- **The count is `Store::total_inbox_unread`** — `seen = 0` across every account's `INBOX`, and only the
+  inbox: mail auto-filed into a folder, or sitting in Junk, is not what the number means. `INBOX` is
+  matched `COLLATE NOCASE` (IMAP reserves the name case-insensitively).
+- **The text is pure** (`dto::window_title`), so it is mutation-tested: `0` (and any nonsense negative)
+  is the bare name — an always-on badge is decoration; the count is capped at `999+` so it can't shove
+  the app's name off a short title.
+- **It is a projection of the store, never of the frontend's optimistic view**, so it cannot drift. The
+  frontend calls `update_badge` (fire-and-forget) on load and after each read/mark-unread/bulk/move; the
+  scheduler and `refresh` call `ipc::set_badge` host-side after a sync — which is also when a message
+  read elsewhere can come back `\Seen`, so the count falls for that too, not only when mail arrives.
+
+The badge lagging the on-screen change by a store round-trip is deliberate: it is a taskbar glance, not
+a live counter, and reading truth from the store beats keeping a second tally in sync with it.

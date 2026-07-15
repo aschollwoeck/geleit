@@ -21,6 +21,7 @@ use geleit_platform::secret::SecretStore;
 use geleit_store::Store;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tauri::Manager; // get_webview_window, for the unread badge
 
 use crate::dto::{
     compose_from_draft, display_sender, display_subject, draft_content_from, folder_rank,
@@ -1900,6 +1901,33 @@ pub(crate) async fn set_setting_for_test(state: &AppState, key: &str, value: &st
     .expect("set setting");
 }
 
+/// Set the window title's unread badge (NOTIF-3) from the store's truth.
+///
+/// Cheap and idempotent, so every caller can just fire it: the frontend after anything that changes
+/// read state (opening a message, mark read/unread, a move, a delete), the scheduler after a sweep.
+/// The count is the total unread across every account's INBOX — see [`Store::total_inbox_unread`] — and
+/// the title text is pure ([`crate::dto::window_title`]).
+pub(crate) async fn set_badge(app: &tauri::AppHandle, state: &AppState) {
+    let unread = with_store(state.clone(), |store| {
+        store.total_inbox_unread().map_err(|_| String::new())
+    })
+    .await
+    .unwrap_or(0);
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_title(&crate::dto::window_title(unread));
+    }
+}
+
+/// The frontend's hook for the badge: call after anything that changes what's unread.
+#[tauri::command]
+pub async fn update_badge(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    set_badge(&app, state.inner()).await;
+    Ok(())
+}
+
 /// Every account's id, for the background scheduler's sweep.
 pub(crate) async fn account_ids(state: &AppState) -> Result<Vec<i64>, String> {
     with_store(state.clone(), |store| {
@@ -1964,6 +1992,7 @@ pub async fn refresh(
             let _ = settle(&st, account_id, max_id).await;
         }
     }
+    set_badge(&app, &st).await;
     // That worked, so we're online — which is the one thing the background scheduler can't know while
     // it sits in a backed-off sleep. Wake it: it resets and sweeps the other accounts at once, rather
     // than leaving their mail up to half an hour stale after a laptop comes back from a night off.
