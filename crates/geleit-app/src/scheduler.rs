@@ -54,17 +54,17 @@ pub(crate) fn spawn(app: tauri::AppHandle) {
         sleep_or_wake(fast.unwrap_or(FIRST_SWEEP_DELAY), &wake).await;
         loop {
             match sweep(&app, tick, &mut account_failures).await {
-                Ok(new_mail) => {
+                Ok(changed) => {
                     failures = 0;
                     // The badge is set every sweep, not only when mail arrives: a sweep is also when
                     // mail read on another device comes back `\Seen`, and the count should fall for
                     // that too.
                     crate::ipc::set_badge(&app, app.state::<AppState>().inner()).await;
-                    if new_mail > 0 {
-                        // Tell the UI to re-list. It goes through the same `request` epoch as every
-                        // other re-list, so an arrival can never clobber a search being typed or a
-                        // folder just switched to.
-                        let _ = app.emit("mail-arrived", new_mail as i64);
+                    if changed > 0 {
+                        // Tell the UI to re-list — for new mail, or for a flag pulled from another
+                        // device. It goes through the same `request` epoch as every other re-list, so
+                        // it can never clobber a search being typed or a folder just switched to.
+                        let _ = app.emit("mail-arrived", changed as i64);
                     }
                 }
                 // A failed sweep is ordinary — the machine sleeps, the wifi drops. Never surface it:
@@ -93,7 +93,8 @@ async fn sleep_or_wake(delay: Duration, wake: &tokio::sync::Notify) {
     }
 }
 
-/// One pass over the accounts' inboxes. Returns how many messages arrived that are worth announcing.
+/// One pass over the accounts' inboxes. Returns how many accounts had a change the UI should re-list
+/// for — mail that arrived, or a read/star flag pulled from another device (SYNC-5).
 async fn sweep(
     app: &tauri::AppHandle,
     tick: u64,
@@ -104,7 +105,7 @@ async fn sweep(
         return Err(());
     };
 
-    let (mut news, mut failed, mut tried) = (0usize, 0usize, 0usize);
+    let (mut changed, mut failed, mut tried) = (0usize, 0usize, 0usize);
     for account_id in &accounts {
         let so_far = account_failures.get(account_id).copied().unwrap_or(0);
         // A failing account is tried progressively less often. "Unreachable" and "wrong password"
@@ -118,7 +119,11 @@ async fn sweep(
         match crate::ipc::sync_folder_once(&state, *account_id, "INBOX").await {
             Ok(outcome) => {
                 account_failures.remove(account_id); // recovered
-                news += outcome.worth_announcing().len();
+                                                     // A re-list is due if mail arrived OR a flag was pulled from another device — either
+                                                     // way the on-screen list is now stale, even when nothing is *announced*.
+                if !outcome.arrived.is_empty() || outcome.flag_updates > 0 {
+                    changed += 1;
+                }
                 // Tell the user — from the **store**, not from this sync's diff. A message the backfill
                 // swept up, or one that arrived while notifications were off or the user was asleep, is
                 // owed a notification just the same, and only the store remembers that (migration 17).
@@ -132,7 +137,7 @@ async fn sweep(
     }
     // Judge the sweep on what it actually *tried* — an account we deliberately skipped isn't a
     // failure, and shouldn't drag the whole schedule into backoff.
-    sweep_verdict(news, failed, tried)
+    sweep_verdict(changed, failed, tried)
 }
 
 /// Tell the user about the mail this account is owed a notification for.

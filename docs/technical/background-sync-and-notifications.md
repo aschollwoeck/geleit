@@ -268,3 +268,47 @@ The window title carries the unread count (*"GeleitMail — 3 unread"*), via `We
 
 The badge lagging the on-screen change by a store round-trip is deliberate: it is a taskbar glance, not
 a live counter, and reading truth from the store beats keeping a second tally in sync with it.
+
+
+---
+
+## Read state, both directions (SYNC-5)
+
+A sync used to only **add and remove whole messages** — it never noticed a flag flip on one it already
+held. So reading a message in webmail left it bold here, and the unread badge never fell for it; the
+number reflected what you'd read *on this device*, not what you'd read anywhere.
+
+A sync now **pulls** the server's `\Seen` / `\Flagged` for mail we already hold. Cheaply: two
+`UID SEARCH`es (`SEEN`, `FLAGGED`) give the server's flagged-UID sets whatever the mailbox size — far
+lighter than re-fetching every message's flags — and `sync::flag_plan` (pure, mutation-tested) keeps
+only the UIDs whose stored flags actually differ. `Store::apply_flag_changes` writes just `seen` /
+`flagged`, never the envelope, the body, or `notified` (a message read elsewhere settles its own
+notification debt by becoming `seen`, which `pending_notifications` already filters on).
+
+**A local change the server hasn't confirmed is never reverted.** This is the care-point, and the
+review caught why it matters: reading a message marks it read *locally* and writes `\Seen` back on a
+worker — and the most common read path, opening a message, had **no** server write-back at all until
+this slice (it was deferred as "S9.4"). So a naive server-wins pull would flip every read straight back
+off on the next sweep. The fix is a **pending-change marker** (`message.flags_dirty`, migration 18):
+`set_seen`/`set_flagged` mark the flag dirty, `flags_in_folder` (the pull's local side) *excludes*
+dirty rows, and the write-back worker clears the marker **only on success**. So:
+
+- while the write-back is in flight, the message is shielded — the pull can't undo it (fixes the TOCTOU
+  race a reviewer flagged);
+- when it confirms, the marker clears and the next pull reconciles normally, finding agreement;
+- if it never confirms (offline, server error), the marker stays and **local intent wins forever** —
+  exactly the pre-SYNC-5 behaviour, preserved rather than regressed.
+
+Opening a message now **also writes `\Seen` back** (completing S9.4), so a read here reaches the user's
+other devices too. Among confirmed messages there is no per-flag modification sequence (no CONDSTORE),
+so it is last-writer-wins with the server as the reconciler; a durable offline write-back queue that
+also retries and surfaces failures is still a separate, later concern.
+
+The **delete-then-pull** order matters: messages the server dropped are removed *before* the pull, so a
+soon-to-vanish UID is neither reconciled (a wasted write) nor counted in `flag_updates` (a spurious
+re-list).
+
+`SyncOutcome.flag_updates` reports how many held messages changed, so the scheduler re-lists the UI
+(not just recomputes the badge) when flags moved even though no mail *arrived* — otherwise the badge
+would fall while the list rows stayed bold until the next unrelated re-list. The live test
+`a_message_read_on_another_device_stops_being_unread_here` proves the whole round trip against Dovecot.

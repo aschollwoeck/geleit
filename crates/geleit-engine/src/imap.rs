@@ -61,6 +61,10 @@ pub struct SyncOutcome {
     /// Whether the folder was in a known-good state *before* this sync. When false, `arrived` is the
     /// whole recent window rather than genuine news — see [`crate::sync::notifiable`].
     pub primed: bool,
+    /// How many already-held messages had their read/star flags changed by this sync — i.e. read or
+    /// starred on another device (SYNC-5). Non-zero means the on-screen list is now stale even though
+    /// no mail *arrived*, so the UI should re-list and the badge should be recomputed.
+    pub flag_updates: usize,
 }
 
 impl SyncOutcome {
@@ -623,9 +627,39 @@ pub async fn sync_folder_incremental(
         .collect();
     let plan = crate::sync::reconcile(&local, &server);
 
-    // Remove messages deleted on the server.
+    // Remove messages deleted on the server FIRST, so the flag pull below neither reconciles nor counts
+    // a message that is about to vanish anyway (which would waste a write and spuriously re-list).
     let deleted: Vec<i64> = plan.deleted.iter().map(|&u| i64::from(u)).collect();
     store.delete_messages_by_uid(folder_id, &deleted)?;
+
+    // Pull read/star changes made on ANOTHER device (SYNC-5) for messages we already hold. Two cheap
+    // `UID SEARCH`es give the server's `\Seen` / `\Flagged` UID sets whatever the mailbox size — far
+    // lighter than re-fetching every message's flags — and `sync::flag_plan` keeps only what actually
+    // differs from what we hold. This is what makes "read it on my phone" drop the unread badge here.
+    // `flags_in_folder` excludes messages with an unconfirmed local change, so the pull can't undo a
+    // read the user just made here whose write-back to the server hasn't landed yet.
+    let flag_updates = {
+        let server_seen: std::collections::HashSet<u32> =
+            session.uid_search("SEEN").await?.into_iter().collect();
+        let server_flagged: std::collections::HashSet<u32> =
+            session.uid_search("FLAGGED").await?.into_iter().collect();
+        let held: Vec<crate::sync::FlagState> = store
+            .flags_in_folder(folder_id)?
+            .into_iter()
+            .map(|(uid, seen, flagged)| crate::sync::FlagState {
+                uid: uid as u32,
+                seen,
+                flagged,
+            })
+            .collect();
+        let changes = crate::sync::flag_plan(&held, &server_seen, &server_flagged);
+        let rows: Vec<(i64, bool, bool)> = changes
+            .iter()
+            .map(|c| (i64::from(c.uid), c.seen, c.flagged))
+            .collect();
+        store.apply_flag_changes(folder_id, &rows)?;
+        rows.len()
+    };
 
     // Fetch the most-recent `limit` new UIDs (older backfill is S2.4).
     let mut new_uids = plan.new;
@@ -676,7 +710,11 @@ pub async fn sync_folder_incremental(
     store.set_folder_primed(folder_id, true)?;
 
     let _ = session.logout().await; // best-effort
-    Ok(SyncOutcome { arrived, primed })
+    Ok(SyncOutcome {
+        arrived,
+        primed,
+        flag_updates,
+    })
 }
 
 /// Progressively fetch the rest of a folder, newest-first, in `batch_size` chunks (envelopes+bodies
@@ -1482,6 +1520,227 @@ mod tests {
         }
         let _ = session.logout().await;
         out
+    }
+
+    /// Reading (or starring) a message on **another device** reaches this one (SYNC-5), end to end
+    /// against a real server.
+    ///
+    /// The flags a message carries are the server's to change, and a sync now pulls those changes for
+    /// mail we already hold — so a message read in webmail stops being unread here, and the badge falls
+    /// for it. Simulated by pushing the flag from a *second* connection (what the other device would
+    /// do), then syncing and checking the local store followed.
+    /// Needs Dovecot + `--features dangerous-tls`.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn a_message_read_on_another_device_stops_being_unread_here() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let folder = format!("GeleitFlags{}", std::process::id());
+        let _ = delete_folder(&cfg, &secrets, &folder).await;
+        create_folder(&cfg, &secrets, &folder)
+            .await
+            .expect("create");
+        let raw =
+            |s: &str| format!("Subject: {s}\r\nFrom: Alice <alice@example.com>\r\n\r\nBody.\r\n");
+        for s in ["one", "two"] {
+            append_message(&cfg, &secrets, &folder, "()", raw(s).as_bytes())
+                .await
+                .expect("append unread");
+        }
+
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("geleittest@localhost", None).unwrap();
+        sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("first sync");
+        let folder_id = store
+            .folders_for_account(acc)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.name == folder)
+            .unwrap()
+            .id;
+        let unread = || {
+            store
+                .messages_in_folder(folder_id, 10)
+                .unwrap()
+                .into_iter()
+                .filter(|m| !m.seen)
+                .count()
+        };
+        let starred = || {
+            store
+                .messages_in_folder(folder_id, 10)
+                .unwrap()
+                .into_iter()
+                .filter(|m| m.flagged)
+                .count()
+        };
+        assert_eq!(unread(), 2, "both arrived unread");
+        assert_eq!(starred(), 0);
+
+        // Another device reads the first message and stars the second — pushed straight to the server.
+        let uids: Vec<u32> = {
+            let mut sess = connect(&cfg, &secrets).await.unwrap();
+            sess.select(&folder).await.unwrap();
+            let mut u: Vec<u32> = sess.uid_search("ALL").await.unwrap().into_iter().collect();
+            let _ = sess.logout().await;
+            u.sort_unstable();
+            u
+        };
+        set_seen(&cfg, &secrets, &folder, uids[0], true)
+            .await
+            .expect("read on device 2");
+        set_flag(&cfg, &secrets, &folder, uids[1], true)
+            .await
+            .expect("star on device 2");
+
+        // Sync again — the change must reach us, and the outcome must SAY it changed so the UI re-lists.
+        let outcome = sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("second sync");
+        assert_eq!(
+            outcome.flag_updates, 2,
+            "one read + one starred were pulled"
+        );
+        assert!(
+            outcome.arrived.is_empty(),
+            "no mail arrived — only flags moved"
+        );
+        assert_eq!(
+            unread(),
+            1,
+            "the message read elsewhere is no longer unread here"
+        );
+        assert_eq!(
+            starred(),
+            1,
+            "the message starred elsewhere is starred here"
+        );
+
+        // Idempotent: nothing changed since, so a third sync pulls nothing.
+        let third = sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("third sync");
+        assert_eq!(
+            third.flag_updates, 0,
+            "already in sync — no needless writes"
+        );
+
+        let _ = delete_folder(&cfg, &secrets, &folder).await;
+    }
+
+    /// A read made **here** that the server hasn't confirmed must NOT be reverted by the flag pull
+    /// (the blocker the SYNC-5 review caught).
+    ///
+    /// Reading a message marks it read locally and writes `\Seen` back on a worker; a sync can run in
+    /// between. Here we mark it read **locally only** (as `store.set_seen` does — flags_dirty=1) without
+    /// telling the server, then sync: the pull must leave it read, because the change is unconfirmed.
+    /// Needs Dovecot + `--features dangerous-tls`.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn a_local_read_the_server_has_not_confirmed_is_not_reverted_by_the_pull() {
+        let secrets = InMemorySecretStore::new();
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let folder = format!("GeleitDirty{}", std::process::id());
+        let _ = delete_folder(&cfg, &secrets, &folder).await;
+        create_folder(&cfg, &secrets, &folder)
+            .await
+            .expect("create");
+        append_message(
+            &cfg,
+            &secrets,
+            &folder,
+            "()",
+            b"Subject: unread on the server\r\nFrom: Alice <alice@example.com>\r\n\r\nBody.\r\n",
+        )
+        .await
+        .expect("append unread");
+
+        let store = Store::open_in_memory().unwrap();
+        let acc = store.add_account("geleittest@localhost", None).unwrap();
+        sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("first sync");
+        let folder_id = store
+            .folders_for_account(acc)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.name == folder)
+            .unwrap()
+            .id;
+        let id = store.messages_in_folder(folder_id, 10).unwrap()[0].id;
+
+        // The user reads it HERE — local only, the server still says unread (the write-back hasn't run,
+        // or failed). This is exactly `open_message`'s local step.
+        store.set_seen(id, true).unwrap();
+        assert!(store.header_by_id(id).unwrap().unwrap().seen);
+
+        // Sync while the server still says unread. The pull must NOT flip the user's read back off.
+        let outcome = sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("second sync");
+        assert_eq!(
+            outcome.flag_updates, 0,
+            "the unconfirmed local read is shielded, not reverted"
+        );
+        assert!(
+            store.header_by_id(id).unwrap().unwrap().seen,
+            "the read the user made here survives a sync the server hasn't caught up with"
+        );
+
+        // Once the write-back confirms (server now agrees), the message is reconciled normally and
+        // stays read — no thrash.
+        store.clear_flags_dirty(id).unwrap();
+        set_seen(
+            &cfg,
+            &secrets,
+            &folder,
+            {
+                let mut sess = connect(&cfg, &secrets).await.unwrap();
+                sess.select(&folder).await.unwrap();
+                let u = sess
+                    .uid_search("ALL")
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                    .unwrap();
+                let _ = sess.logout().await;
+                u
+            },
+            true,
+        )
+        .await
+        .expect("the write-back lands");
+        let third = sync_folder_incremental(&cfg, &secrets, &store, acc, &folder, 50)
+            .await
+            .expect("third sync");
+        assert_eq!(
+            third.flag_updates, 0,
+            "local and server now agree — nothing to do"
+        );
+        assert!(store.header_by_id(id).unwrap().unwrap().seen);
+
+        let _ = delete_folder(&cfg, &secrets, &folder).await;
     }
 
     /// The durable "we owe you a notification" fact (NOTIF-1), end to end against a real server —

@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Mail tells you it's here
+- **Read your mail elsewhere and GeleitMail keeps up.** A message you read (or star) on your phone or in
+  webmail stops being unread (or gains its star) here on the next check, and the unread count falls to
+  match — so it reflects what you actually haven't read *anywhere*, not just on this device.
 - **The window title shows your unread count** — *"GeleitMail — 3 unread"* — so a glance at the titlebar
   or taskbar says whether anything's waiting. It counts unread in your Inbox across every account, and
   reads just "GeleitMail" when you're all caught up.

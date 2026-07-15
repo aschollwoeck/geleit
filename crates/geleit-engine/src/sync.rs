@@ -107,6 +107,52 @@ pub fn owed(news: News, uid: u32, seen: bool) -> bool {
 /// Reconcile local vs. server UIDs into a [`SyncPlan`]. Pure set difference, both directions — the
 /// output is **deduplicated** (set-derived) regardless of duplicates in the inputs, so a caller
 /// never fetches or deletes the same UID twice (P6). Order is unspecified; callers sort as needed.
+/// A message's read/star flags, keyed by IMAP UID — the state we hold, or the state the server holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlagState {
+    pub uid: u32,
+    pub seen: bool,
+    pub flagged: bool,
+}
+
+/// Reconcile the flags we hold against the server's, for messages we **already have** (SYNC-5).
+///
+/// This is how "read on another device" reaches the desktop: the `\Seen` (and `\Flagged`) flags a
+/// message carries are the server's to change, and until now a sync only added and removed whole
+/// messages — never noticed a flag flip on one it already held. So a message read in webmail stayed
+/// bold here, and the unread badge never fell for it.
+///
+/// The server is authoritative here — but only for messages **without a pending local change**. The
+/// caller (`flags_in_folder`) excludes any message the user just touched here whose write-back to the
+/// server hasn't confirmed (`flags_dirty`), so this can never undo a local read/star the server doesn't
+/// know about yet. When the write-back confirms, the row stops being dirty and the next pull sees local
+/// and server already agree; when it never confirms, the row stays dirty and local intent wins — the
+/// pre-SYNC-5 behaviour, preserved. There is no per-flag modification sequence (no CONDSTORE), so among
+/// confirmed messages this is last-writer-wins with the server as the reconciler.
+///
+/// Returns only the messages whose stored flags differ from the server's — the ones that actually need
+/// a write. `server_seen` / `server_flagged` are the UID sets the server reports (from `UID SEARCH
+/// SEEN` / `UID SEARCH FLAGGED`); a UID we hold that is absent from a set is *not* in that state there.
+#[must_use]
+pub fn flag_plan(
+    local: &[FlagState],
+    server_seen: &HashSet<u32>,
+    server_flagged: &HashSet<u32>,
+) -> Vec<FlagState> {
+    local
+        .iter()
+        .filter_map(|f| {
+            let seen = server_seen.contains(&f.uid);
+            let flagged = server_flagged.contains(&f.uid);
+            (seen != f.seen || flagged != f.flagged).then_some(FlagState {
+                uid: f.uid,
+                seen,
+                flagged,
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn reconcile(local: &[u32], server: &[u32]) -> SyncPlan {
     let local_set: HashSet<u32> = local.iter().copied().collect();
     let server_set: HashSet<u32> = server.iter().copied().collect();
@@ -119,6 +165,122 @@ pub(crate) fn reconcile(local: &[u32], server: &[u32]) -> SyncPlan {
 #[cfg(test)]
 mod tests {
     use super::{news_for_backfill, owed, News};
+
+    #[test]
+    fn flag_changes_on_the_server_reach_the_messages_we_already_hold() {
+        use super::{flag_plan, FlagState};
+        use std::collections::HashSet;
+
+        let local = [
+            FlagState {
+                uid: 1,
+                seen: false,
+                flagged: false,
+            }, // unread here…
+            FlagState {
+                uid: 2,
+                seen: true,
+                flagged: false,
+            }, // read here…
+            FlagState {
+                uid: 3,
+                seen: true,
+                flagged: true,
+            }, // read + starred, unchanged
+            FlagState {
+                uid: 4,
+                seen: false,
+                flagged: false,
+            }, // untouched anywhere
+        ];
+        // The server says: 1 and 3 are read; 3 is flagged.
+        let server_seen: HashSet<u32> = [1, 3].into_iter().collect();
+        let server_flagged: HashSet<u32> = [3].into_iter().collect();
+
+        let mut plan = flag_plan(&local, &server_seen, &server_flagged);
+        plan.sort_by_key(|f| f.uid);
+
+        assert_eq!(
+            plan,
+            vec![
+                // read in webmail → now read here (this is what drops the unread badge)
+                FlagState {
+                    uid: 1,
+                    seen: true,
+                    flagged: false
+                },
+                // marked unread elsewhere → now unread here again
+                FlagState {
+                    uid: 2,
+                    seen: false,
+                    flagged: false
+                },
+            ],
+            "only the two that actually changed; 3 already matched and 4 was never touched"
+        );
+    }
+
+    #[test]
+    fn a_star_set_or_cleared_elsewhere_is_pulled_too() {
+        use super::{flag_plan, FlagState};
+        use std::collections::HashSet;
+        let local = [
+            FlagState {
+                uid: 1,
+                seen: true,
+                flagged: false,
+            }, // star it elsewhere
+            FlagState {
+                uid: 2,
+                seen: true,
+                flagged: true,
+            }, // unstar it elsewhere
+        ];
+        let seen: HashSet<u32> = [1, 2].into_iter().collect();
+        let flagged: HashSet<u32> = [1].into_iter().collect(); // server now stars 1, not 2
+        let mut plan = flag_plan(&local, &seen, &flagged);
+        plan.sort_by_key(|f| f.uid);
+        assert_eq!(
+            plan,
+            vec![
+                FlagState {
+                    uid: 1,
+                    seen: true,
+                    flagged: true
+                },
+                FlagState {
+                    uid: 2,
+                    seen: true,
+                    flagged: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn nothing_changed_means_no_writes() {
+        use super::{flag_plan, FlagState};
+        use std::collections::HashSet;
+        let local = [
+            FlagState {
+                uid: 1,
+                seen: true,
+                flagged: false,
+            },
+            FlagState {
+                uid: 2,
+                seen: false,
+                flagged: true,
+            },
+        ];
+        let seen: HashSet<u32> = [1].into_iter().collect();
+        let flagged: HashSet<u32> = [2].into_iter().collect();
+        assert!(
+            flag_plan(&local, &seen, &flagged).is_empty(),
+            "already in sync"
+        );
+        assert!(flag_plan(&[], &seen, &flagged).is_empty(), "nothing held");
+    }
 
     #[test]
     fn a_first_look_at_a_folder_is_not_news_but_a_message_above_the_newest_uid_we_held_is() {

@@ -340,7 +340,8 @@ pub async fn open_message(
     id: i64,
     mark_read: bool,
 ) -> Result<MessageBodyDto, String> {
-    with_store(state.inner().clone(), move |store| {
+    let st = state.inner().clone();
+    let (dto, loc) = with_store(st.clone(), move |store| {
         let header = store
             .header_by_id(id)
             .map_err(|_| "Couldn't open this message.".to_owned())?
@@ -349,14 +350,17 @@ pub async fn open_message(
             .body_for(id)
             .map_err(|_| "Couldn't read this message.".to_owned())?
             .unwrap_or_default();
-        // Opening a message marks it read (READ-7) — persisted here, not just in the UI's signal,
-        // or the unread dot reappears the moment the folder is re-listed from SQLite. (Server
-        // write-back of \Seen is S9.4; the *local* write belongs here and nowhere else.) A failure
-        // to record it must not stop the user reading their mail, so it is best-effort. When the
-        // "mark as read when opened" preference is off, the read is skipped entirely.
-        if mark_read {
+        // Opening a message marks it read (READ-7) — persisted here, not just in the UI's signal, or
+        // the unread dot reappears the moment the folder is re-listed from SQLite. A failure to record
+        // it must not stop the user reading their mail, so it is best-effort. When the "mark as read
+        // when opened" preference is off, the read is skipped entirely. `set_seen` marks the flag
+        // dirty, so the SYNC-5 pull won't revert it before the write-back below confirms.
+        let loc = if mark_read {
             let _ = store.set_seen(id, true);
-        }
+            store.message_location(id).ok().flatten()
+        } else {
+            None
+        };
         // The HTML body is NOT returned to the frontend. It is served straight to the sandboxed
         // iframe from the `mail://` origin (see `mailproto`), so hostile markup never enters the
         // app's own document — not even as a string in a signal.
@@ -379,18 +383,38 @@ pub async fn open_message(
                 size: human_size(a.size),
             })
             .collect();
-        Ok(MessageBodyDto {
-            id: header.id,
-            subject: display_subject(header.subject.as_deref()),
-            from: display_sender(header.from_name.as_deref(), header.from_addr.as_deref()),
-            date: header.date,
-            plain: body.plain,
-            is_html,
-            has_remote,
-            attachments,
-        })
+        Ok((
+            MessageBodyDto {
+                id: header.id,
+                subject: display_subject(header.subject.as_deref()),
+                from: display_sender(header.from_name.as_deref(), header.from_addr.as_deref()),
+                date: header.date,
+                plain: body.plain,
+                is_html,
+                has_remote,
+                attachments,
+            },
+            loc,
+        ))
     })
-    .await
+    .await?;
+
+    // Write the read back to the server (`\Seen`), so a message read here shows as read on the user's
+    // other devices too — and, once it confirms, clears the dirty marker so the SYNC-5 pull resumes
+    // reconciling it. Best-effort on a worker: reading mail must never wait on the network (P1).
+    if let Some((folder, uid)) = loc {
+        spawn_writeback(&st, id, move |db, secrets| {
+            geleit_engine::sync_actions::run_set_seen(
+                db,
+                secrets,
+                account_of(db, secrets, id)?,
+                &folder,
+                uid as u32,
+                true,
+            )
+        });
+    }
+    Ok(dto)
 }
 
 /// Fetch a message's sanitized HTML body for the `mail://` protocol handler. Blocking (SQLite), so
@@ -416,13 +440,20 @@ pub fn message_html(state: &AppState, id: i64, allow_remote: bool) -> Option<Str
 /// already updated optimistically; this reconciles the server and may outlive the command. A failure
 /// is swallowed here — the next refresh restores truth — but never lets it lose mail (the callers
 /// never expunge on the optimistic path).
-fn spawn_writeback<F>(state: &AppState, f: F)
+fn spawn_writeback<F>(state: &AppState, id: i64, f: F)
 where
     F: FnOnce(&str, &dyn SecretStore) -> Result<(), String> + Send + 'static,
 {
     let (db_path, secrets) = (state.db_path.clone(), state.secrets.clone());
     std::thread::spawn(move || {
-        let _ = f(&db_path, &*secrets);
+        // Only on success do we clear the pending-change marker (SYNC-5): the server now agrees, so the
+        // flag pull may reconcile this message again. A failed write-back leaves it dirty, so the pull
+        // never reverts the user's local change — local intent wins, as it did before SYNC-5.
+        if f(&db_path, &*secrets).is_ok() {
+            if let Ok(store) = open_store(&db_path, &*secrets) {
+                let _ = store.clear_flags_dirty(id);
+            }
+        }
     });
 }
 
@@ -440,7 +471,7 @@ pub async fn set_star(state: tauri::State<'_, AppState>, id: i64, on: bool) -> R
     })
     .await?;
     if let Some((folder, uid)) = loc {
-        spawn_writeback(&st, move |db, secrets| {
+        spawn_writeback(&st, id, move |db, secrets| {
             geleit_engine::sync_actions::run_set_flag(
                 db,
                 secrets,
@@ -481,7 +512,7 @@ async fn set_seen_and_writeback(
     })
     .await?;
     if let Some((folder, uid)) = loc {
-        spawn_writeback(&st, move |db, secrets| {
+        spawn_writeback(&st, id, move |db, secrets| {
             geleit_engine::sync_actions::run_set_seen(
                 db,
                 secrets,
