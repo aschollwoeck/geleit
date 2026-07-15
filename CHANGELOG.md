@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Sending
+- **Sending works offline.** Write a message with no connection and hit Send: instead of failing, it's
+  kept in an outbox and goes out the next time GeleitMail reaches your provider. A quiet line under
+  Compose shows how many are waiting. If your provider *rejects* a message (a bad address, say), that's
+  shown instead of retried forever.
+
 ### Mail tells you it's here
 - **Marking mail read or starred works offline.** A read or star you make with no connection is now
   remembered and sent to your provider the next time GeleitMail syncs, rather than being lost if the

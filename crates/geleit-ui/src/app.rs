@@ -269,6 +269,7 @@ pub fn App() -> impl IntoView {
     let sync_drafts = RwSignal::new(false); // opt-in: mirror drafts to the server (default OFF, P2)
     let mark_read = RwSignal::new(true);
     let notify = RwSignal::new(true); // a mail client that never tells you about mail is a strange one
+    let outbox = RwSignal::new((0i64, 0i64)); // (queued, failed) — the outbox indicator (SEND-10)
     let quiet_on = RwSignal::new(false); // quiet hours: silent, but the mail is still owed a mention
     let quiet_bad = RwSignal::new(false); // a window the host would throw away — tell them, don't store it
     let quiet_from = RwSignal::new("22:00".to_owned());
@@ -338,6 +339,16 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // Refresh the outbox indicator from the store (SEND-10). Cheap; call it after a send and whenever a
+    // sweep may have drained it.
+    let refresh_outbox = move || {
+        leptos::task::spawn_local(async move {
+            if let Ok(counts) = api::outbox_status().await {
+                outbox.set(counts);
+            }
+        });
+    };
+
     // The background scheduler found new mail (NOTIF-1). Slip it into the list quietly — no toast, no
     // jump: it just appears, with its unread dot, the way mail should. The re-list goes through the
     // `request` epoch like every other one, so it can never clobber a search the user is mid-way
@@ -351,6 +362,7 @@ pub fn App() -> impl IntoView {
             return; // the drafts pane isn't a mail list
         }
         // (No bump here: the scheduler set the badge host-side before emitting this event.)
+        refresh_outbox(); // a sweep may have sent queued mail or hit a rejection
         let epoch = request.get_untracked() + 1;
         request.set(epoch);
         let is_unified = unified.get_untracked();
@@ -435,6 +447,7 @@ pub fn App() -> impl IntoView {
                         load_folders(aid, folders, selected_folder, messages, error, request).await;
                         loaded.set(true);
                         bump_badge(); // the title is right from the first frame, not 30s later
+                        refresh_outbox();
                     }
                     None => {
                         accounts.set(list);
@@ -1181,7 +1194,7 @@ pub fn App() -> impl IntoView {
             )
             .await
             {
-                Ok(()) => {
+                Ok(queued) => {
                     compose.set(None);
                     reset_recipient_inputs();
                     // The sent draft (if any) is gone server-side; drop its row from the open list.
@@ -1190,20 +1203,21 @@ pub fn App() -> impl IntoView {
                         // draft id and a message id can be the same number).
                         drafts.update(|l| l.retain(|d| d.on_server || d.id != id));
                     }
-                    // A draft of the provider's that we just sent is no longer a draft — take it off
-                    // the server, or it stays in Drafts forever, half-written and already sent.
+                    // A draft of the provider's that we just sent is no longer a draft. The engine
+                    // expunges the provider copy itself — on immediate send, and (via the outbox, which
+                    // now carries the draft reference) when a queued send finally goes out. The UI just
+                    // drops the row from the open Drafts list.
                     if let Some(mid) = replaced {
                         drafts.update(|l| l.retain(|d| !(d.on_server && d.id == mid)));
-                        if api::delete_forever(mid).await.is_err() {
-                            error.set(Some(
-                                "Sent — but the draft is still in your provider's Drafts folder. \
-                                 Delete it there, or from Drafts here."
-                                    .to_owned(),
-                            ));
-                        }
                     }
                     commit_pending(); // resolve any queued move before this confirmation toast
-                    toast.set(Some("Sent".into()));
+                                      // Offline: the message is safe in the outbox and goes out on the next sync.
+                    toast.set(Some(if queued {
+                        "Queued — will send when you're back online".into()
+                    } else {
+                        "Sent".into()
+                    }));
+                    refresh_outbox();
                 }
                 Err(e) => error.set(Some(e)),
             }
@@ -1980,6 +1994,22 @@ pub fn App() -> impl IntoView {
                         </Show>
                     </div>
                     <button class="compose-btn" on:click=move |_| compose_new()>{icon(icons::PLUS)} "Compose"</button>
+                    // Outbox indicator (SEND-10): only shown when something is waiting or was rejected,
+                    // so a quiet outbox is invisible. Failed sends read as a warning, not a count.
+                    <Show when=move || { outbox.get().0 > 0 || outbox.get().1 > 0 }>
+                        <div class="outbox-note" class:warn=move || { outbox.get().1 > 0 }>
+                            {move || {
+                                let (queued, failed) = outbox.get();
+                                if failed > 0 {
+                                    format!("{failed} couldn't send{}", if queued > 0 { format!(", {queued} waiting") } else { String::new() })
+                                } else if queued == 1 {
+                                    "1 message waiting to send".to_owned()
+                                } else {
+                                    format!("{queued} messages waiting to send")
+                                }
+                            }}
+                        </div>
+                    </Show>
                     // In the merged view, folders are per-account and don't apply — show a single
                     // "All inboxes" marker instead of a folder list.
                     <Show

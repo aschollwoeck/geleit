@@ -494,7 +494,7 @@ pub async fn send_message(
     attachments: Vec<String>,
     markdown: bool,
     draft_id: Option<i64>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     call(
         "send_message",
         &SendArgs {
@@ -511,6 +511,12 @@ pub async fn send_message(
         },
     )
     .await
+}
+
+/// The outbox indicator (SEND-10): how many messages are waiting to send, and how many the server
+/// rejected. `(queued, failed)`.
+pub async fn outbox_status() -> Result<(i64, i64), String> {
+    call("outbox_status", &NoArgs {}).await
 }
 
 /// Save (or update) a local draft (with its attachment file paths); returns its id so the composer

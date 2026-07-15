@@ -236,6 +236,32 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE message ADD COLUMN flags_dirty INTEGER NOT NULL DEFAULT 0;
     ",
+    // 19 — the outbox (SEND-10): messages composed but not yet delivered, so a send survives being
+    // offline. A send that can't reach the SMTP server (the usual offline case) is queued here as the
+    // **already-built RFC 5322 bytes** plus the envelope needed to hand them to a server later, and the
+    // scheduler retries it every sweep until it goes out. `failed` marks one the server *rejected* (a
+    // permanent 5xx — a bad address, say): retrying that never helps, so it stops and is surfaced to
+    // the user instead of looping or vanishing. `subject` is kept only to show the user what's waiting.
+    "
+    CREATE TABLE outbox (
+        id           INTEGER PRIMARY KEY,
+        account_id   INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+        mail_from    TEXT NOT NULL,
+        recipients   TEXT NOT NULL,
+        subject      TEXT NOT NULL DEFAULT '',
+        raw          BLOB NOT NULL,
+        failed       INTEGER NOT NULL DEFAULT 0,
+        last_error   TEXT,
+        -- If this message was a resumed copy of a draft on the provider (opt-in 'sync drafts'), the
+        -- folder + stable Message-ID of that copy, so it can be expunged once the message actually
+        -- goes out. Otherwise NULL. Without this, a draft sent via the outbox stays in the provider's
+        -- Drafts folder and reappears as a draft.
+        draft_folder TEXT,
+        draft_msgid  TEXT,
+        created_at   INTEGER NOT NULL
+    );
+    CREATE INDEX outbox_account ON outbox(account_id);
+    ",
 ];
 
 /// A parsed search query (SEARCH-1/4): an FTS5 `MATCH` string (`None` when there are no full-text
@@ -474,6 +500,19 @@ pub struct NewMessage {
     /// pop up a notification for a file the user opened by hand. Only ever written on insert: a re-sync
     /// of a message must not re-announce it.
     pub owed_notification: bool,
+}
+
+/// A message waiting in the outbox to be delivered (SEND-10): the built RFC 5322 bytes plus the
+/// envelope needed to hand them to an SMTP server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxMessage {
+    pub id: i64,
+    pub mail_from: String,
+    pub recipients: Vec<String>,
+    pub subject: String,
+    pub raw: Vec<u8>,
+    /// The provider's Drafts copy to expunge once this goes out (opt-in 'sync drafts'), or `None`.
+    pub server_draft: Option<(String, String)>,
 }
 
 /// A read/star change this account owes the server (SYNC-5) — a row in the durable write-back queue.
@@ -1944,6 +1983,106 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?)
+    }
+
+    /// Queue a composed message for delivery (SEND-10 outbox) — the built RFC 5322 bytes plus the
+    /// envelope, so it can be handed to an SMTP server later. Returns the new outbox id.
+    ///
+    /// # Errors
+    /// The insert failing (a corrupt or unreadable database).
+    #[allow(clippy::too_many_arguments)]
+    pub fn enqueue_outbox(
+        &self,
+        account_id: i64,
+        mail_from: &str,
+        recipients: &[String],
+        subject: &str,
+        raw: &[u8],
+        server_draft: Option<(&str, &str)>,
+        created_at: i64,
+    ) -> Result<i64, StoreError> {
+        let (draft_folder, draft_msgid) = server_draft.unzip();
+        self.conn.execute(
+            "INSERT INTO outbox \
+             (account_id, mail_from, recipients, subject, raw, draft_folder, draft_msgid, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (
+                account_id,
+                mail_from,
+                recipients.join(","),
+                subject,
+                raw,
+                draft_folder,
+                draft_msgid,
+                created_at,
+            ),
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// The account's outbox messages **still worth retrying** (`failed = 0`), oldest first — the
+    /// scheduler drains these. A `failed` one (the server rejected it) is left for the user to see.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn pending_outbox(&self, account_id: i64) -> Result<Vec<OutboxMessage>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, mail_from, recipients, subject, raw, draft_folder, draft_msgid FROM outbox \
+             WHERE account_id = ?1 AND failed = 0 ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([account_id], |r| {
+            let recipients: String = r.get(2)?;
+            let folder: Option<String> = r.get(5)?;
+            let msgid: Option<String> = r.get(6)?;
+            let draft = folder.zip(msgid);
+            Ok(OutboxMessage {
+                id: r.get(0)?,
+                mail_from: r.get(1)?,
+                recipients: recipients.split(',').map(str::to_owned).collect(),
+                subject: r.get(3)?,
+                raw: r.get(4)?,
+                server_draft: draft,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Remove a delivered message from the outbox (SEND-10). Idempotent.
+    ///
+    /// # Errors
+    /// The delete failing (a corrupt or unreadable database).
+    pub fn delete_outbox(&self, id: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM outbox WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Mark an outbox message as permanently failed (the server rejected it) so it stops being retried
+    /// and can be surfaced to the user (SEND-10).
+    ///
+    /// # Errors
+    /// The update failing (a corrupt or unreadable database).
+    pub fn mark_outbox_failed(&self, id: i64, error: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE outbox SET failed = 1, last_error = ?2 WHERE id = ?1",
+            (id, error),
+        )?;
+        Ok(())
+    }
+
+    /// How many messages are waiting to send and how many have failed, across **all** accounts — for
+    /// the UI's outbox indicator. `(queued, failed)`.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn outbox_counts(&self) -> Result<(i64, i64), StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END), 0), \
+                    COALESCE(SUM(CASE WHEN failed = 1 THEN 1 ELSE 0 END), 0) \
+             FROM outbox",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
     }
 
     /// Remove a single message locally (optimistic archive/trash/move; body + attachments cascade).
@@ -3818,6 +3957,87 @@ mod tests {
         let left = s.pending_flag_writebacks(acc).unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].id, m_star);
+    }
+
+    #[test]
+    fn the_outbox_queues_retries_and_surfaces_a_rejected_send() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let other = s.add_account("b@example.com", None).unwrap();
+        assert_eq!(s.outbox_counts().unwrap(), (0, 0), "empty to start");
+
+        let a = s
+            .enqueue_outbox(
+                acc,
+                "a@example.com",
+                &["x@y.io".to_owned(), "z@y.io".to_owned()],
+                "Hi",
+                b"raw-a",
+                Some(("Drafts", "<d1@geleit.local>")), // a resumed provider draft
+                100,
+            )
+            .unwrap();
+        let b = s
+            .enqueue_outbox(
+                acc,
+                "a@example.com",
+                &["w@y.io".to_owned()],
+                "Later",
+                b"raw-b",
+                None,
+                200,
+            )
+            .unwrap();
+        s.enqueue_outbox(
+            other,
+            "b@example.com",
+            &["q@y.io".to_owned()],
+            "Other",
+            b"raw-c",
+            None,
+            150,
+        )
+        .unwrap();
+
+        // The scheduler drains a specific account, oldest first, with everything it needs to send.
+        let pending = s.pending_outbox(acc).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].id, a, "oldest first");
+        assert_eq!(pending[0].recipients, vec!["x@y.io", "z@y.io"]);
+        assert_eq!(pending[0].mail_from, "a@example.com");
+        assert_eq!(pending[0].raw, b"raw-a");
+        assert_eq!(
+            pending[0].server_draft,
+            Some(("Drafts".to_owned(), "<d1@geleit.local>".to_owned())),
+            "the provider draft copy to clean up on delivery is carried"
+        );
+        assert_eq!(pending[1].id, b);
+        assert_eq!(
+            pending[1].server_draft, None,
+            "an ordinary send carries none"
+        );
+
+        // A delivered message leaves the outbox; a rejected one is marked failed — no longer retried,
+        // but not lost: it still counts, so the UI can surface it.
+        s.delete_outbox(a).unwrap();
+        s.mark_outbox_failed(b, "550 no such recipient").unwrap();
+        assert!(
+            s.pending_outbox(acc).unwrap().is_empty(),
+            "a is gone, b is failed → nothing to retry"
+        );
+        assert_eq!(
+            s.outbox_counts().unwrap(),
+            (1, 1),
+            "one queued (other account) + one failed"
+        );
+
+        // Removing the account takes its outbox with it (FK cascade).
+        s.delete_account(other).unwrap();
+        assert_eq!(
+            s.outbox_counts().unwrap(),
+            (0, 1),
+            "only b (failed) remains"
+        );
     }
 
     #[test]

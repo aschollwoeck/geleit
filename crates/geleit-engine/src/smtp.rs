@@ -71,19 +71,55 @@ pub fn envelope(from: &str, to: &[String]) -> Result<Envelope, String> {
 
 /// Send pre-built RFC 5322 message bytes to the SMTP server. Returns a calm, PII-free error if the
 /// server is unreachable or rejects the message.
+/// Why a send didn't go out — and, crucially, whether trying again could help (SEND-10).
+///
+/// `permanent` means the server *answered* and **rejected** the message (a 5xx: a bad address, a
+/// policy block); retrying is pointless, so the outbox must not queue it — the user has to fix or drop
+/// it. Everything else — couldn't connect, TLS failed, a transient 4xx — is retryable, which is the
+/// ordinary "you're offline" case the outbox exists for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendError {
+    pub message: String,
+    pub permanent: bool,
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Send one message. On failure the error says whether retrying could help — see [`SendError`].
+///
+/// # Errors
+/// [`SendError`] describing what went wrong and whether it's worth retrying.
 pub async fn send(
     settings: &SmtpSettings,
     password: &str,
     envelope: &Envelope,
     message: &[u8],
-) -> Result<(), String> {
-    let transport = build_transport(settings, password)?;
+) -> Result<(), SendError> {
+    let transport = build_transport(settings, password).map_err(|message| SendError {
+        message,
+        // A config/build problem is on us, not a rejection — treat it as retryable rather than
+        // discarding the user's mail. (In practice this only fires on a malformed setting.)
+        permanent: false,
+    })?;
     transport
         .send_raw(envelope, message)
         .await
         .map(|_| ())
-        .map_err(|_| {
-            "Couldn't send the message — the server was unreachable or rejected it.".to_owned()
+        .map_err(|e| {
+            // `lettre` tells us a 5xx (`is_permanent`) apart from a can't-reach/transient failure.
+            let permanent = e.is_permanent();
+            SendError {
+                message: if permanent {
+                    "The server rejected the message.".to_owned()
+                } else {
+                    "Couldn't reach the outgoing mail server.".to_owned()
+                },
+                permanent,
+            }
         })
 }
 

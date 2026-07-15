@@ -120,6 +120,11 @@ async fn sweep(
         // offline reaches the server here, and going out first means the sync's flag pull sees a
         // server that already agrees rather than a stale one.
         crate::ipc::flush_flags(&state, *account_id).await;
+        // Send anything waiting in the outbox (SEND-10): mail composed while offline goes out now that
+        // we've reached the server. A message that goes out lands in Sent, so the list is stale too.
+        if crate::ipc::flush_outbox(&state, *account_id).await > 0 {
+            changed += 1;
+        }
         match crate::ipc::sync_folder_once(&state, *account_id, "INBOX").await {
             Ok(outcome) => {
                 account_failures.remove(account_id); // recovered
