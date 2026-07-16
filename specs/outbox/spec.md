@@ -30,6 +30,11 @@ only in the closed compose window.
 A quiet line under **Compose**, only when something is waiting: *"2 messages waiting to send"*, or
 *"1 couldn't send"* as a warning when the server rejected one. A quiet outbox is invisible.
 
+Clicking it opens the **Outbox** in the middle pane: each message shows its recipient, subject and
+status. A failed one shows *why* it was rejected and offers **Retry** (re-queue and try again now) and
+**Discard**; a waiting one offers **Discard** (cancel it before it goes). So a message that couldn't be
+sent is never a dead end.
+
 ## Concurrency and clean-up
 
 Only one drain of an account runs at a time (a scheduler sweep and a Refresh can't both send the same
@@ -47,8 +52,8 @@ deleted" — milliseconds, a local write.
 
 ## Out of scope (named)
 
-Editing or retrying a *failed* outbox message from the UI (v1 surfaces the count; acting on it is a
-follow-up). Queuing moves/deletes — those are server-first, so a failed one doesn't diverge. A true
+**Editing** a failed message to fix a bad address (retry and discard exist; editing the content does
+not — the workaround is discard + recompose). Queuing moves/deletes — those are server-first, so a failed one doesn't diverge. A true
 scheduled-send / "send later". Per-message delivery receipts. A few genuinely-permanent *client-side*
 failures (no compatible auth mechanism, STARTTLS unsupported, a rejected TLS certificate) are classed
 retryable by the SMTP library, so they queue and retry rather than surfacing — a misconfiguration that

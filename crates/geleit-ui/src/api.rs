@@ -63,6 +63,15 @@ pub struct ResumedDraft {
 
 /// A row in the Drafts list (mirrors `geleit-app::dto::DraftSummary`).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct OutboxItem {
+    pub id: i64,
+    pub to: String,
+    pub subject: String,
+    pub failed: bool,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct DraftSummary {
     pub id: i64,
     pub to: String,
@@ -517,6 +526,21 @@ pub async fn send_message(
 /// rejected. `(queued, failed)`.
 pub async fn outbox_status() -> Result<(i64, i64), String> {
     call("outbox_status", &NoArgs {}).await
+}
+
+/// Every message in the outbox, for the outbox view (SEND-10).
+pub async fn list_outbox() -> Result<Vec<OutboxItem>, String> {
+    call("list_outbox", &NoArgs {}).await
+}
+
+/// Re-queue a failed outbox message and try it now.
+pub async fn retry_outbox(id: i64) -> Result<(), String> {
+    call("retry_outbox", &IdArgs { id }).await
+}
+
+/// Throw away an outbox message (waiting or failed).
+pub async fn discard_outbox(id: i64) -> Result<(), String> {
+    call("discard_outbox", &IdArgs { id }).await
 }
 
 /// Save (or update) a local draft (with its attachment file paths); returns its id so the composer
