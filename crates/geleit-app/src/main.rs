@@ -15,6 +15,7 @@
 //! Runs alongside the Slint `geleit-app` until S9.7's teardown, so the shipped app keeps working
 //! throughout the migration.
 mod dto;
+mod idle;
 mod ipc;
 mod mailproto;
 mod notify;
@@ -261,6 +262,7 @@ fn main() {
             // Mail arrives on its own from here — the host polls, so it keeps working while the UI
             // sits idle (a webview throttles timers in a hidden window).
             scheduler::spawn(app.handle().clone());
+            idle::spawn(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### New mail, instantly
+- **New mail now arrives within seconds** on providers that support it (IMAP IDLE), instead of waiting
+  for the periodic check. GeleitMail keeps a live connection open and the server tells it the moment
+  mail lands; providers without it fall back to checking every few minutes, as before.
+
+
 ### Sending
 - **Sending works offline.** Write a message with no connection and hit Send: instead of failing, it's
   kept in an outbox and goes out the next time GeleitMail reaches your provider. A quiet line under

@@ -30,6 +30,9 @@ exclude_globs = [
     "**/geleit-app/src/ipc.rs",
     # main.rs: window/protocol/handler wiring — no logic to mutate.
     "**/geleit-app/src/main.rs",
+    # idle.rs: the IMAP IDLE watcher — a long-lived tokio task per account needing a live server; its
+    # only decision (reconnect backoff) is trivial and its effect (wake the scheduler) is glue.
+    "**/geleit-app/src/idle.rs",
     # scheduler.rs: the background-sync loop — a tokio task needing a live AppHandle, an IMAP server
     # and a clock; nothing here can run under mutants. Its DECISIONS (backoff, sweep verdict, the
     # per-account retry cadence) are split into `schedule.rs`, which STAYS mutation-tested.
