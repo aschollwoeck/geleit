@@ -193,8 +193,10 @@ tray icon is not.
 - **Closing hides, it doesn't quit.** The window's `CloseRequested` is intercepted (`api.prevent_close`)
   and the window is hidden. The scheduler and IDLE watchers keep running, so mail still lands and the
   count still updates. **Quit** (the tray menu) is the only real exit.
-- **The icon reveals the window.** A left-click — or the **Show GeleitMail** menu item — shows,
-  un-minimises, and focuses it.
+- **The icon reveals the window.** The **Show GeleitMail** menu item shows, un-minimises, and focuses
+  it. On Linux the app-indicator opens its menu on any click and emits no click events of its own, so
+  the menu is the way back there; a direct left-click-to-restore is wired for macOS/Windows, where it
+  works, and is inert on Linux.
 - **The tooltip mirrors the badge.** `ipc::set_badge` is already the one chokepoint that writes the
   unread count to the window title; it now also writes it to the tray tooltip (`tray_by_id`), so the two
   can't disagree. Hovering the icon reads *"GeleitMail — 3 unread"* even while the window is hidden.

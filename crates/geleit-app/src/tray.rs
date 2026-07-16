@@ -1,9 +1,12 @@
 //! System tray icon (NOTIF-4) — a persistent presence so GeleitMail keeps running, and checking mail,
 //! after you close the window.
 //!
-//! Left-clicking the icon (or the **Show** menu item) brings the window back; **Quit** is the only
-//! thing that actually exits. The icon's tooltip mirrors the unread count, updated from the same one
-//! chokepoint that sets the window title ([`crate::ipc::set_badge`]), so the two never disagree.
+//! Bringing the window back is a **menu** action — **Show GeleitMail**. On Linux (the only platform we
+//! ship today) the app-indicator opens its menu on *any* click and delivers no click events of its own,
+//! so a direct left-click-to-restore isn't available there; the left-click handler below is the
+//! macOS/Windows path, inert on Linux. **Quit** is the only thing that actually exits. The icon's
+//! tooltip mirrors the unread count, updated from the same one chokepoint that sets the window title
+//! ([`crate::ipc::set_badge`]), so the two never disagree.
 //!
 //! **Close-to-tray is conditional.** Making the window's close button *hide* rather than quit is only
 //! safe when the desktop actually shows a tray icon — otherwise a hidden window has nothing to bring it
@@ -30,7 +33,10 @@ pub(crate) fn setup(app: &tauri::AppHandle) {
         return;
     }
     // The icon exists — but only hide-on-close if something will paint it, or the window would vanish
-    // with no way back.
+    // with no way back. Checked once, at startup: if the host later goes away (a panel restart, the
+    // user disabling their tray extension) close-to-tray stays latched, and a close would then hide the
+    // window with no icon to restore it. A known, narrow limitation — re-probing on every close is not
+    // worth a bus round-trip, and re-launching the app brings the window back.
     if geleit_platform::tray::host_present() {
         enable_close_to_tray(app);
     }
@@ -46,14 +52,17 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("GeleitMail")
         .menu(&menu)
-        // Left-click reopens the window (handled below); the menu is the right-click affordance, so it
-        // must not also pop on left-click or the reopen click would open the menu instead.
+        // macOS/Windows: left-click reopens the window (handled below), so the menu is the right-click
+        // affordance. Linux ignores this (unsupported) and always opens the menu on click — which is
+        // fine, because that menu carries **Show GeleitMail**, the Linux way back.
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main(app),
             "quit" => app.exit(0),
             _ => {}
         })
+        // macOS/Windows only: Linux's app-indicator backend emits no click events, so this never fires
+        // there — the menu's **Show** is the Linux path. Kept for the other platforms.
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,

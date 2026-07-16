@@ -9,6 +9,10 @@
 /// will actually show a tray icon (KDE, XFCE, MATE, Cinnamon, GNOME + AppIndicator extension). `false`
 /// on a bare session bus (vanilla GNOME) or when there's no session bus at all. Conservative: any
 /// error answers `false`, so an uncertain environment keeps the safe close-quits behaviour.
+///
+/// A single synchronous `NameHasOwner` round-trip, called once at startup. It's un-timed, so in theory
+/// a present-but-hung session bus could stall the caller — but `NameHasOwner` is a sub-millisecond
+/// bus-daemon local lookup (no third party in the loop), so in practice it returns instantly.
 #[must_use]
 pub fn host_present() -> bool {
     let Ok(conn) = zbus::blocking::Connection::session() else {
