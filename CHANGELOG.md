@@ -14,6 +14,11 @@
   Compose shows how many are waiting — click it to open the **Outbox**, where you can **Retry** or
   **Discard** a message. If your provider *rejects* one (a bad address, say), it's shown with the reason
   rather than retried forever.
+- **Fix a rejected message and resend it.** A send your provider turned down now has an **Edit** button
+  in the Outbox: it reopens the message in Compose — recipients, subject, body, and attachments all
+  intact — so you can correct the address (or whatever it was) and send again, instead of discarding and
+  retyping. The original stays in the Outbox until the edited version goes out, so nothing is lost if you
+  change your mind.
 
 ### Mail tells you it's here
 - **Marking mail read or starred works offline.** A read or star you make with no connection is now

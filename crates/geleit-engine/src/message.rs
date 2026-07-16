@@ -398,6 +398,59 @@ pub fn parse_eml(raw: &[u8]) -> ImportedEml {
     }
 }
 
+/// The compose form recovered from a queued message's raw bytes, so a rejected send can be *edited*
+/// (fix a bad address, a typo) rather than discarded and retyped. Mirrors the `ComposeDraft` shape
+/// the frontend fills in: recipients split back into To/Cc, the subject, the plaintext body, and each
+/// attachment's name + bytes (materialised to temp files by the caller, as draft resume does).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OutboxEdit {
+    pub to: String,
+    pub cc: String,
+    pub subject: String,
+    pub body: String,
+    /// Each attachment as `(filename, bytes)`, in the order the message lists them.
+    pub attachments: Vec<(Option<String>, Vec<u8>)>,
+}
+
+/// Reconstruct the compose form from a queued message's raw RFC 5322 bytes (SEND-10 edit). We built
+/// these bytes ourselves at enqueue time, so parsing is a faithful inverse: To/Cc are the bare
+/// recipient addresses (as the composer's fields hold them), the body is the `text/plain` part, and
+/// each attachment its name + bytes. Parses the message **once**. Two deliberate lossy points, both
+/// matching how resuming a draft behaves: recipient display names are dropped (the compose field and
+/// the send path speak bare addresses), and a formatted (Markdown/HTML) message comes back as its
+/// plaintext. Threading headers (In-Reply-To/References) are dropped too — an edited-and-resent
+/// message starts a fresh send; it isn't a reply to itself.
+pub fn parse_outbox_for_edit(raw: &[u8]) -> OutboxEdit {
+    use mail_parser::MimeHeaders; // brings `attachment_name` into scope
+    let Some(msg) = mail_parser::MessageParser::default().parse(raw) else {
+        return OutboxEdit::default();
+    };
+    let join_addrs = |field: Option<&mail_parser::Address>| {
+        field.map_or_else(String::new, |a| {
+            a.iter()
+                .filter_map(|x| x.address())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+    };
+    let attachments = msg
+        .attachments()
+        .map(|part| {
+            (
+                part.attachment_name().map(str::to_owned),
+                part.contents().to_vec(),
+            )
+        })
+        .collect();
+    OutboxEdit {
+        to: join_addrs(msg.to()),
+        cc: join_addrs(msg.cc()),
+        subject: msg.subject().unwrap_or_default().to_owned(),
+        body: msg.body_text(0).map(|c| c.into_owned()).unwrap_or_default(),
+        attachments,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +587,42 @@ mod tests {
         d.to.clear();
         d.cc.clear();
         assert!(build(&d).is_err());
+    }
+
+    #[test]
+    fn parse_outbox_for_edit_inverts_build() {
+        // A queued message's raw bytes must round-trip back into the compose form the user typed,
+        // so "Edit" on a rejected send reopens it faithfully — recipients split To/Cc, body intact,
+        // attachment name + bytes recovered.
+        let mut d = sample();
+        d.to = vec!["bob@test.local".into(), "dave@test.local".into()];
+        d.cc = vec!["carol@test.local".into()];
+        d.body_text = "Fix the address and resend.".into();
+        d.attachments = vec![Attachment {
+            filename: "notes.txt".into(),
+            content_type: "text/plain".into(),
+            data: b"the notes".to_vec(),
+        }];
+        let raw = build(&d).unwrap();
+
+        let edit = parse_outbox_for_edit(&raw);
+        assert_eq!(edit.to, "bob@test.local, dave@test.local");
+        assert_eq!(edit.cc, "carol@test.local");
+        assert_eq!(edit.subject, "Hi");
+        assert_eq!(edit.body, "Fix the address and resend.");
+        assert_eq!(
+            edit.attachments,
+            vec![(Some("notes.txt".to_owned()), b"the notes".to_vec())]
+        );
+    }
+
+    #[test]
+    fn parse_outbox_for_edit_survives_garbage() {
+        // Never panic on bytes that don't parse — return an empty form.
+        assert_eq!(
+            parse_outbox_for_edit(b"\xff not a message"),
+            OutboxEdit::default()
+        );
     }
 
     #[test]

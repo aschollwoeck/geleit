@@ -984,6 +984,7 @@ pub async fn send_message(
     attachments: Vec<String>,
     markdown: bool,
     draft_id: Option<i64>,
+    outbox_edit_id: Option<i64>,
 ) -> Result<bool, String> {
     // Append the account's signature (SEND-7). Read it up front on the store thread.
     let signature = with_store(state.inner().clone(), move |store| {
@@ -1015,6 +1016,7 @@ pub async fn send_message(
             attachments,
             markdown,
             draft_id, // if this was a resumed draft, run_send deletes it after a successful send
+            outbox_edit_id, // …and if it was an edit of a rejected send, drops that outbox row too
         )
     })
     .await
@@ -1076,6 +1078,48 @@ pub async fn discard_outbox(state: tauri::State<'_, AppState>, id: i64) -> Resul
         store
             .delete_outbox(id)
             .map_err(|_| "Couldn't discard that message.".to_owned())
+    })
+    .await
+}
+
+/// Reopen a queued message in the composer to edit it (SEND-10) — e.g. fix the address a send was
+/// rejected for, instead of discarding and retyping. Parses the stored raw bytes back into a compose
+/// form and materialises its attachments to temp files, exactly like resuming a draft. `None` if the
+/// row is gone (already sent or discarded).
+///
+/// The outbox row is **left in place** — it's removed only when the edited message is sent (the
+/// frontend passes its id back to `discard_outbox` on send). So cancelling the compose loses nothing:
+/// the original stays in the outbox to retry or discard. Only offered on **failed** rows, which the
+/// scheduler never retries, so there's no risk of the original going out while it's being edited.
+#[tauri::command]
+pub async fn edit_outbox(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<Option<ResumedDraft>, String> {
+    with_store(state.inner().clone(), move |store| {
+        let Some(raw) = store
+            .outbox_raw(id)
+            .map_err(|_| "Couldn't open that message.".to_owned())?
+        else {
+            return Ok(None);
+        };
+        let edit = geleit_engine::message::parse_outbox_for_edit(&raw);
+        let base = std::env::temp_dir().join(format!("geleit-outbox-{id}"));
+        let attachments = materialize_attachments(
+            &base,
+            edit.attachments.iter().map(|(f, d)| (f.as_deref(), &d[..])),
+        );
+        Ok(Some(ResumedDraft {
+            draft: ComposeDraft {
+                to: edit.to,
+                cc: edit.cc,
+                subject: edit.subject,
+                body: edit.body,
+                in_reply_to: None,
+                references: Vec::new(),
+            },
+            attachments,
+        }))
     })
     .await
 }
@@ -1522,11 +1566,23 @@ fn materialize_draft_attachments(
     atts: &[geleit_store::DraftAttachment],
 ) -> Vec<String> {
     let base = std::env::temp_dir().join(format!("geleit-draft-{draft_id}"));
+    materialize_attachments(
+        &base,
+        atts.iter().map(|a| (a.filename.as_deref(), &a.data[..])),
+    )
+}
+
+/// Write attachment bytes to a per-message temp dir, one numbered sub-dir per file so same-named
+/// files stay distinct while the **basename stays clean** (what the composer chip shows). The name is
+/// sanitised so a hostile stored filename can't escape the temp dir. Best-effort — a file that can't
+/// be written is skipped rather than failing the whole reopen. Returns the paths written.
+fn materialize_attachments<'a>(
+    base: &std::path::Path,
+    atts: impl Iterator<Item = (Option<&'a str>, &'a [u8])>,
+) -> Vec<String> {
     let mut paths = Vec::new();
-    for (i, a) in atts.iter().enumerate() {
-        let name = a
-            .filename
-            .as_deref()
+    for (i, (filename, data)) in atts.enumerate() {
+        let name = filename
             .map(safe_attachment_filename)
             .unwrap_or_else(|| format!("attachment-{}", i + 1));
         let dir = base.join(i.to_string());
@@ -1534,7 +1590,7 @@ fn materialize_draft_attachments(
             continue;
         }
         let path = dir.join(&name);
-        if std::fs::write(&path, &a.data).is_ok() {
+        if std::fs::write(&path, data).is_ok() {
             paths.push(path.to_string_lossy().into_owned());
         }
     }

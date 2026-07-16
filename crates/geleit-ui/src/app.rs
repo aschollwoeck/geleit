@@ -231,6 +231,9 @@ pub fn App() -> impl IntoView {
                                                                // server: the draft you edited is the draft you now have, and leaving the original there would put
                                                                // it straight back in the list as a second row.
     let resumed_server = RwSignal::new(Option::<i64>::None);
+    // A rejected outbox message reopened for editing (its outbox id). The row stays in the outbox
+    // while it's edited — cancelling loses nothing — and is discarded only once the edit is sent.
+    let editing_outbox = RwSignal::new(Option::<i64>::None);
     let formatted_ask = RwSignal::new(Option::<i64>::None); // "continuing this drops its formatting"
                                                             // Deleting a draft that's on the provider is irreversible and it may be the ONLY copy — so it asks,
                                                             // like every other permanent action here. A local draft is still a one-click delete (it's ours,
@@ -1167,6 +1170,7 @@ pub fn App() -> impl IntoView {
         md_on.set(false); // each new draft starts as plain text
         current_draft_id.set(None); // a fresh compose isn't tied to a saved draft yet
         resumed_server.set(None); // …nor to one of the provider's
+        editing_outbox.set(None); // …nor to a queued message being edited
     };
     // Open the native file picker and add the chosen files to the draft.
     let attach_files = move || {
@@ -1226,6 +1230,7 @@ pub fn App() -> impl IntoView {
         let markdown = md_on.get_untracked();
         let draft_id = current_draft_id.get_untracked(); // if resumed, run_send deletes it after send
         let replaced = resumed_server.get_untracked(); // a draft of the provider's, now sent
+        let edited = editing_outbox.get_untracked(); // a rejected queued message being resent
         leptos::task::spawn_local(async move {
             match api::send_message(
                 aid,
@@ -1238,6 +1243,7 @@ pub fn App() -> impl IntoView {
                 atts,
                 markdown,
                 draft_id,
+                edited,
             )
             .await
             {
@@ -1257,6 +1263,9 @@ pub fn App() -> impl IntoView {
                     if let Some(mid) = replaced {
                         drafts.update(|l| l.retain(|d| !(d.on_server && d.id == mid)));
                     }
+                    // The original rejected row this send was an edit of is dropped by `run_send`
+                    // itself, in the same worker that enqueued/sent the fresh copy — so the resend
+                    // replaces it atomically, with no window to retry the stale one into a duplicate.
                     commit_pending(); // resolve any queued move before this confirmation toast
                                       // Offline: the message is safe in the outbox and goes out on the next sync.
                     toast.set(Some(if queued {
@@ -1340,6 +1349,7 @@ pub fn App() -> impl IntoView {
         // them, so they're stored with the draft (and the original is taken off the server).
         let atts = attach_paths.get_untracked();
         let replaced = resumed_server.get_untracked();
+        let edited = editing_outbox.get_untracked(); // a rejected send being saved off as a draft
         compose.set(None);
         reset_recipient_inputs();
         let showing_drafts = drafts_open.get_untracked();
@@ -1347,6 +1357,18 @@ pub fn App() -> impl IntoView {
             match api::save_draft(aid, existing, d, atts).await {
                 Ok(_) => {
                     toast.set(Some("Draft saved".into()));
+                    // This was an edit of a rejected outbox message: its content now lives in the
+                    // draft, so drop the outbox row — leaving it would strand a "couldn't send" entry
+                    // for a message that's since become a draft.
+                    if let Some(old) = edited {
+                        if api::discard_outbox(old).await.is_err() {
+                            error.set(Some(
+                                "Draft saved, but the failed message it came from is still in the \
+                                 Outbox — discard it there."
+                                    .to_owned(),
+                            ));
+                        }
+                    }
                     // This draft *was* the provider's: it's ours now, so take the original off the
                     // server — only now that the local save has succeeded, so a failure can never
                     // lose it. (Left there, it would be back in the list as a second row.)
@@ -1408,6 +1430,31 @@ pub fn App() -> impl IntoView {
                     compose.set(Some(draft));
                     attach_paths.set(attachments);
                     resumed_server.set(Some(id));
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            draft_busy.set(false);
+        });
+    };
+
+    // Reopen a rejected outbox message in the composer to fix and resend it (SEND-10). Its row stays
+    // in the outbox until the edit is actually sent, so cancelling the compose loses nothing.
+    let edit_outbox_msg = move |id: i64| {
+        if draft_busy.get_untracked() {
+            return; // a second click would fetch it twice and leave the loser's files behind
+        }
+        draft_busy.set(true);
+        leptos::task::spawn_local(async move {
+            match api::edit_outbox(id).await {
+                Ok(Some(ResumedDraft { draft, attachments })) => {
+                    reset_recipient_inputs(); // clears attach_paths + every draft id first
+                    compose.set(Some(draft));
+                    attach_paths.set(attachments);
+                    editing_outbox.set(Some(id));
+                    outbox_open.set(false); // leave the outbox pane for the composer
+                }
+                Ok(None) => {
+                    load_outbox(); // it's gone (sent or discarded elsewhere) — refresh the pane
                 }
                 Err(e) => error.set(Some(e)),
             }
@@ -2291,6 +2338,7 @@ pub fn App() -> impl IntoView {
                                         <div class="outbox-actions">
                                             <Show when=move || failed>
                                                 <button class="btn-ghost small" on:click=move |_| retry_outbox_msg(id)>"Retry"</button>
+                                                <button class="btn-ghost small" on:click=move |_| edit_outbox_msg(id)>"Edit"</button>
                                             </Show>
                                             <button class="btn-ghost small danger" on:click=move |_| discard_outbox_msg(id)>"Discard"</button>
                                         </div>

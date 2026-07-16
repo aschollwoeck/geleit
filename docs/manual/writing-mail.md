@@ -24,8 +24,11 @@ close GeleitMail in the meantime; the outbox is remembered.
 
 Click that line to open the **Outbox** and see what's waiting. If your provider *rejects* a message — a
 mistyped address, say — it's shown there with the reason (*"couldn't send"*) rather than tried forever;
-choose **Retry** to send it again, or **Discard** to throw it away. You can **Discard** a message that's
-still waiting, too, to cancel it before it goes.
+choose **Retry** to send it again, **Edit** to reopen it in Compose and fix it first, or **Discard** to
+throw it away. **Edit** brings the whole message back — recipients, subject, body, and attachments — so
+you can correct the address and send again without retyping; the original waits in the Outbox until the
+edited version goes out, so you lose nothing if you change your mind. You can **Discard** a message
+that's still waiting, too, to cancel it before it goes.
 
 ![The compose window: From, To and Cc recipient chips, Subject, body, and a footer with Send, Attach, Discard, a Markdown toggle, and Save draft.](images/compose.png)
 

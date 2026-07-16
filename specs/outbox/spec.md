@@ -31,9 +31,16 @@ A quiet line under **Compose**, only when something is waiting: *"2 messages wai
 *"1 couldn't send"* as a warning when the server rejected one. A quiet outbox is invisible.
 
 Clicking it opens the **Outbox** in the middle pane: each message shows its recipient, subject and
-status. A failed one shows *why* it was rejected and offers **Retry** (re-queue and try again now) and
-**Discard**; a waiting one offers **Discard** (cancel it before it goes). So a message that couldn't be
-sent is never a dead end.
+status. A failed one shows *why* it was rejected and offers **Retry** (re-queue and try again now),
+**Edit** (reopen it in Compose to fix the address — or whatever it was — and resend), and **Discard**; a
+waiting one offers **Discard** (cancel it before it goes). So a message that couldn't be sent is never a
+dead end.
+
+**Edit** reconstructs the compose form from the message's own stored bytes — recipients, subject, body,
+and attachments — so a rejected send is corrected and resent, not retyped. The original stays in the
+outbox until the edited version is sent (so cancelling loses nothing and the resend replaces rather than
+doubles it); it's offered on failed rows only, which are never auto-retried, so the original can't go out
+mid-edit.
 
 ## Concurrency and clean-up
 
@@ -52,8 +59,7 @@ deleted" — milliseconds, a local write.
 
 ## Out of scope (named)
 
-**Editing** a failed message to fix a bad address (retry and discard exist; editing the content does
-not — the workaround is discard + recompose). Queuing moves/deletes — those are server-first, so a failed one doesn't diverge. A true
+Queuing moves/deletes — those are server-first, so a failed one doesn't diverge. A true
 scheduled-send / "send later". Per-message delivery receipts. A few genuinely-permanent *client-side*
 failures (no compatible auth mechanism, STARTTLS unsupported, a rejected TLS certificate) are classed
 retryable by the SMTP library, so they queue and retry rather than surfacing — a misconfiguration that
