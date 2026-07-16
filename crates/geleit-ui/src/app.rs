@@ -270,6 +270,8 @@ pub fn App() -> impl IntoView {
     let mark_read = RwSignal::new(true);
     let notify = RwSignal::new(true); // a mail client that never tells you about mail is a strange one
     let outbox = RwSignal::new((0i64, 0i64)); // (queued, failed) — the outbox indicator (SEND-10)
+    let outbox_open = RwSignal::new(false); // the middle pane shows the outbox instead of a folder
+    let outbox_list = RwSignal::new(Vec::<api::OutboxItem>::new());
     let quiet_on = RwSignal::new(false); // quiet hours: silent, but the mail is still owed a mention
     let quiet_bad = RwSignal::new(false); // a window the host would throw away — tell them, don't store it
     let quiet_from = RwSignal::new("22:00".to_owned());
@@ -346,6 +348,48 @@ pub fn App() -> impl IntoView {
             if let Ok(counts) = api::outbox_status().await {
                 outbox.set(counts);
             }
+        });
+    };
+    // Load the outbox list into the pane (the outbox is app-wide, not per-account).
+    let load_outbox = move || {
+        leptos::task::spawn_local(async move {
+            if let Ok(list) = api::list_outbox().await {
+                outbox_list.set(list);
+            }
+        });
+    };
+    // Show the outbox in the middle pane (reached by clicking the indicator).
+    let open_outbox = move || {
+        unified.set(false);
+        drafts_open.set(false);
+        outbox_open.set(true);
+        selected.set(HashSet::new());
+        selected_folder.set(None);
+        open.set(None);
+        search_open.set(false);
+        query.set(String::new());
+        acct_menu.set(false);
+        load_outbox();
+    };
+    // Retry a failed send (re-queue + flush) or discard one; then refresh the pane + the indicator.
+    let retry_outbox_msg = move |id: i64| {
+        outbox_list.update(|l| l.retain(|o| o.id != id)); // it leaves the failed list immediately
+        leptos::task::spawn_local(async move {
+            if let Err(e) = api::retry_outbox(id).await {
+                error.set(Some(e));
+            }
+            load_outbox();
+            refresh_outbox();
+        });
+    };
+    let discard_outbox_msg = move |id: i64| {
+        outbox_list.update(|l| l.retain(|o| o.id != id));
+        leptos::task::spawn_local(async move {
+            if let Err(e) = api::discard_outbox(id).await {
+                error.set(Some(e));
+            }
+            load_outbox(); // reconcile the pane if the discard didn't land
+            refresh_outbox();
         });
     };
 
@@ -463,6 +507,7 @@ pub fn App() -> impl IntoView {
     let choose_folder = move |id: i64| {
         unified.set(false);
         drafts_open.set(false);
+        outbox_open.set(false);
         selected.set(HashSet::new());
         selected_folder.set(Some(id));
         open.set(None);
@@ -484,6 +529,7 @@ pub fn App() -> impl IntoView {
     let choose_unified = move || {
         unified.set(true);
         drafts_open.set(false);
+        outbox_open.set(false);
         selected.set(HashSet::new());
         acct_menu.set(false);
         selected_folder.set(None);
@@ -858,6 +904,7 @@ pub fn App() -> impl IntoView {
     let switch_account = move |aid: i64| {
         unified.set(false); // picking a specific account leaves the merged view
         drafts_open.set(false); // and leaves the drafts view (drafts are per-account)
+        outbox_open.set(false); // …and the outbox pane, so the rail and the middle pane agree
         selected.set(HashSet::new());
         acct_menu.set(false);
         account.set(Some(aid));
@@ -1229,6 +1276,7 @@ pub fn App() -> impl IntoView {
     let open_drafts = move || {
         unified.set(false);
         drafts_open.set(true);
+        outbox_open.set(false);
         selected.set(HashSet::new()); // leaving the message list drops any bulk selection
         selected_folder.set(None);
         open.set(None);
@@ -1892,8 +1940,8 @@ pub fn App() -> impl IntoView {
     // rank order, not date order), then emitted as a flat header/message stream for a single keyed
     // `<For>`. Keys are unique and stable: `h:<label>` for a header, `m:<id>` for a message.
     let rows = move || {
-        if drafts_open.get() {
-            return Vec::new(); // the drafts pane renders its own rows
+        if drafts_open.get() || outbox_open.get() {
+            return Vec::new(); // the drafts / outbox panes render their own rows
         }
         let hidden = pending.get().map(|p| p.ids).unwrap_or_default();
         let mut buckets: [(&'static str, Vec<Message>); 3] = [
@@ -1997,7 +2045,10 @@ pub fn App() -> impl IntoView {
                     // Outbox indicator (SEND-10): only shown when something is waiting or was rejected,
                     // so a quiet outbox is invisible. Failed sends read as a warning, not a count.
                     <Show when=move || { outbox.get().0 > 0 || outbox.get().1 > 0 }>
-                        <div class="outbox-note" class:warn=move || { outbox.get().1 > 0 }>
+                        <div class="outbox-note" class:warn=move || { outbox.get().1 > 0 } class:active=move || outbox_open.get()
+                            role="button" tabindex="0" title="Open the outbox"
+                            on:click=move |_| open_outbox()
+                            on:keydown=move |e| { if e.key() == "Enter" || e.key() == " " { e.prevent_default(); open_outbox(); } }>
                             {move || {
                                 let (queued, failed) = outbox.get();
                                 if failed > 0 {
@@ -2088,8 +2139,12 @@ pub fn App() -> impl IntoView {
             // ============ LIST ============
             <div class="list-col">
                 <div class="list-head">
-                    <div class="list-title">{move || if drafts_open.get() { "Drafts".to_string() } else if unified.get() { "All inboxes".to_string() } else { folders.get().into_iter().find(|f| selected_folder.get() == Some(f.id)).map(|f| f.name).unwrap_or_default() }}</div>
+                    <div class="list-title">{move || if outbox_open.get() { "Outbox".to_string() } else if drafts_open.get() { "Drafts".to_string() } else if unified.get() { "All inboxes".to_string() } else { folders.get().into_iter().find(|f| selected_folder.get() == Some(f.id)).map(|f| f.name).unwrap_or_default() }}</div>
                     <div class="list-sub">{move || {
+                        if outbox_open.get() {
+                            let n = outbox_list.get().len();
+                            return if n == 1 { "1 message".to_owned() } else if n > 0 { format!("{n} messages") } else { String::new() };
+                        }
                         if drafts_open.get() {
                             let n = drafts.get().len();
                             // Not "saved" — some of these live on the provider, not here.
@@ -2106,7 +2161,7 @@ pub fn App() -> impl IntoView {
                         <Show when=in_trash>
                             <span class="icon-btn danger" title="Empty Trash" on:click=move |_| trash_ask.set(Some(TrashAsk::Empty))>{icon(icons::TRASH)}</span>
                         </Show>
-                        <Show when=move || !drafts_open.get()>
+                        <Show when=move || { !drafts_open.get() && !outbox_open.get() }>
                             <span class="icon-btn" class:on=move || search_open.get() title="Search" on:click=move |_| search_open.update(|o| *o = !*o)>{icon(icons::SEARCH)}</span>
                         </Show>
                         <span class="icon-btn" title="Refresh"
@@ -2206,6 +2261,39 @@ pub fn App() -> impl IntoView {
                                             // deleting it here deletes it from the provider.
                                             <span class="draft-where">"On your provider"</span>
                                         </Show>
+                                    </div>
+                                }
+                            }
+                        </For>
+                    </Show>
+                    <Show when=move || { outbox_open.get() && outbox_list.get().is_empty() }>
+                        <div class="list-empty"><div class="msg">"The outbox is empty."</div></div>
+                    </Show>
+                    <Show when=move || outbox_open.get()>
+                        <For each=move || outbox_list.get() key=|o| (o.id, o.failed) let:o>
+                            {
+                                let id = o.id;
+                                let to = if o.to.trim().is_empty() { "(no recipient)".to_owned() } else { o.to.clone() };
+                                let subject = o.subject.clone();
+                                let err = o.error.clone();
+                                let failed = o.failed;
+                                view! {
+                                    <div class="row outbox-row">
+                                        <span class="guide"></span>
+                                        <div class="row-top">
+                                            <span class="sender">{to}</span>
+                                            <span class="time">{if failed { "couldn't send" } else { "waiting…" }}</span>
+                                        </div>
+                                        <div class="subj">{subject}</div>
+                                        <Show when=move || failed>
+                                            <div class="outbox-err">{err.clone()}</div>
+                                        </Show>
+                                        <div class="outbox-actions">
+                                            <Show when=move || failed>
+                                                <button class="btn-ghost small" on:click=move |_| retry_outbox_msg(id)>"Retry"</button>
+                                            </Show>
+                                            <button class="btn-ghost small danger" on:click=move |_| discard_outbox_msg(id)>"Discard"</button>
+                                        </div>
                                     </div>
                                 }
                             }

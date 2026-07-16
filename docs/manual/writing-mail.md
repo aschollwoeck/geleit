@@ -20,9 +20,12 @@ the app stays responsive. To throw a message away, choose **Discard**.
 
 **No connection?** Your message isn't lost. GeleitMail keeps it in an **outbox** and sends it the next
 time it reaches your provider — a quiet line under **Compose** shows how many are waiting to go. You can
-close GeleitMail in the meantime; the outbox is remembered. If your provider actually *rejects* a
-message — a mistyped address, say — GeleitMail tells you (*"couldn't send"*) rather than trying forever,
-so you can fix it.
+close GeleitMail in the meantime; the outbox is remembered.
+
+Click that line to open the **Outbox** and see what's waiting. If your provider *rejects* a message — a
+mistyped address, say — it's shown there with the reason (*"couldn't send"*) rather than tried forever;
+choose **Retry** to send it again, or **Discard** to throw it away. You can **Discard** a message that's
+still waiting, too, to cancel it before it goes.
 
 ![The compose window: From, To and Cc recipient chips, Subject, body, and a footer with Send, Attach, Discard, a Markdown toggle, and Save draft.](images/compose.png)
 

@@ -19,7 +19,7 @@
 use geleit_engine::localstore::open_store;
 use geleit_platform::secret::SecretStore;
 use geleit_store::Store;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::Manager; // get_webview_window, for the unread badge
 
@@ -55,10 +55,12 @@ pub struct AppState {
     /// flush thread *per message*, each pushing the whole account queue — a thundering herd. See
     /// [`spawn_flush`].
     flushing: Arc<Mutex<HashMap<i64, bool>>>,
-    /// Accounts whose outbox is currently being drained. A scheduler sweep and a user Refresh can both
-    /// drain at once; without this, both would read the same pending rows and **send each message
-    /// twice**. Whoever holds the account drains it; the other skips (the holder sends everything).
-    draining_outbox: Arc<Mutex<HashSet<i64>>>,
+    /// Single-flight for the outbox drain, per account. A scheduler sweep and a Refresh can both drain
+    /// at once; without this they'd read the same pending rows and **send each message twice** (SMTP
+    /// isn't idempotent). The value is "run once more when the current drain finishes" — so a Retry
+    /// made *during* a drain (which clears a row's `failed` after the drain read its pending set) is
+    /// still picked up by that drain's rerun, not deferred to the next sweep.
+    draining_outbox: Arc<Mutex<HashMap<i64, bool>>>,
 }
 
 impl AppState {
@@ -85,7 +87,7 @@ impl AppState {
             wake_sync: Arc::new(tokio::sync::Notify::new()),
             notifier,
             flushing: Arc::new(Mutex::new(HashMap::new())),
-            draining_outbox: Arc::new(Mutex::new(HashSet::new())),
+            draining_outbox: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1033,6 +1035,51 @@ pub async fn outbox_status(state: tauri::State<'_, AppState>) -> Result<(i64, i6
     .await
 }
 
+/// Every message in the outbox, for the outbox view (SEND-10) — so the user can retry or discard one.
+#[tauri::command]
+pub async fn list_outbox(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<crate::dto::OutboxItemDto>, String> {
+    with_store(state.inner().clone(), |store| {
+        Ok(store
+            .list_outbox()
+            .map_err(|_| "Couldn't read the outbox.".to_owned())?
+            .into_iter()
+            .map(crate::dto::outbox_item)
+            .collect())
+    })
+    .await
+}
+
+/// Re-queue a failed outbox message (SEND-10) and try it now: clear its failed mark, then flush the
+/// outbox so it goes out immediately if we're online (rather than waiting for the next sweep).
+#[tauri::command]
+pub async fn retry_outbox(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let st = state.inner().clone();
+    let account = with_store(st.clone(), move |store| {
+        store
+            .retry_outbox(id)
+            .map_err(|_| "Couldn't retry that message.".to_owned())?;
+        Ok(store.outbox_account(id).ok().flatten())
+    })
+    .await?;
+    if let Some(account_id) = account {
+        flush_outbox(&st, account_id).await;
+    }
+    Ok(())
+}
+
+/// Discard an outbox message (SEND-10) — throw away a send that's waiting or couldn't go out.
+#[tauri::command]
+pub async fn discard_outbox(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    with_store(state.inner().clone(), move |store| {
+        store
+            .delete_outbox(id)
+            .map_err(|_| "Couldn't discard that message.".to_owned())
+    })
+    .await
+}
+
 /// Drain an account's outbox — a worker-awaited version for the scheduler and Refresh (SEND-10).
 ///
 /// Single-flight per account: if a drain is already running (a sweep and a Refresh overlapping), this
@@ -1040,21 +1087,30 @@ pub async fn outbox_status(state: tauri::State<'_, AppState>) -> Result<(i64, i6
 pub(crate) async fn flush_outbox(state: &AppState, account_id: i64) -> usize {
     {
         let mut g = state.draining_outbox.lock().expect("outbox guard");
-        if !g.insert(account_id) {
-            return 0; // already draining this account
+        if let Some(rerun) = g.get_mut(&account_id) {
+            *rerun = true; // a drain is running — have it go round once more, then skip our own
+            return 0;
+        }
+        g.insert(account_id, false);
+    }
+    let mut sent = 0usize;
+    loop {
+        let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
+        sent += tauri::async_runtime::spawn_blocking(move || {
+            geleit_engine::sync_actions::run_flush_outbox(&db, &*secrets, account_id).unwrap_or(0)
+        })
+        .await
+        .unwrap_or(0);
+        let mut g = state.draining_outbox.lock().expect("outbox guard");
+        match g.get_mut(&account_id) {
+            // Work arrived while we were draining (a Retry, say) — go round once more.
+            Some(rerun) if *rerun => *rerun = false,
+            _ => {
+                g.remove(&account_id);
+                break;
+            }
         }
     }
-    let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
-    let sent = tauri::async_runtime::spawn_blocking(move || {
-        geleit_engine::sync_actions::run_flush_outbox(&db, &*secrets, account_id).unwrap_or(0)
-    })
-    .await
-    .unwrap_or(0);
-    state
-        .draining_outbox
-        .lock()
-        .expect("outbox guard")
-        .remove(&account_id);
     sent
 }
 

@@ -502,6 +502,17 @@ pub struct NewMessage {
     pub owed_notification: bool,
 }
 
+/// One outbox message as the user sees it in the outbox view (SEND-10) — no raw bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxItem {
+    pub id: i64,
+    pub recipients: Vec<String>,
+    pub subject: String,
+    /// The server rejected it (a permanent error); it's no longer retried and shows its `last_error`.
+    pub failed: bool,
+    pub last_error: Option<String>,
+}
+
 /// A message waiting in the outbox to be delivered (SEND-10): the built RFC 5322 bytes plus the
 /// envelope needed to hand them to an SMTP server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2066,6 +2077,57 @@ impl Store {
         self.conn.execute(
             "UPDATE outbox SET failed = 1, last_error = ?2 WHERE id = ?1",
             (id, error),
+        )?;
+        Ok(())
+    }
+
+    /// Every outbox message across **all** accounts — for the outbox view, so the user can retry or
+    /// discard one. Newest first. Carries display fields and status, not the raw bytes.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn list_outbox(&self) -> Result<Vec<OutboxItem>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, recipients, subject, failed, last_error FROM outbox \
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let recipients: String = r.get(1)?;
+            let failed: i64 = r.get(3)?;
+            Ok(OutboxItem {
+                id: r.get(0)?,
+                recipients: recipients.split(',').map(str::to_owned).collect(),
+                subject: r.get(2)?,
+                failed: failed != 0,
+                last_error: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The account an outbox message belongs to, or `None` if it's gone — so a retry can flush the
+    /// right account.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn outbox_account(&self, id: i64) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT account_id FROM outbox WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    /// Re-queue a failed outbox message (SEND-10): clear its failed mark and error so the next drain
+    /// tries it again. A no-op for one that isn't failed.
+    ///
+    /// # Errors
+    /// The update failing (a corrupt or unreadable database).
+    pub fn retry_outbox(&self, id: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE outbox SET failed = 0, last_error = NULL WHERE id = ?1",
+            [id],
         )?;
         Ok(())
     }
@@ -3988,16 +4050,17 @@ mod tests {
                 200,
             )
             .unwrap();
-        s.enqueue_outbox(
-            other,
-            "b@example.com",
-            &["q@y.io".to_owned()],
-            "Other",
-            b"raw-c",
-            None,
-            150,
-        )
-        .unwrap();
+        let other_c = s
+            .enqueue_outbox(
+                other,
+                "b@example.com",
+                &["q@y.io".to_owned()],
+                "Other",
+                b"raw-c",
+                None,
+                150,
+            )
+            .unwrap();
 
         // The scheduler drains a specific account, oldest first, with everything it needs to send.
         let pending = s.pending_outbox(acc).unwrap();
@@ -4031,12 +4094,41 @@ mod tests {
             "one queued (other account) + one failed"
         );
 
+        // The outbox view lists everything (queued + failed) across accounts, **newest first**. By now a
+        // (created_at 100) is discarded; b (200, this account, failed) and the other account's c (150)
+        // remain — so newest-first is [b, c].
+        let list = s.list_outbox().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, b, "newest (created_at 200) leads");
+        assert_eq!(list[1].id, other_c, "then the older one (150)");
+        let failed = list.iter().find(|o| o.id == b).unwrap();
+        assert!(failed.failed);
+        assert_eq!(failed.last_error.as_deref(), Some("550 no such recipient"));
+        assert_eq!(failed.subject, "Later");
+        assert!(
+            list.iter().any(|o| !o.failed),
+            "the other account's is still queued"
+        );
+
+        // A retry (or an immediate flush) needs to know which account a row belongs to.
+        assert_eq!(s.outbox_account(b).unwrap(), Some(acc));
+        assert_eq!(
+            s.outbox_account(999).unwrap(),
+            None,
+            "a row that's gone has no account"
+        );
+
+        // Retry re-queues the failed one: it stops being failed and re-enters the drain.
+        s.retry_outbox(b).unwrap();
+        assert_eq!(s.outbox_counts().unwrap(), (2, 0), "failed → queued again");
+        assert!(s.pending_outbox(acc).unwrap().iter().any(|m| m.id == b));
+
         // Removing the account takes its outbox with it (FK cascade).
         s.delete_account(other).unwrap();
         assert_eq!(
             s.outbox_counts().unwrap(),
-            (0, 1),
-            "only b (failed) remains"
+            (1, 0),
+            "only b remains, re-queued"
         );
     }
 

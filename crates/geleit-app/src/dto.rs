@@ -199,6 +199,35 @@ pub struct ResumedDraft {
     pub attachments: Vec<String>,
 }
 
+/// One outbox message as the outbox view shows it (SEND-10) — recipient, subject, and status.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OutboxItemDto {
+    pub id: i64,
+    /// Who it's to, comma-joined — shown so the user knows which message this is.
+    pub to: String,
+    pub subject: String,
+    /// The server rejected it; it's no longer retried and shows `error`.
+    pub failed: bool,
+    /// The rejection reason, for a failed message.
+    pub error: String,
+}
+
+/// Map a stored outbox row to what the outbox view shows.
+#[must_use]
+pub fn outbox_item(o: geleit_store::OutboxItem) -> OutboxItemDto {
+    OutboxItemDto {
+        id: o.id,
+        to: o.recipients.join(", "),
+        subject: if o.subject.trim().is_empty() {
+            "(no subject)".to_owned()
+        } else {
+            o.subject
+        },
+        failed: o.failed,
+        error: o.last_error.unwrap_or_default(),
+    }
+}
+
 /// A row in the Drafts list: enough to recognise a saved draft without loading its whole body.
 ///
 /// The list holds both kinds of draft — this device's and the provider's — so `on_server` says which

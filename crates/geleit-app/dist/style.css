@@ -458,3 +458,14 @@ iframe.mail { flex: 1; width: 100%; border: 0; background: #fff; }
 .outbox-note { margin: 2px 4px 8px; padding: 6px 10px; border-radius: var(--radius-sm); font-size: 12px;
   color: var(--text-muted); background: var(--surface-raised); }
 .outbox-note.warn { color: var(--warning-strong); background: var(--warning-quiet); }
+
+/* Outbox view rows (SEND-10). */
+.outbox-note[role="button"] { cursor: pointer; }
+.outbox-note.active { outline: 2px solid var(--focus); outline-offset: 1px; }
+.row.outbox-row .outbox-err { margin-top: 4px; font-size: 12px; color: var(--danger-strong); }
+.row.outbox-row .outbox-actions { display: flex; gap: 8px; margin-top: 8px; }
+.btn-ghost.small { padding: 4px 10px; font-size: 12.5px; border-radius: var(--radius-sm);
+  border: 1px solid var(--divider); background: var(--surface); color: var(--text); cursor: pointer; }
+.btn-ghost.small:hover { background: var(--surface-raised); }
+.btn-ghost.small.danger { color: var(--danger-strong); }
+.btn-ghost.small.danger:hover { background: var(--danger-quiet); }

@@ -61,3 +61,21 @@ the permanent/retryable split is tested at `smtp::send` against a rejecting sink
 counts are unit-tested. The successful-delivery-then-delete composition is covered piecewise (the sink
 proves `smtp::send` delivers; the store proves `delete_outbox`), the same limitation the original send
 path has always had.
+
+
+## Acting on the outbox
+
+A failed message that could only be *counted* would be a dead end — stuck forever, its content
+invisible. So the outbox is a view: `Store::list_outbox` (all rows, newest first, display fields +
+status) behind `ipc::list_outbox`, opened by clicking the indicator (an `outbox_open` pane mirroring the
+Drafts pane). Each row offers:
+
+- **Retry** (`retry_outbox`) — `Store::retry_outbox` clears `failed`/`last_error` so the row re-enters
+  the queue, then flushes the account immediately so it goes out now if we're online (rather than
+  waiting for the next sweep).
+- **Discard** (`discard_outbox` → `delete_outbox`) — throw it away, whether waiting or failed.
+
+The pane is app-wide (the outbox spans accounts), and the actions refresh both the list and the
+indicator. Retry re-queuing a message that will just be rejected again is fine — it fails once more and
+returns to the failed state; the user has the information (the error) to decide whether to fix the
+address (discard + recompose) instead.
