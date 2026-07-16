@@ -2119,6 +2119,18 @@ impl Store {
             .optional()?)
     }
 
+    /// The raw RFC 5322 bytes of one queued message (SEND-10 edit), or `None` if the row is gone.
+    /// Used to reopen a rejected send in the composer — the bytes parse straight back into a form.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn outbox_raw(&self, id: i64) -> Result<Option<Vec<u8>>, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT raw FROM outbox WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?)
+    }
+
     /// Re-queue a failed outbox message (SEND-10): clear its failed mark and error so the next drain
     /// tries it again. A no-op for one that isn't failed.
     ///
@@ -4108,6 +4120,14 @@ mod tests {
         assert!(
             list.iter().any(|o| !o.failed),
             "the other account's is still queued"
+        );
+
+        // Editing a rejected send reads its raw bytes straight back (to reopen it in the composer).
+        assert_eq!(s.outbox_raw(b).unwrap().as_deref(), Some(&b"raw-b"[..]));
+        assert_eq!(
+            s.outbox_raw(999).unwrap(),
+            None,
+            "a row that's gone has no raw"
         );
 
         // A retry (or an immediate flush) needs to know which account a row belongs to.

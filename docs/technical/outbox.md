@@ -74,8 +74,25 @@ Drafts pane). Each row offers:
   the queue, then flushes the account immediately so it goes out now if we're online (rather than
   waiting for the next sweep).
 - **Discard** (`discard_outbox` → `delete_outbox`) — throw it away, whether waiting or failed.
+- **Edit** (failed rows only, `edit_outbox`) — reopen the rejected message in Compose to fix and resend
+  it, rather than discard + retype. See below.
 
 The pane is app-wide (the outbox spans accounts), and the actions refresh both the list and the
 indicator. Retry re-queuing a message that will just be rejected again is fine — it fails once more and
 returns to the failed state; the user has the information (the error) to decide whether to fix the
-address (discard + recompose) instead.
+address (Edit, or discard + recompose) instead.
+
+### Editing a rejected send
+
+`edit_outbox(id)` reconstructs the compose form from the row's stored `raw` bytes — which we built
+ourselves at enqueue time, so parsing is a faithful inverse: `message::parse_outbox_for_edit` pulls
+To/Cc straight from the headers, the body from the same `text/plain` part the reading pane reads, and
+each attachment (name + bytes) via the same `mime::extract_attachment` the viewer uses, materialised to
+temp files exactly like resuming a draft. Threading headers are dropped — an edited-and-resent message
+starts a fresh send, it isn't a reply to itself.
+
+The row is **left in the outbox** while it's edited; it's discarded (frontend → `discard_outbox`) only
+once the edited message is actually sent, so the edited version replaces the original rather than
+doubling it. Cancelling the compose therefore loses nothing — the original stays, to retry or discard.
+Edit is offered on **failed** rows only, which the scheduler never retries (`pending_outbox` filters
+`failed = 0`), so there's no race where the original goes out while it's being edited.

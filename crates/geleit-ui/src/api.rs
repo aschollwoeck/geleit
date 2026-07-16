@@ -543,6 +543,12 @@ pub async fn discard_outbox(id: i64) -> Result<(), String> {
     call("discard_outbox", &IdArgs { id }).await
 }
 
+/// Reopen a rejected outbox message in the composer to fix and resend it (`None` if it's gone). The
+/// outbox row stays until the edited message is sent, so cancelling loses nothing.
+pub async fn edit_outbox(id: i64) -> Result<Option<ResumedDraft>, String> {
+    call("edit_outbox", &IdArgs { id }).await
+}
+
 /// Save (or update) a local draft (with its attachment file paths); returns its id so the composer
 /// keeps editing the same row.
 pub async fn save_draft(
