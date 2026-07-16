@@ -21,6 +21,9 @@ exclude_globs = [
     # can be caught without a live desktop (`examples/notify_once.rs` is how it's checked by hand). The
     # `Notifier` trait, the fake, and every decision about WHAT to say stay mutation-tested.
     "**/geleit-platform/src/os_notify.rs",
+    # tray.rs: a single D-Bus NameHasOwner probe for a StatusNotifierWatcher; needs a live session bus,
+    # nothing here can be caught without one. The decision it drives (gate close-to-tray) is glue.
+    "**/geleit-platform/src/tray.rs",
 
     # --- geleit-app is the Tauri host (M9, ADR-0012). Its glue is excluded; the PURE logic lives in
     # --- geleit-app/src/dto.rs (DTO mapping, sender/subject fallbacks, folder ordering, folder roles,
@@ -33,6 +36,9 @@ exclude_globs = [
     # idle.rs: the IMAP IDLE watcher — a long-lived tokio task per account needing a live server; its
     # only decision (reconnect backoff) is trivial and its effect (wake the scheduler) is glue.
     "**/geleit-app/src/idle.rs",
+    # tray.rs: the system-tray icon — needs a live AppHandle + a desktop tray (libayatana-appindicator3);
+    # its callbacks (show/hide the window, quit) are single-line glue with no logic to mutate.
+    "**/geleit-app/src/tray.rs",
     # scheduler.rs: the background-sync loop — a tokio task needing a live AppHandle, an IMAP server
     # and a clock; nothing here can run under mutants. Its DECISIONS (backoff, sweep verdict, the
     # per-account retry cadence) are split into `schedule.rs`, which STAYS mutation-tested.

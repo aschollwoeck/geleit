@@ -32,8 +32,14 @@ Gmail/Outlook (OAuth) and macOS/Windows builds are planned. See the [CHANGELOG](
 
 ## Building (Linux)
 
-Needs the system libraries the webview links against (webkit2gtk 4.1, GTK 3) and the
+Needs the system libraries the webview links against (webkit2gtk 4.1, GTK 3), the system tray library
+(libayatana-appindicator3), and the
 [`wasm-bindgen` CLI](https://crates.io/crates/wasm-bindgen-cli) (matching the version in `Cargo.lock`).
+
+```sh
+# Debian/Ubuntu system dependencies
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+```
 
 ```sh
 ./scripts/build-ui.sh --release       # compile the Leptos frontend to WASM into dist/pkg/

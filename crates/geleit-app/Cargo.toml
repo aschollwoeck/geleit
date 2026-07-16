@@ -18,7 +18,10 @@ geleit-core = { path = "../geleit-core" }
 geleit-store = { path = "../geleit-store" }
 geleit-engine = { path = "../geleit-engine" }
 geleit-platform = { path = "../geleit-platform" }
-tauri = { version = "2", features = [] }
+# `tray-icon`: the persistent system-tray presence (NOTIF-4). On Linux this links libayatana-appindicator3
+# (a build + runtime system dependency — see README prerequisites); the tray-icon/muda crates were already
+# in the lock graph, so no new Rust crate, but it IS the project's first non-Rust dependency.
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 # navigation guard: parse + classify URLs (already in the tree via tauri)
 url = "2"

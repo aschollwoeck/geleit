@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Always there
+- **A system-tray icon** keeps GeleitMail running in the background. Closing the window now tucks it into
+  the tray instead of quitting — so mail keeps arriving, and the count keeps updating — and clicking the
+  tray icon brings the window back. Hovering it shows the same unread count as the title (*"GeleitMail —
+  3 unread"*). To actually exit, right-click the icon and choose **Quit**. *(Linux needs the
+  `libayatana-appindicator3` system library — see the README build prerequisites.)*
+
 ### New mail, instantly
 - **New mail now arrives within seconds** on providers that support it (IMAP IDLE), instead of waiting
   for the periodic check. GeleitMail keeps a live connection open and the server tells it the moment

@@ -148,6 +148,11 @@ GeleitMail also shows your unread count **in the window title** — *"GeleitMail
 the taskbar too, even when the window is behind something else. It counts unread messages in your Inbox
 across all your accounts, and reads just "GeleitMail" when you're caught up.
 
+**GeleitMail keeps running in the tray.** There's an icon in your system tray, and **closing the window
+sends it there rather than quitting** — so mail keeps arriving and the count keeps updating in the
+background. Click the tray icon to bring the window back; hover it to read the same unread count. When
+you genuinely want to exit, right-click the icon and choose **Quit**.
+
 **Read your mail somewhere else — your phone, webmail — and GeleitMail notices.** The next time it
 checks your mail, a message you've already read (or starred) elsewhere stops being unread (or gains its
 star) here too, and the count in the title falls to match. So the number is the mail you actually

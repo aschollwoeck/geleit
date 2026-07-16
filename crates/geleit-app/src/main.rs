@@ -21,6 +21,7 @@ mod mailproto;
 mod notify;
 mod schedule;
 mod scheduler;
+mod tray;
 
 use geleit_platform::os_secret::OsSecretStore;
 use ipc::AppState;
@@ -261,6 +262,9 @@ fn main() {
                     }
                 })
                 .build()?;
+            // The tray icon keeps GeleitMail present after the window is closed — closing hides to the
+            // tray rather than quitting, so mail keeps arriving. Built after the window it reveals.
+            tray::setup(app.handle());
             // Mail arrives on its own from here — the host polls, so it keeps working while the UI
             // sits idle (a webview throttles timers in a hidden window).
             scheduler::spawn(app.handle().clone());

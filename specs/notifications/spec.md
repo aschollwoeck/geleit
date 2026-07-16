@@ -1,8 +1,9 @@
-# Background sync + new-mail notifications (NOTIF-1/2/3)
+# Background sync + new-mail notifications (NOTIF-1/2/3/4)
 
 **Constitution:** P1 (the UI never waits), P2 (privacy), P3 (calm + fast), P8 (spec-driven).
 **Stories:** NOTIF-1 (get notified of new mail), NOTIF-2 (control per account / quiet hours),
-NOTIF-3 (unread count / badge), plus the background N-account sync scheduler deferred from M7.
+NOTIF-3 (unread count / badge), NOTIF-4 (a persistent tray icon; close keeps running in the
+background), plus the background N-account sync scheduler deferred from M7.
 
 ## Why
 
@@ -17,7 +18,8 @@ means anything.
 1. **New mail is knowable** ✅ — engine + store; no user-visible change.
 2. **The host syncs on its own** ✅ — the scheduler + the collision guard.
 3. **Notify** ✅ — NOTIF-1 + NOTIF-2.
-4. **Badge** ✅ (this slice) — NOTIF-3 (unread count in the window title).
+4. **Badge** ✅ — NOTIF-3 (unread count in the window title).
+5. **Tray** ✅ — NOTIF-4 (a persistent tray icon; close-to-tray keeps mail arriving).
 
 ---
 
@@ -175,6 +177,31 @@ and after a read / mark-unread / bulk / move (a store round-trip behind the on-s
 taskbar glance can afford), and the scheduler resets it after every sweep — which is also when mail
 read on another device could have come back, so the number falls for that too.
 
-No tray icon and no OS badge count: those need `libayatana-appindicator3`, a new system dependency.
-`WebviewWindow::set_title` is core Tauri, and the title is where the number already reads in the
-taskbar. The tray is its own slice if it's ever wanted.
+The badge shipped without a tray icon: that needs `libayatana-appindicator3`, a new system dependency,
+and `WebviewWindow::set_title` (core Tauri) already puts the number in the taskbar. The tray was left as
+its own slice — now taken up below.
+
+---
+
+## Slice 5 — The tray (NOTIF-4)
+
+A persistent **system-tray icon**, so GeleitMail keeps running — and keeps checking mail — after the
+window is closed. This is the piece that makes "mail arrives on its own" actually reach a user who has
+closed the window: a webview-hosted window that's *closed* is a dead process; a *hidden* one behind a
+tray icon is not.
+
+- **Closing hides, it doesn't quit.** The window's `CloseRequested` is intercepted (`api.prevent_close`)
+  and the window is hidden. The scheduler and IDLE watchers keep running, so mail still lands and the
+  count still updates. **Quit** (the tray menu) is the only real exit.
+- **The icon reveals the window.** A left-click — or the **Show GeleitMail** menu item — shows,
+  un-minimises, and focuses it.
+- **The tooltip mirrors the badge.** `ipc::set_badge` is already the one chokepoint that writes the
+  unread count to the window title; it now also writes it to the tray tooltip (`tray_by_id`), so the two
+  can't disagree. Hovering the icon reads *"GeleitMail — 3 unread"* even while the window is hidden.
+
+**The cost, accepted deliberately.** The `tray-icon`/`muda` crates were already in the lock graph, so no
+new *Rust* dependency — but the feature links `libayatana-appindicator3`, the project's **first non-Rust
+system dependency** (added to the README prerequisites). That was the explicit trade the badge slice
+declined and this one takes. `tray.rs` is glue over a live `AppHandle` + a desktop tray, so it's
+mutants-excluded like `idle.rs`; there's no pure logic here to split out — the count formatting it reuses
+(`dto::window_title`) stays mutation-tested.

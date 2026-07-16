@@ -2085,8 +2085,14 @@ pub(crate) async fn set_badge(app: &tauri::AppHandle, state: &AppState) {
     })
     .await
     .unwrap_or(0);
+    let title = crate::dto::window_title(unread);
     if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_title(&crate::dto::window_title(unread));
+        let _ = win.set_title(&title);
+    }
+    // Keep the tray tooltip in step with the title — same count, one source of truth. Hovering the
+    // tray icon then says "GeleitMail — 3 unread" even while the window is hidden.
+    if let Some(tray) = app.tray_by_id(crate::tray::TRAY_ID) {
+        let _ = tray.set_tooltip(Some(&title));
     }
 }
 
