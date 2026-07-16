@@ -91,8 +91,16 @@ each attachment (name + bytes) via the same `mime::extract_attachment` the viewe
 temp files exactly like resuming a draft. Threading headers are dropped — an edited-and-resent message
 starts a fresh send, it isn't a reply to itself.
 
-The row is **left in the outbox** while it's edited; it's discarded (frontend → `discard_outbox`) only
-once the edited message is actually sent, so the edited version replaces the original rather than
-doubling it. Cancelling the compose therefore loses nothing — the original stays, to retry or discard.
-Edit is offered on **failed** rows only, which the scheduler never retries (`pending_outbox` filters
+The row is **left in the outbox** while it's edited; it's removed only when the edited message leaves
+the composer as a persisted artifact, so the edit replaces the original rather than doubling it:
+
+- **Sent** → `run_send` takes an `outbox_edit_id` and deletes the row in the *same worker* that just
+  enqueued/sent the fresh copy (right where it already drops a resumed `draft_id`). Doing it there,
+  rather than as a follow-up IPC call the frontend might drop, closes the window where a lingering
+  failed row could be retried into a duplicate.
+- **Saved as a draft** → the content now lives in the draft, so the frontend drops the outbox row
+  (`discard_outbox`), mirroring how saving a resumed *server* draft removes its provider copy.
+
+Cancelling the compose removes nothing — the original stays in the outbox, to retry or discard. Edit is
+offered on **failed** rows only, which the scheduler never retries (`pending_outbox` filters
 `failed = 0`), so there's no race where the original goes out while it's being edited.

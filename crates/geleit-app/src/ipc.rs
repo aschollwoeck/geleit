@@ -984,6 +984,7 @@ pub async fn send_message(
     attachments: Vec<String>,
     markdown: bool,
     draft_id: Option<i64>,
+    outbox_edit_id: Option<i64>,
 ) -> Result<bool, String> {
     // Append the account's signature (SEND-7). Read it up front on the store thread.
     let signature = with_store(state.inner().clone(), move |store| {
@@ -1015,6 +1016,7 @@ pub async fn send_message(
             attachments,
             markdown,
             draft_id, // if this was a resumed draft, run_send deletes it after a successful send
+            outbox_edit_id, // …and if it was an edit of a rejected send, drops that outbox row too
         )
     })
     .await

@@ -297,6 +297,7 @@ fn a_send_that_cannot_reach_the_server_is_queued_and_stays_queued_until_it_can_g
         Vec::new(),
         false,
         None,
+        None,
     )
     .expect("send should queue, not error");
     assert_eq!(status, SendStatus::Queued);

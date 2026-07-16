@@ -202,6 +202,7 @@ struct SendArgs {
     attachments: Vec<String>,
     markdown: bool,
     draft_id: Option<i64>,
+    outbox_edit_id: Option<i64>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -503,6 +504,7 @@ pub async fn send_message(
     attachments: Vec<String>,
     markdown: bool,
     draft_id: Option<i64>,
+    outbox_edit_id: Option<i64>,
 ) -> Result<bool, String> {
     call(
         "send_message",
@@ -517,6 +519,7 @@ pub async fn send_message(
             attachments,
             markdown,
             draft_id,
+            outbox_edit_id,
         },
     )
     .await

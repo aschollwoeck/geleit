@@ -405,6 +405,7 @@ pub fn run_send(
     attachments: Vec<message::Attachment>,
     markdown: bool,
     draft_id: Option<i64>,
+    outbox_edit_id: Option<i64>,
 ) -> Result<SendStatus, String> {
     let store = open_store(db_path, secrets)?;
     let account = store
@@ -473,6 +474,12 @@ pub fn run_send(
     // (best-effort; its content lives on in the outbox if queued).
     if let Some(id) = draft_id {
         let _ = store.delete_draft(id);
+    }
+    // Likewise drop the rejected outbox row this send was an edit of (SEND-10 edit). Doing it here,
+    // in the same worker that just enqueued/sent the fresh copy, closes the window where the original
+    // could linger and be retried into a duplicate — the resend replaces it, never doubles it.
+    if let Some(id) = outbox_edit_id {
+        let _ = store.delete_outbox(id);
     }
     Ok(result)
 }

@@ -1243,6 +1243,7 @@ pub fn App() -> impl IntoView {
                 atts,
                 markdown,
                 draft_id,
+                edited,
             )
             .await
             {
@@ -1262,11 +1263,9 @@ pub fn App() -> impl IntoView {
                     if let Some(mid) = replaced {
                         drafts.update(|l| l.retain(|d| !(d.on_server && d.id == mid)));
                     }
-                    // The edited message is now queued (or sent) as a fresh row — drop the original
-                    // rejected one it replaces, so the outbox doesn't hold both.
-                    if let Some(old) = edited {
-                        let _ = api::discard_outbox(old).await;
-                    }
+                    // The original rejected row this send was an edit of is dropped by `run_send`
+                    // itself, in the same worker that enqueued/sent the fresh copy — so the resend
+                    // replaces it atomically, with no window to retry the stale one into a duplicate.
                     commit_pending(); // resolve any queued move before this confirmation toast
                                       // Offline: the message is safe in the outbox and goes out on the next sync.
                     toast.set(Some(if queued {
@@ -1350,6 +1349,7 @@ pub fn App() -> impl IntoView {
         // them, so they're stored with the draft (and the original is taken off the server).
         let atts = attach_paths.get_untracked();
         let replaced = resumed_server.get_untracked();
+        let edited = editing_outbox.get_untracked(); // a rejected send being saved off as a draft
         compose.set(None);
         reset_recipient_inputs();
         let showing_drafts = drafts_open.get_untracked();
@@ -1357,6 +1357,18 @@ pub fn App() -> impl IntoView {
             match api::save_draft(aid, existing, d, atts).await {
                 Ok(_) => {
                     toast.set(Some("Draft saved".into()));
+                    // This was an edit of a rejected outbox message: its content now lives in the
+                    // draft, so drop the outbox row — leaving it would strand a "couldn't send" entry
+                    // for a message that's since become a draft.
+                    if let Some(old) = edited {
+                        if api::discard_outbox(old).await.is_err() {
+                            error.set(Some(
+                                "Draft saved, but the failed message it came from is still in the \
+                                 Outbox — discard it there."
+                                    .to_owned(),
+                            ));
+                        }
+                    }
                     // This draft *was* the provider's: it's ours now, so take the original off the
                     // server — only now that the local save has succeeded, so a failure can never
                     // lose it. (Left there, it would be back in the list as a second row.)

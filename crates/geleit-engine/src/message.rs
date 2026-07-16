@@ -413,11 +413,18 @@ pub struct OutboxEdit {
 }
 
 /// Reconstruct the compose form from a queued message's raw RFC 5322 bytes (SEND-10 edit). We built
-/// these bytes ourselves at enqueue time, so parsing is a faithful inverse: To/Cc come straight from
-/// the headers, the body from the same `text/plain` part the reading pane reads, and attachments from
-/// the same extractor the viewer uses. Threading headers (In-Reply-To/References) are deliberately
-/// dropped — an edited-and-resent message starts a fresh send; it isn't a reply to itself.
+/// these bytes ourselves at enqueue time, so parsing is a faithful inverse: To/Cc are the bare
+/// recipient addresses (as the composer's fields hold them), the body is the `text/plain` part, and
+/// each attachment its name + bytes. Parses the message **once**. Two deliberate lossy points, both
+/// matching how resuming a draft behaves: recipient display names are dropped (the compose field and
+/// the send path speak bare addresses), and a formatted (Markdown/HTML) message comes back as its
+/// plaintext. Threading headers (In-Reply-To/References) are dropped too — an edited-and-resent
+/// message starts a fresh send; it isn't a reply to itself.
 pub fn parse_outbox_for_edit(raw: &[u8]) -> OutboxEdit {
+    use mail_parser::MimeHeaders; // brings `attachment_name` into scope
+    let Some(msg) = mail_parser::MessageParser::default().parse(raw) else {
+        return OutboxEdit::default();
+    };
     let join_addrs = |field: Option<&mail_parser::Address>| {
         field.map_or_else(String::new, |a| {
             a.iter()
@@ -426,27 +433,20 @@ pub fn parse_outbox_for_edit(raw: &[u8]) -> OutboxEdit {
                 .join(", ")
         })
     };
-    let (to, cc, subject) = mail_parser::MessageParser::default()
-        .parse(raw)
-        .map(|msg| {
+    let attachments = msg
+        .attachments()
+        .map(|part| {
             (
-                join_addrs(msg.to()),
-                join_addrs(msg.cc()),
-                msg.subject().unwrap_or_default().to_owned(),
+                part.attachment_name().map(str::to_owned),
+                part.contents().to_vec(),
             )
         })
-        .unwrap_or_default();
-    let body = crate::mime::parse_body(raw).plain.unwrap_or_default();
-    let count = crate::mime::parse_body(raw).attachments.len();
-    let attachments = (0..count)
-        .filter_map(|i| crate::mime::extract_attachment(raw, i))
-        .map(|a| (a.filename, a.data))
         .collect();
     OutboxEdit {
-        to,
-        cc,
-        subject,
-        body,
+        to: join_addrs(msg.to()),
+        cc: join_addrs(msg.cc()),
+        subject: msg.subject().unwrap_or_default().to_owned(),
+        body: msg.body_text(0).map(|c| c.into_owned()).unwrap_or_default(),
         attachments,
     }
 }
