@@ -117,7 +117,9 @@ moving, and Undo.
 
 ## Getting new mail
 
-**GeleitMail checks for new mail on its own**, every few minutes, for every account you've added. New
+**GeleitMail checks for new mail on its own**, and with most providers it arrives **within seconds** —
+GeleitMail keeps a live connection open and the server tells it the moment something lands. If your
+provider doesn't support that, it checks every few minutes instead. Either way, new
 messages simply appear in the list with their unread dot — nothing jumps, nothing interrupts you, and
 whatever you were doing (reading, searching, writing) is left alone. If your machine is asleep or
 offline, it quietly tries again later rather than complaining at you.
@@ -126,8 +128,8 @@ offline, it quietly tries again later rather than complaining at you.
 
 When mail arrives, GeleitMail shows a quiet **desktop notification** — the sender and the subject, so
 you can tell at a glance whether to put your coffee down. It's on by default; turn it off in
-**Settings → Notifications**. (GeleitMail checks for mail every few minutes, so a notification can lag
-the message by that much. Choose **Refresh** if you want to know *now*.)
+**Settings → Notifications**. (New mail usually arrives within seconds; on a provider without live
+updates it can lag by a few minutes, and **Refresh** always checks right now.)
 
 Because a notification shows the sender and the subject, your desktop may put them on the **lock
 screen**. If you'd rather it didn't, that's a setting your system provides for each app — GeleitMail

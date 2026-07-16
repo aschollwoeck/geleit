@@ -51,6 +51,8 @@ pub enum ImapError {
     Secret(#[from] SecretError),
     #[error("store error: {0}")]
     Store(#[from] StoreError),
+    #[error("the server doesn't support IMAP IDLE")]
+    IdleUnsupported,
 }
 
 /// What one incremental sync of a folder turned up (NOTIF-1).
@@ -144,6 +146,79 @@ pub fn special_use_role(attributes: &[NameAttribute<'_>]) -> Option<FolderRole> 
         })
         .collect();
     geleit_core::pick_role(&roles)
+}
+
+/// Watch the INBOX for new mail with IMAP IDLE (RFC 2177), calling `on_activity` the instant the server
+/// pushes something — so mail is noticed in seconds, not on the next poll.
+///
+/// Holds **one** connection: it re-IDLEs on the 28-minute timeout (under RFC 2177's 29-minute limit)
+/// rather than reconnecting, and only returns on a connection error (so the caller can reconnect with
+/// backoff) or [`ImapError::IdleUnsupported`] (so the caller stops trying IDLE and leans on polling).
+/// `on_activity` is deliberately tiny — it just wakes the existing sync scheduler, which does the
+/// actual fetch/notify/badge — so IDLE is a low-latency *trigger*, not a second sync path.
+pub async fn idle_watch(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    on_activity: &(dyn Fn() + Send + Sync),
+) -> Result<std::convert::Infallible, ImapError> {
+    use async_imap::extensions::idle::IdleResponse;
+    use std::time::Duration;
+
+    // Every command has a ceiling, so a **half-open** connection (a slept laptop, a NAT that dropped the
+    // flow without a RST) surfaces as an error and the caller reconnects — rather than the read blocking
+    // forever and the watcher hanging silently. A long-lived IDLE connection meets this far more often
+    // than the short per-op connections elsewhere.
+    const OP_TIMEOUT: Duration = Duration::from_secs(60);
+    // Re-IDLE on this **wall clock**, under RFC 2177's 29-minute cap. It has to be an outer timer, not
+    // the library's `wait_with_timeout`: that one resets on every server keepalive (`* OK Still here`),
+    // so on a chatty server it would never elapse and we'd never re-IDLE.
+    const REIDLE: Duration = Duration::from_secs(28 * 60);
+
+    let timed = |label: &'static str| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("IMAP {label} timed out"),
+        )
+    };
+
+    let mut session = connect(config, secrets).await?;
+    let caps = tokio::time::timeout(OP_TIMEOUT, session.capabilities())
+        .await
+        .map_err(|_| timed("CAPABILITY"))??;
+    if !caps.has_str("IDLE") {
+        let _ = session.logout().await;
+        return Err(ImapError::IdleUnsupported);
+    }
+    tokio::time::timeout(OP_TIMEOUT, session.select(folder))
+        .await
+        .map_err(|_| timed("SELECT"))??;
+
+    loop {
+        let mut handle = session.idle();
+        tokio::time::timeout(OP_TIMEOUT, handle.init())
+            .await
+            .map_err(|_| timed("IDLE"))??;
+
+        // Race the server push against our own wall-clock re-IDLE timer.
+        let (idle_fut, _stop) = handle.wait_with_timeout(REIDLE);
+        let response = match tokio::time::timeout(REIDLE, idle_fut).await {
+            Ok(res) => res?,
+            Err(_) => IdleResponse::Timeout, // wall-clock elapsed → re-IDLE
+        };
+        // Close IDLE cleanly and take the session back for the next round — bounded, so a dead
+        // connection can't hang here either.
+        session = tokio::time::timeout(OP_TIMEOUT, handle.done())
+            .await
+            .map_err(|_| timed("DONE"))??;
+
+        match response {
+            // The server pushed something — new mail, a flag change. Wake the scheduler to sync now.
+            IdleResponse::NewData(_) => on_activity(),
+            // Nothing to report (a timeout / our re-IDLE) — just IDLE again on the same connection.
+            IdleResponse::Timeout | IdleResponse::ManualInterrupt => {}
+        }
+    }
 }
 
 /// Connect, list folders, and log out. Returns each folder's name and the role the server gave it.
@@ -1677,6 +1752,79 @@ mod tests {
         );
 
         let _ = delete_folder(&cfg, &secrets, &folder).await;
+    }
+
+    /// IDLE notices new mail within seconds (RFC 2177), end to end against Dovecot: watch a folder,
+    /// deliver a message from a *second* connection, and the watcher's `on_activity` fires.
+    #[cfg(feature = "dangerous-tls")]
+    #[tokio::test]
+    #[ignore = "requires local Dovecot with the geleittest user + --features dangerous-tls"]
+    async fn idle_wakes_within_seconds_when_mail_arrives() {
+        use std::sync::Arc;
+        let secrets = Arc::new(InMemorySecretStore::new());
+        secrets
+            .set(SECRET_SERVICE, "geleittest", b"testpass123")
+            .unwrap();
+        let cfg = ImapConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 993,
+            username: "geleittest".to_owned(),
+            allow_invalid_certs: true,
+        };
+        let folder = format!("GeleitIdle{}", std::process::id());
+        let _ = delete_folder(&cfg, &*secrets, &folder).await;
+        create_folder(&cfg, &*secrets, &folder)
+            .await
+            .expect("create");
+
+        // A Notify the watcher pokes on activity — the exact shape the app uses (it wakes the scheduler).
+        let woke = Arc::new(tokio::sync::Notify::new());
+        let woke2 = woke.clone();
+        let on_activity = move || woke2.notify_waiters();
+
+        let (cfg2, secrets2, folder2) = (cfg.clone(), Arc::clone(&secrets), folder.clone());
+        let watcher = tokio::spawn(async move {
+            let _ = idle_watch(&cfg2, &*secrets2, &folder2, &on_activity).await;
+        });
+
+        // Give IDLE a moment to establish, then deliver mail from another connection.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        append_message(
+            &cfg,
+            &*secrets,
+            &folder,
+            "()",
+            b"Subject: pushed\r\nFrom: A <a@example.com>\r\n\r\nBody.\r\n",
+        )
+        .await
+        .expect("append");
+
+        // The watcher must wake almost immediately — well under the 28-minute re-IDLE, and under the
+        // 5-minute poll it exists to beat.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(10), woke.notified())
+            .await
+            .is_ok();
+        assert!(first, "IDLE must notice the first message within seconds");
+
+        // …and it must **re-IDLE**: a second message has to wake it too, or the loop stopped after one.
+        append_message(
+            &cfg,
+            &*secrets,
+            &folder,
+            "()",
+            b"Subject: pushed again\r\nFrom: A <a@example.com>\r\n\r\nMore.\r\n",
+        )
+        .await
+        .expect("append 2");
+        let second = tokio::time::timeout(std::time::Duration::from_secs(10), woke.notified())
+            .await
+            .is_ok();
+        watcher.abort();
+        let _ = delete_folder(&cfg, &*secrets, &folder).await;
+        assert!(
+            second,
+            "IDLE must keep watching — a second message wakes it too (it re-IDLEs)"
+        );
     }
 
     /// A read made **here** that the server hasn't confirmed must NOT be reverted by the flag pull

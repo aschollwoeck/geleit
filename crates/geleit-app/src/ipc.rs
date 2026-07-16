@@ -2125,7 +2125,7 @@ pub async fn refresh(
     // That worked, so we're online — which is the one thing the background scheduler can't know while
     // it sits in a backed-off sleep. Wake it: it resets and sweeps the other accounts at once, rather
     // than leaving their mail up to half an hour stale after a laptop comes back from a night off.
-    st.wake_sync().notify_waiters();
+    st.wake_sync().notify_one(); // stored permit: never lost, even if the scheduler is mid-sweep
 
     // Phase 2 — backfill older mail in the background, streaming progress. Detached: it may outlive
     // the command, and the UI shouldn't wait on it.
