@@ -12,3 +12,4 @@ pub mod oauth;
 pub mod os_notify;
 pub mod os_secret;
 pub mod secret;
+pub mod tray;
