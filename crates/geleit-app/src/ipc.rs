@@ -1217,6 +1217,276 @@ pub(crate) async fn resurface_snoozes(state: &AppState) -> usize {
     .unwrap_or(0)
 }
 
+// --- Rules / filters (ORG-8) ----------------------------------------------------------------------
+
+/// Current unix time in seconds (for a rule's `created_at`). Saturates to 0 before the epoch.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// What happened to a matched message's move.
+enum MoveOutcome {
+    /// Moved on the server and dropped locally — it left the inbox.
+    Moved,
+    /// The move can't apply (target folder gone, or no server location): treat as done, don't retry.
+    Unappliable,
+    /// A network failure: leave `filtered = 0` so the next sweep retries.
+    Retry,
+}
+
+/// Apply an account's rules to its INBOX mail awaiting a pass (ORG-8). First-match-wins per message;
+/// flag actions are local writes + the SYNC-5 write-back queue, a move is server-first then the local
+/// row is dropped. A message is marked `filtered` only once its actions land — a move that fails offline
+/// stays unfiltered so the next sweep retries (re-applying idempotent flag actions is harmless). Returns
+/// how many messages a rule acted on. Runs on the worker path (the move is network); called by the
+/// scheduler after each INBOX sync and by **Run on inbox now**.
+pub(crate) async fn apply_rules(state: &AppState, account_id: i64) -> usize {
+    // Compute the match plan under one store read: (message id, the rule it matched, if any).
+    let plan: Vec<(i64, Option<geleit_store::Rule>)> = with_store(state.clone(), move |store| {
+        let rules = store.list_rules(account_id).unwrap_or_default();
+        let msgs = store.unfiltered_inbox(account_id).unwrap_or_default();
+        Ok(msgs
+            .into_iter()
+            .map(|m| {
+                let matched = rules
+                    .iter()
+                    .find(|r| {
+                        geleit_core::rule::RuleField::from_key(&r.field).is_some_and(|f| {
+                            geleit_core::rule::matches(
+                                f,
+                                &r.pattern,
+                                m.from_name.as_deref(),
+                                m.from_addr.as_deref(),
+                                m.subject.as_deref(),
+                                m.to_addrs.as_deref(),
+                            )
+                        })
+                    })
+                    .cloned();
+                (m.id, matched)
+            })
+            .collect())
+    })
+    .await
+    .unwrap_or_default();
+
+    // Pass 1 — apply every matched flag action locally (mark-read / star), across all messages.
+    let mut flagged = false;
+    for (id, matched) in &plan {
+        if let Some(rule) = matched {
+            if rule.mark_read || rule.star {
+                let (id, mark_read, star) = (*id, rule.mark_read, rule.star);
+                let _ = with_store(state.clone(), move |store| {
+                    if mark_read {
+                        let _ = store.set_seen(id, true);
+                    }
+                    if star {
+                        let _ = store.set_flagged(id, true);
+                    }
+                    Ok(())
+                })
+                .await;
+                flagged = true;
+            }
+        }
+    }
+
+    // Push those flags to the server **now**, before any move below — an IMAP MOVE carries the
+    // message's current flags, so `\Seen`/`\Flagged` must be on the server copy *first* or a
+    // "move + mark read" rule would file the message still unread (and deleting the moved row would
+    // drop the deferred write-back with it). Synchronous + best-effort: offline it fails and the
+    // ordinary SYNC-5 write-back queue pushes the flags on a later sweep instead.
+    if flagged {
+        let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            geleit_engine::sync_actions::run_flush_flags(&db, &*secrets, account_id)
+        })
+        .await;
+    }
+
+    // Pass 2 — moves (now the server copy carries the right flags), then mark the rest done.
+    let mut acted = 0usize;
+    for (id, matched) in plan {
+        let Some(rule) = matched else {
+            // No rule matched — it's been evaluated; don't look at it again.
+            let _ = with_store(state.clone(), move |store| {
+                store.mark_filtered(id).map_err(|_| String::new())
+            })
+            .await;
+            continue;
+        };
+        let flagged_this = rule.mark_read || rule.star;
+
+        if let Some(folder) = rule.target_folder.clone() {
+            match rule_move(state, account_id, id, folder).await {
+                MoveOutcome::Moved => {
+                    // Mark filtered *and* drop the local row: if the delete somehow fails, the
+                    // `filtered = 1` still stops the message looping (the next real sync reconciles the
+                    // now-moved UID away), rather than retrying a move against a UID that's gone.
+                    let _ = with_store(state.clone(), move |store| {
+                        let _ = store.mark_filtered(id);
+                        store.delete_message(id).map_err(|_| String::new())
+                    })
+                    .await;
+                    acted += 1;
+                }
+                // Can't apply the move (folder gone / already there) — flags may have applied; mark it
+                // done so it doesn't loop forever.
+                MoveOutcome::Unappliable => {
+                    let _ = with_store(state.clone(), move |store| {
+                        store.mark_filtered(id).map_err(|_| String::new())
+                    })
+                    .await;
+                    acted += 1;
+                }
+                // Network failure — leave it unfiltered; the next sweep retries the move. The flags
+                // already applied, so still count it as a visible change (the list must re-list).
+                MoveOutcome::Retry => {
+                    if flagged_this {
+                        acted += 1;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // A flag-only rule: flags are applied + pushed above; mark it done.
+        let _ = with_store(state.clone(), move |store| {
+            store.mark_filtered(id).map_err(|_| String::new())
+        })
+        .await;
+        acted += 1;
+    }
+    acted
+}
+
+/// Move one matched message into `folder` on the server (ORG-8), the same server-first path as
+/// `move_to_folder`. The caller drops the local row on [`MoveOutcome::Moved`].
+async fn rule_move(state: &AppState, account_id: i64, id: i64, folder: String) -> MoveOutcome {
+    let target = folder.clone();
+    // Resolve the server location and confirm the target is a real folder of this account.
+    let plan = with_store(state.clone(), move |store| {
+        let Some((source, uid)) = store.message_location(id).ok().flatten() else {
+            return Ok(None);
+        };
+        let known = store
+            .folders_for_account(account_id)
+            .map(|fs| fs.into_iter().any(|f| f.name == target))
+            .unwrap_or(false);
+        if !known || target == source {
+            return Ok(None);
+        }
+        Ok(Some((source, uid)))
+    })
+    .await
+    .unwrap_or(None);
+    let Some((source, uid)) = plan else {
+        return MoveOutcome::Unappliable; // folder gone, or already there / no server copy
+    };
+    let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
+    let moved = tauri::async_runtime::spawn_blocking(move || {
+        geleit_engine::sync_actions::run_move(
+            &db, &*secrets, account_id, &source, uid as u32, &folder,
+        )
+    })
+    .await;
+    match moved {
+        Ok(Ok(())) => MoveOutcome::Moved,
+        _ => MoveOutcome::Retry, // network/server failure — retry next sweep
+    }
+}
+
+/// An account's rules, in evaluation order (ORG-8).
+#[tauri::command]
+pub async fn list_rules(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+) -> Result<Vec<crate::dto::RuleDto>, String> {
+    with_store(state.inner().clone(), move |store| {
+        Ok(store
+            .list_rules(account_id)
+            .map_err(|_| "Couldn't read your rules.".to_owned())?
+            .into_iter()
+            .map(crate::dto::rule_dto)
+            .collect())
+    })
+    .await
+}
+
+/// Add a rule (ORG-8). Validates the field, a non-empty pattern, and at least one action.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn add_rule(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+    field: String,
+    pattern: String,
+    target_folder: Option<String>,
+    mark_read: bool,
+    star: bool,
+) -> Result<i64, String> {
+    if geleit_core::rule::RuleField::from_key(&field).is_none() {
+        return Err("Pick what the rule looks at.".to_owned());
+    }
+    if pattern.trim().is_empty() {
+        return Err("Type the text the rule should match.".to_owned());
+    }
+    let folder = target_folder.filter(|f| !f.trim().is_empty());
+    if folder.is_none() && !mark_read && !star {
+        return Err("Choose at least one thing for the rule to do.".to_owned());
+    }
+    with_store(state.inner().clone(), move |store| {
+        store
+            .add_rule(
+                account_id,
+                &field,
+                pattern.trim(),
+                folder.as_deref(),
+                mark_read,
+                star,
+                now_secs(),
+            )
+            .map_err(|_| "Couldn't save the rule.".to_owned())
+    })
+    .await
+}
+
+/// Delete a rule (ORG-8).
+#[tauri::command]
+pub async fn delete_rule(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    with_store(state.inner().clone(), move |store| {
+        store
+            .delete_rule(id)
+            .map_err(|_| "Couldn't delete that rule.".to_owned())
+    })
+    .await
+}
+
+/// **Run on inbox now** (ORG-8): re-arm the whole INBOX for a rule pass and apply the rules to it, so a
+/// rule the user just added tidies the mail already sitting there. Returns how many messages it acted on.
+#[tauri::command]
+pub async fn run_rules_now(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+) -> Result<i64, String> {
+    let st = state.inner().clone();
+    with_store(st.clone(), move |store| {
+        store
+            .reset_inbox_filtered(account_id)
+            .map(|_| ())
+            .map_err(|_| "Couldn't run your rules.".to_owned())
+    })
+    .await?;
+    let acted = apply_rules(&st, account_id).await;
+    // A rule may have marked mail read or moved it out of the inbox — the badge could have moved.
+    set_badge(&app, &st).await;
+    Ok(acted as i64)
+}
+
 /// Drain an account's outbox — a worker-awaited version for the scheduler and Refresh (SEND-10).
 ///
 /// Single-flight per account: if a drain is already running (a sweep and a Refresh overlapping), this

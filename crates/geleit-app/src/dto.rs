@@ -487,6 +487,30 @@ pub struct SnoozePresetDto {
     pub at: i64,
 }
 
+/// One mail rule as the Rules screen shows it (ORG-8).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RuleDto {
+    pub id: i64,
+    /// `from` / `subject` / `to`.
+    pub field: String,
+    pub pattern: String,
+    pub target_folder: Option<String>,
+    pub mark_read: bool,
+    pub star: bool,
+}
+
+#[must_use]
+pub fn rule_dto(r: geleit_store::Rule) -> RuleDto {
+    RuleDto {
+        id: r.id,
+        field: r.field,
+        pattern: r.pattern,
+        target_folder: r.target_folder,
+        mark_read: r.mark_read,
+        star: r.star,
+    }
+}
+
 /// A message with no subject still needs a readable row. Pure — unit-tested.
 #[must_use]
 pub fn display_subject(subject: Option<&str>) -> String {

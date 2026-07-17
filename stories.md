@@ -62,7 +62,7 @@ P10 each story is covered by **executable acceptance tests** named after its ID
   we never classify mail ourselves).
 - **ORG-6** Create / rename / delete folders.
 - **ORG-7** Select multiple messages and act in bulk.
-- **ORG-8** Auto-sort with rules / filters. `(later)`
+- **ORG-8** Auto-sort with rules / filters. ✅ *(client-side; move/mark-read/star; server-side Sieve is a follow-up)*
 - **ORG-9** Snooze a message. ✅
 
 ## SEARCH — Search

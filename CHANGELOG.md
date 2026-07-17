@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Mail that sorts itself
+- **Rules that auto-sort your inbox.** In **Settings → Rules**, set up *when this, do that*: when a
+  message's **From**, **Subject**, or **To** contains some text, **move it to a folder**, **mark it
+  read**, and/or **star it**. New mail is sorted as it arrives; rules run on your device when GeleitMail
+  checks your mail, and the first rule a message matches wins. Already have a full inbox? **Run on inbox
+  now** applies your rules to what's already there.
+
 ### Your mail is yours
 - **Export a folder to a standard mbox file.** A new **Export** button in the message-list header writes
   the folder you're viewing to a portable `.mbox` file — the format Thunderbird, mutt, `grep`, and every

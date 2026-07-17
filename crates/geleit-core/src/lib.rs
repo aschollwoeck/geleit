@@ -362,3 +362,173 @@ mod tests {
         assert!(!looks_like_email("user name@example.com"));
     }
 }
+
+/// Client-side mail rules (ORG-8): the pure matching that decides whether a rule fires on a message.
+/// The store persists rules and the app applies their actions; this is only the *when-this* half —
+/// UI-agnostic, I/O-free, so it stays fully unit- and mutation-tested.
+pub mod rule {
+    /// The message field a rule's condition tests.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RuleField {
+        /// The sender — matched against **both** the display name and the address, since a user thinks
+        /// of "from Alice" and "from alice@work.com" as the same thing.
+        From,
+        Subject,
+        To,
+    }
+
+    impl RuleField {
+        /// The stable string stored in the database and passed over IPC.
+        #[must_use]
+        pub fn key(self) -> &'static str {
+            match self {
+                RuleField::From => "from",
+                RuleField::Subject => "subject",
+                RuleField::To => "to",
+            }
+        }
+
+        /// Parse the stored key back to a field; `None` for an unknown value (a forward-compat guard).
+        #[must_use]
+        pub fn from_key(key: &str) -> Option<Self> {
+            match key {
+                "from" => Some(RuleField::From),
+                "subject" => Some(RuleField::Subject),
+                "to" => Some(RuleField::To),
+                _ => None,
+            }
+        }
+    }
+
+    /// Does a rule with this `field`/`pattern` match a message with these fields?
+    ///
+    /// Case-insensitive substring: the rule fires when `pattern` appears anywhere in the chosen field.
+    /// An empty pattern never matches (a rule that fired on everything would be a footgun, not a rule).
+    /// `From` succeeds if the text is in the sender's name **or** address.
+    #[must_use]
+    pub fn matches(
+        field: RuleField,
+        pattern: &str,
+        from_name: Option<&str>,
+        from_addr: Option<&str>,
+        subject: Option<&str>,
+        to: Option<&str>,
+    ) -> bool {
+        let needle = pattern.trim().to_lowercase();
+        if needle.is_empty() {
+            return false;
+        }
+        let hay = |s: Option<&str>| s.unwrap_or_default().to_lowercase();
+        match field {
+            RuleField::From => hay(from_name).contains(&needle) || hay(from_addr).contains(&needle),
+            RuleField::Subject => hay(subject).contains(&needle),
+            RuleField::To => hay(to).contains(&needle),
+        }
+    }
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::rule::{matches, RuleField};
+
+    #[test]
+    fn from_matches_name_or_address_case_insensitively() {
+        // name hit
+        assert!(matches(
+            RuleField::From,
+            "alice",
+            Some("Alice Baker"),
+            Some("ab@x.com"),
+            None,
+            None
+        ));
+        // address hit, different case
+        assert!(matches(
+            RuleField::From,
+            "AB@X",
+            Some("Alice Baker"),
+            Some("ab@x.com"),
+            None,
+            None
+        ));
+        // no hit
+        assert!(!matches(
+            RuleField::From,
+            "carol",
+            Some("Alice Baker"),
+            Some("ab@x.com"),
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn subject_and_to_scope_to_their_field() {
+        assert!(matches(
+            RuleField::Subject,
+            "invoice",
+            None,
+            None,
+            Some("Your INVOICE #4821"),
+            None
+        ));
+        assert!(!matches(
+            RuleField::Subject,
+            "invoice",
+            None,
+            None,
+            Some("Lunch?"),
+            None
+        ));
+        assert!(matches(
+            RuleField::To,
+            "team@",
+            None,
+            None,
+            None,
+            Some("team@work.com, me@x.com")
+        ));
+        // a Subject rule must not fire on a From match, and vice versa
+        assert!(!matches(
+            RuleField::Subject,
+            "alice",
+            Some("Alice"),
+            Some("a@x.com"),
+            Some("Hi"),
+            None
+        ));
+    }
+
+    #[test]
+    fn an_empty_or_whitespace_pattern_never_matches() {
+        assert!(!matches(
+            RuleField::Subject,
+            "",
+            None,
+            None,
+            Some("anything"),
+            None
+        ));
+        assert!(!matches(
+            RuleField::Subject,
+            "   ",
+            None,
+            None,
+            Some("anything"),
+            None
+        ));
+    }
+
+    #[test]
+    fn missing_fields_dont_match_and_dont_panic() {
+        assert!(!matches(RuleField::From, "x", None, None, None, None));
+    }
+
+    #[test]
+    fn field_key_roundtrips() {
+        for f in [RuleField::From, RuleField::Subject, RuleField::To] {
+            assert_eq!(RuleField::from_key(f.key()), Some(f));
+        }
+        assert_eq!(RuleField::from_key("bcc"), None);
+    }
+}

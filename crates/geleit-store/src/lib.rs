@@ -270,6 +270,26 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE message ADD COLUMN snoozed_until INTEGER;
     CREATE INDEX message_snoozed ON message(snoozed_until) WHERE snoozed_until IS NOT NULL;
     ",
+    // 21 — client-side rules / filters (ORG-8). A rule is one condition (a field contains some text)
+    // and one or more actions (move to a folder, mark read, star), applied to new INBOX mail as it
+    // syncs. `message.filtered` is the durable 'has a rule pass happened for this message yet?' marker,
+    // the exact shape of `notified` (migration 17): new mail arrives 0 (owed a pass), everything already
+    // here at upgrade is 1 (rules are never applied retroactively — that's opt-in 'Run on inbox now').
+    "
+    CREATE TABLE rule (
+        id            INTEGER PRIMARY KEY,
+        account_id    INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+        field         TEXT NOT NULL,          -- 'from' | 'subject' | 'to'
+        pattern       TEXT NOT NULL,          -- the case-insensitive substring to look for
+        target_folder TEXT,                   -- move here when matched (NULL = don't move)
+        mark_read     INTEGER NOT NULL DEFAULT 0,
+        star          INTEGER NOT NULL DEFAULT 0,
+        position      INTEGER NOT NULL,       -- evaluation order; first match wins
+        created_at    INTEGER NOT NULL
+    );
+    CREATE INDEX rule_account ON rule(account_id, position);
+    ALTER TABLE message ADD COLUMN filtered INTEGER NOT NULL DEFAULT 1;
+    ",
 ];
 
 /// A parsed search query (SEARCH-1/4): an FTS5 `MATCH` string (`None` when there are no full-text
@@ -520,6 +540,30 @@ pub struct SnoozedItem {
     pub subject: Option<String>,
     /// Unix timestamp it resurfaces at.
     pub snoozed_until: i64,
+}
+
+/// A client-side mail rule (ORG-8): one condition, one or more actions. `field` is a
+/// `geleit_core::rule::RuleField` key (`from`/`subject`/`to`); the app matches with `core::rule`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rule {
+    pub id: i64,
+    pub account_id: i64,
+    pub field: String,
+    pub pattern: String,
+    /// Folder name to move a matched message into, or `None` to leave it where it is.
+    pub target_folder: Option<String>,
+    pub mark_read: bool,
+    pub star: bool,
+}
+
+/// One INBOX message awaiting a rule pass (ORG-8) — just the fields a condition can test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnfilteredMessage {
+    pub id: i64,
+    pub from_name: Option<String>,
+    pub from_addr: Option<String>,
+    pub subject: Option<String>,
+    pub to_addrs: Option<String>,
 }
 
 /// One outbox message as the user sees it in the outbox view (SEND-10) — no raw bytes.
@@ -1257,31 +1301,36 @@ impl Store {
         self.conn.execute(
             "INSERT INTO message \
              (account_id, folder_id, uid, message_id, in_reply_to, subject, from_name, from_addr, \
-              to_addrs, cc_addrs, date, seen, flagged, has_attachments, snippet, notified) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
+              to_addrs, cc_addrs, date, seen, flagged, has_attachments, snippet, notified, filtered) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
              ON CONFLICT(account_id, folder_id, uid) DO UPDATE SET \
                message_id = excluded.message_id, in_reply_to = excluded.in_reply_to, \
                subject = excluded.subject, from_name = excluded.from_name, \
                from_addr = excluded.from_addr, to_addrs = excluded.to_addrs, \
                cc_addrs = excluded.cc_addrs, date = excluded.date, seen = excluded.seen",
-            (
+            // `params!` (not a tuple): rusqlite's tuple `Params` impls stop at 16, and this is 17.
+            rusqlite::params![
                 account_id,
                 folder_id,
                 m.uid,
-                &m.message_id,
-                &m.in_reply_to,
-                &m.subject,
-                &m.from_name,
-                &m.from_addr,
-                &m.to_addrs,
-                &m.cc_addrs,
+                m.message_id,
+                m.in_reply_to,
+                m.subject,
+                m.from_name,
+                m.from_addr,
+                m.to_addrs,
+                m.cc_addrs,
                 m.date,
                 m.seen,
                 m.flagged,
                 m.has_attachments,
-                &m.snippet,
+                m.snippet,
                 !m.owed_notification, // the column is `notified` — the same fact, said the other way
-            ),
+                // `filtered`: genuinely-new mail is owed a rule pass (0); backfill/already-here is done
+                // (1) — same signal as `notified`, and, like it, absent from the ON CONFLICT update so a
+                // re-sync never re-filters a message. New rows only, so a rule can't act on a message twice.
+                !m.owed_notification,
+            ],
         )?;
         let id = match m.uid {
             // On conflict the row is UPDATEd (not inserted), so look the id up by its unique key.
@@ -2269,6 +2318,127 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    // --- Rules / filters (ORG-8) ------------------------------------------------------------------
+
+    /// Add a rule for an account (ORG-8). Appended to the end of the account's order (first-match-wins,
+    /// so a new rule is lowest priority). Returns its id.
+    ///
+    /// # Errors
+    /// The insert failing (a corrupt or unreadable database).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_rule(
+        &self,
+        account_id: i64,
+        field: &str,
+        pattern: &str,
+        target_folder: Option<&str>,
+        mark_read: bool,
+        star: bool,
+        created_at: i64,
+    ) -> Result<i64, StoreError> {
+        let position: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM rule WHERE account_id = ?1",
+            [account_id],
+            |r| r.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO rule \
+             (account_id, field, pattern, target_folder, mark_read, star, position, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (
+                account_id,
+                field,
+                pattern,
+                target_folder,
+                mark_read,
+                star,
+                position,
+                created_at,
+            ),
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// An account's rules, in evaluation order (ORG-8).
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn list_rules(&self, account_id: i64) -> Result<Vec<Rule>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, account_id, field, pattern, target_folder, mark_read, star FROM rule \
+             WHERE account_id = ?1 ORDER BY position ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([account_id], |r| {
+            Ok(Rule {
+                id: r.get(0)?,
+                account_id: r.get(1)?,
+                field: r.get(2)?,
+                pattern: r.get(3)?,
+                target_folder: r.get(4)?,
+                mark_read: r.get(5)?,
+                star: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Delete a rule (ORG-8). Idempotent.
+    ///
+    /// # Errors
+    /// The delete failing (a corrupt or unreadable database).
+    pub fn delete_rule(&self, id: i64) -> Result<(), StoreError> {
+        self.conn.execute("DELETE FROM rule WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// The account's INBOX messages still awaiting a rule pass (`filtered = 0`), oldest-first, with the
+    /// fields a rule condition tests (ORG-8).
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn unfiltered_inbox(&self, account_id: i64) -> Result<Vec<UnfilteredMessage>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, m.from_name, m.from_addr, m.subject, m.to_addrs \
+             FROM message m JOIN folder f ON f.id = m.folder_id \
+             WHERE m.account_id = ?1 AND f.name = 'INBOX' COLLATE NOCASE AND m.filtered = 0 \
+             ORDER BY m.id ASC",
+        )?;
+        let rows = stmt.query_map([account_id], |r| {
+            Ok(UnfilteredMessage {
+                id: r.get(0)?,
+                from_name: r.get(1)?,
+                from_addr: r.get(2)?,
+                subject: r.get(3)?,
+                to_addrs: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Mark a message as having had its rule pass (ORG-8): it won't be re-evaluated.
+    ///
+    /// # Errors
+    /// The update failing (a corrupt or unreadable database).
+    pub fn mark_filtered(&self, id: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute("UPDATE message SET filtered = 1 WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Re-arm the account's whole INBOX for a rule pass (**Run on inbox now**, ORG-8): set `filtered = 0`
+    /// on every INBOX message so the next `apply_rules` re-evaluates them all. Returns how many.
+    ///
+    /// # Errors
+    /// The update failing (a corrupt or unreadable database).
+    pub fn reset_inbox_filtered(&self, account_id: i64) -> Result<usize, StoreError> {
+        Ok(self.conn.execute(
+            "UPDATE message SET filtered = 0 \
+             WHERE account_id = ?1 AND folder_id IN \
+               (SELECT id FROM folder WHERE account_id = ?1 AND name = 'INBOX' COLLATE NOCASE)",
+            [account_id],
+        )?)
     }
 
     /// Remove a single message locally (optimistic archive/trash/move; body + attachments cascade).
@@ -3281,6 +3451,85 @@ mod tests {
             3,
             "keep back"
         );
+    }
+
+    #[test]
+    fn rules_crud_and_the_filtered_marker() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@x.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+
+        // Rules keep insertion order (first-match-wins) and round-trip their actions.
+        let r1 = s
+            .add_rule(acc, "from", "newsletter", Some("Reading"), true, false, 10)
+            .unwrap();
+        let r2 = s
+            .add_rule(acc, "subject", "invoice", None, false, true, 20)
+            .unwrap();
+        let rules = s.list_rules(acc).unwrap();
+        assert_eq!(rules.iter().map(|r| r.id).collect::<Vec<_>>(), vec![r1, r2]);
+        assert_eq!(rules[0].field, "from");
+        assert_eq!(rules[0].target_folder.as_deref(), Some("Reading"));
+        assert!(rules[0].mark_read && !rules[0].star);
+        assert_eq!(rules[1].target_folder, None);
+        assert!(!rules[1].mark_read && rules[1].star);
+
+        // A genuinely-new message is owed a rule pass; a backfilled one is not.
+        let fresh = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(1),
+                    from_addr: Some("news@x.com".into()),
+                    subject: Some("Hi".into()),
+                    owed_notification: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let old = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(2),
+                    owed_notification: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let unfiltered: Vec<i64> = s
+            .unfiltered_inbox(acc)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(
+            unfiltered,
+            vec![fresh],
+            "only the new message is owed a pass"
+        );
+
+        // Marking it filtered removes it from the queue.
+        s.mark_filtered(fresh).unwrap();
+        assert!(s.unfiltered_inbox(acc).unwrap().is_empty());
+
+        // "Run on inbox now" re-arms the whole inbox (both messages).
+        assert_eq!(s.reset_inbox_filtered(acc).unwrap(), 2);
+        let requeued: Vec<i64> = s
+            .unfiltered_inbox(acc)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(requeued, vec![fresh, old]);
+
+        // Deleting a rule; the account's rules cascade when the account goes.
+        s.delete_rule(r1).unwrap();
+        assert_eq!(s.list_rules(acc).unwrap().len(), 1);
+        s.delete_account(acc).unwrap();
+        // (a fresh account id would have no rules — the FK cascade cleared them)
     }
 
     #[test]

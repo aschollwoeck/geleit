@@ -88,6 +88,17 @@ pub struct SnoozePreset {
     pub at: i64,
 }
 
+/// One mail rule (mirrors `geleit-app::dto::RuleDto`).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct Rule {
+    pub id: i64,
+    pub field: String,
+    pub pattern: String,
+    pub target_folder: Option<String>,
+    pub mark_read: bool,
+    pub star: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct DraftSummary {
     pub id: i64,
@@ -187,6 +198,16 @@ struct SnoozeArgs {
 struct ExportArgs {
     folder_id: i64,
     folder_name: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AddRuleArgs {
+    account_id: i64,
+    field: String,
+    pattern: String,
+    target_folder: Option<String>,
+    mark_read: bool,
+    star: bool,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -599,6 +620,44 @@ pub async fn unsnooze_message(id: i64) -> Result<(), String> {
 /// The messages still snoozed for an account, soonest-first.
 pub async fn list_snoozed(account_id: i64) -> Result<Vec<SnoozedItem>, String> {
     call("list_snoozed", &AccountArgs { account_id }).await
+}
+
+/// An account's mail rules, in evaluation order (ORG-8).
+pub async fn list_rules(account_id: i64) -> Result<Vec<Rule>, String> {
+    call("list_rules", &AccountArgs { account_id }).await
+}
+
+/// Add a rule; returns its id.
+pub async fn add_rule(
+    account_id: i64,
+    field: String,
+    pattern: String,
+    target_folder: Option<String>,
+    mark_read: bool,
+    star: bool,
+) -> Result<i64, String> {
+    call(
+        "add_rule",
+        &AddRuleArgs {
+            account_id,
+            field,
+            pattern,
+            target_folder,
+            mark_read,
+            star,
+        },
+    )
+    .await
+}
+
+/// Delete a rule.
+pub async fn delete_rule(id: i64) -> Result<(), String> {
+    call("delete_rule", &IdArgs { id }).await
+}
+
+/// Run the account's rules over its whole inbox now (ORG-8); returns how many messages were acted on.
+pub async fn run_rules_now(account_id: i64) -> Result<i64, String> {
+    call("run_rules_now", &AccountArgs { account_id }).await
 }
 
 /// Save (or update) a local draft (with its attachment file paths); returns its id so the composer
