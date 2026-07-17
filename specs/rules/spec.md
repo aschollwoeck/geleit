@@ -41,10 +41,17 @@ what **Run on inbox now** is for, opt-in). After a sync, `apply_rules` walks the
 `filtered = 0` INBOX mail:
 
 - no rule matches → mark it `filtered = 1` (evaluated, don't re-check);
-- a rule matches → apply its flag actions (mark-read / star: local write + the SYNC-5 write-back queue),
-  then its move if any (server-first `run_move`, then drop the local row). Only after the whole action
-  set lands is the message done; a move that fails offline leaves `filtered = 0`, so the next sync
-  retries — and re-applying idempotent flag actions on retry is harmless.
+- a rule matches → apply its flag actions (mark-read / star), then its move if any (server-first
+  `run_move`, then drop the local row). Only after the whole action set lands is the message done; a
+  move that fails offline leaves `filtered = 0`, so the next sync retries — and re-applying idempotent
+  flag actions on retry is harmless.
+
+`apply_rules` runs in **two passes**: it applies every matched flag change locally, **pushes those flags
+to the server** (`run_flush_flags`, synchronous/best-effort), and only *then* does the moves. That order
+is load-bearing: an IMAP `MOVE` carries the message's current flags, so `\Seen`/`\Flagged` must reach the
+server copy *before* the move, or a "move + mark read" rule would file the message still unread — and the
+row's deletion after the move would take the deferred write-back with it. On the `Moved` path the row is
+marked `filtered` *and* deleted, so a delete that somehow fails still can't loop.
 
 `apply_rules` runs on a worker (the move is network); the scheduler calls it each sweep after the INBOX
 sync, and the **Run on inbox now** command (which first resets the inbox to `filtered = 0`) calls the

@@ -1273,8 +1273,42 @@ pub(crate) async fn apply_rules(state: &AppState, account_id: i64) -> usize {
     .await
     .unwrap_or_default();
 
+    // Pass 1 — apply every matched flag action locally (mark-read / star), across all messages.
+    let mut flagged = false;
+    for (id, matched) in &plan {
+        if let Some(rule) = matched {
+            if rule.mark_read || rule.star {
+                let (id, mark_read, star) = (*id, rule.mark_read, rule.star);
+                let _ = with_store(state.clone(), move |store| {
+                    if mark_read {
+                        let _ = store.set_seen(id, true);
+                    }
+                    if star {
+                        let _ = store.set_flagged(id, true);
+                    }
+                    Ok(())
+                })
+                .await;
+                flagged = true;
+            }
+        }
+    }
+
+    // Push those flags to the server **now**, before any move below — an IMAP MOVE carries the
+    // message's current flags, so `\Seen`/`\Flagged` must be on the server copy *first* or a
+    // "move + mark read" rule would file the message still unread (and deleting the moved row would
+    // drop the deferred write-back with it). Synchronous + best-effort: offline it fails and the
+    // ordinary SYNC-5 write-back queue pushes the flags on a later sweep instead.
+    if flagged {
+        let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            geleit_engine::sync_actions::run_flush_flags(&db, &*secrets, account_id)
+        })
+        .await;
+    }
+
+    // Pass 2 — moves (now the server copy carries the right flags), then mark the rest done.
     let mut acted = 0usize;
-    let mut need_flush = false;
     for (id, matched) in plan {
         let Some(rule) = matched else {
             // No rule matched — it's been evaluated; don't look at it again.
@@ -1284,34 +1318,23 @@ pub(crate) async fn apply_rules(state: &AppState, account_id: i64) -> usize {
             .await;
             continue;
         };
+        let flagged_this = rule.mark_read || rule.star;
 
-        // Flag actions first (while the message is still in the inbox). Local write + queued write-back.
-        let (mark_read, star) = (rule.mark_read, rule.star);
-        if mark_read || star {
-            let _ = with_store(state.clone(), move |store| {
-                if mark_read {
-                    let _ = store.set_seen(id, true);
-                }
-                if star {
-                    let _ = store.set_flagged(id, true);
-                }
-                Ok(())
-            })
-            .await;
-            need_flush = true;
-        }
-
-        // Then the move, if any.
         if let Some(folder) = rule.target_folder.clone() {
             match rule_move(state, account_id, id, folder).await {
                 MoveOutcome::Moved => {
+                    // Mark filtered *and* drop the local row: if the delete somehow fails, the
+                    // `filtered = 1` still stops the message looping (the next real sync reconciles the
+                    // now-moved UID away), rather than retrying a move against a UID that's gone.
                     let _ = with_store(state.clone(), move |store| {
+                        let _ = store.mark_filtered(id);
                         store.delete_message(id).map_err(|_| String::new())
                     })
                     .await;
                     acted += 1;
                 }
-                // Can't apply the move — but the flags did apply; mark it done so we don't loop.
+                // Can't apply the move (folder gone / already there) — flags may have applied; mark it
+                // done so it doesn't loop forever.
                 MoveOutcome::Unappliable => {
                     let _ = with_store(state.clone(), move |store| {
                         store.mark_filtered(id).map_err(|_| String::new())
@@ -1319,21 +1342,23 @@ pub(crate) async fn apply_rules(state: &AppState, account_id: i64) -> usize {
                     .await;
                     acted += 1;
                 }
-                // Network failure — leave it unfiltered; the next sweep retries the whole rule.
-                MoveOutcome::Retry => {}
+                // Network failure — leave it unfiltered; the next sweep retries the move. The flags
+                // already applied, so still count it as a visible change (the list must re-list).
+                MoveOutcome::Retry => {
+                    if flagged_this {
+                        acted += 1;
+                    }
+                }
             }
             continue;
         }
 
-        // A flag-only rule: it's handled, mark it done.
+        // A flag-only rule: flags are applied + pushed above; mark it done.
         let _ = with_store(state.clone(), move |store| {
             store.mark_filtered(id).map_err(|_| String::new())
         })
         .await;
         acted += 1;
-    }
-    if need_flush {
-        spawn_flush(state, account_id);
     }
     acted
 }
