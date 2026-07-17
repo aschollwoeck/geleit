@@ -22,9 +22,11 @@ reconstruction that "Save as .eml" (READ) already builds from a stored message, 
   (`From <sender> <asctime>`), then the message with any `From `-at-line-start escaped mboxrd-style
   (`From ` → `>From `, `>From ` → `>>From `, reversibly), then a blank line. Pure — unit- and
   mutation-tested.
-- **App** — `export_folder(account_id, folder_id)`: on a worker, gather each message's header + body,
+- **App** — `export_folder(folder_id, folder_name)`: on a worker, gather each message's header + body,
   build its `.eml` (`message::export_eml`) and mbox record, concatenate, and write to a path from the
-  native save dialog (default name `<FolderName>.mbox`). Returns `false` if the user cancels.
+  native save dialog (default name `<FolderName>.mbox`), via the testable seam `build_folder_mbox`.
+  Returns `None` if the user cancels, `Some(0)` for an empty folder (no dialog), `Some(n)` after writing
+  `n`. A single message that can't be read or rebuilt is skipped, not fatal.
 - **UI** — an **Export** button in the list header, shown only for a real folder view (not
   drafts/outbox/snoozed, not the merged "All inboxes"). A toast confirms *"Exported 42 messages"*.
 

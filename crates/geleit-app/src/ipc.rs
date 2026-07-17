@@ -1944,7 +1944,9 @@ pub async fn export_folder(
     })
     .await?;
     if count == 0 {
-        return Err("This folder has no mail to export.".to_owned());
+        // An empty folder isn't an error — just nothing to write. `Some(0)` lets the UI say so calmly,
+        // and there's no point opening a save dialog for an empty file.
+        return Ok(Some(0));
     }
     tauri::async_runtime::spawn_blocking(move || {
         let Some(path) = pick_save_path(&default_name)? else {
@@ -1960,7 +1962,8 @@ pub async fn export_folder(
 
 /// Build a folder's mbox archive from the store: each message reconstructed to `.eml` and mbox-framed,
 /// oldest-first, snoozed mail included. Returns `(bytes, count)`. Separated from the command so it's
-/// testable without the save dialog. A message that vanished mid-export is skipped, not fatal.
+/// testable without the save dialog. A single message that can't be read or built is **skipped**, not
+/// fatal — one odd message must not cost the user the export of the whole folder.
 fn build_folder_mbox(store: &Store, folder_id: i64) -> Result<(Vec<u8>, i64), String> {
     let ids = store
         .folder_message_ids(folder_id)
@@ -1972,7 +1975,9 @@ fn build_folder_mbox(store: &Store, folder_id: i64) -> Result<(Vec<u8>, i64), St
             continue;
         };
         let body = store.body_for(*id).ok().flatten();
-        let eml = geleit_engine::message::export_eml(&header, body.as_ref())?;
+        let Ok(eml) = geleit_engine::message::export_eml(&header, body.as_ref()) else {
+            continue; // couldn't rebuild this one — skip it rather than abort the whole export
+        };
         let sender = header
             .from_addr
             .as_deref()
