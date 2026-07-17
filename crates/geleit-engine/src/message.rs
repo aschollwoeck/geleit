@@ -356,6 +356,56 @@ pub fn export_eml(
         .map_err(|_| "Couldn't build the .eml file.".to_owned())
 }
 
+/// One **mbox** record (mboxrd) for the message `eml`, ready to concatenate into an archive (SEC-4).
+///
+/// Framing: the `From ` separator line — `From <sender> <when>` — then the message with any body line
+/// that begins `>*From ` escaped by one more `>` (so a line the reader would otherwise mistake for the
+/// next record's separator is neutralised, reversibly — an mboxrd reader strips exactly one `>` back).
+/// A blank line terminates the record. `sender`/`when` are informational; mbox readers key only on the
+/// leading `From `. Pure — unit- and mutation-tested.
+pub fn mbox_entry(sender: &str, when: &str, eml: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(eml.len() + sender.len() + when.len() + 16);
+    out.extend_from_slice(b"From ");
+    out.extend_from_slice(sender.as_bytes());
+    out.push(b' ');
+    out.extend_from_slice(when.as_bytes());
+    out.push(b'\n');
+
+    // Walk the message line by line (a line ending in `\r` under CRLF is fine — we test its start), and
+    // escape each `>*From ` line. Splitting on `\n` keeps the original terminators intact.
+    let mut start = 0;
+    while start <= eml.len() {
+        let (line, had_newline, next) = match eml[start..].iter().position(|&b| b == b'\n') {
+            Some(i) => (&eml[start..start + i], true, start + i + 1),
+            None => (&eml[start..], false, eml.len() + 1),
+        };
+        if mbox_line_needs_escape(line) {
+            out.push(b'>');
+        }
+        out.extend_from_slice(line);
+        if had_newline {
+            out.push(b'\n');
+        }
+        start = next;
+    }
+
+    // A blank line separates one record from the next `From `.
+    if !out.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    out.push(b'\n');
+    out
+}
+
+/// Does this line need mboxrd escaping — optional leading `>`s then `From `?
+fn mbox_line_needs_escape(line: &[u8]) -> bool {
+    let rest = line
+        .iter()
+        .position(|&b| b != b'>')
+        .map_or(line, |i| &line[i..]);
+    rest.starts_with(b"From ")
+}
+
 /// Fields recovered from a `.eml` file when opening one.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ImportedEml {
@@ -587,6 +637,56 @@ mod tests {
         d.to.clear();
         d.cc.clear();
         assert!(build(&d).is_err());
+    }
+
+    #[test]
+    fn mbox_entry_frames_and_escapes_reversibly() {
+        // A body with two lines that mbox must not mistake for record separators.
+        let eml = b"Subject: Hi\r\n\r\nFrom the desk of Alice\r\n>From a quote\r\nplain line\r\n";
+        let rec = mbox_entry("alice@test.local", "Thu Jan  1 00:00:00 1970", eml);
+        let s = String::from_utf8(rec.clone()).unwrap();
+
+        assert!(
+            s.starts_with("From alice@test.local Thu Jan  1 00:00:00 1970\n"),
+            "separator line: {s}"
+        );
+        assert!(
+            s.contains("\r\n>From the desk of Alice\r\n"),
+            "From-line escaped: {s}"
+        );
+        assert!(
+            s.contains("\r\n>>From a quote\r\n"),
+            ">From-line double-escaped: {s}"
+        );
+        assert!(
+            s.contains("\r\nplain line\r\n"),
+            "plain line untouched: {s}"
+        );
+        assert!(rec.ends_with(b"\n\n"), "record ends with a blank line");
+
+        // mboxrd is reversible: drop the separator line, strip one leading `>` from `>*From ` lines,
+        // and the original message bytes come back.
+        let after_sep = &rec[rec.iter().position(|&b| b == b'\n').unwrap() + 1..];
+        let body = &after_sep[..after_sep.len() - 1]; // drop the trailing blank-line `\n`
+        let mut restored = Vec::new();
+        let mut i = 0;
+        while i <= body.len() {
+            let (line, nl, next) = match body[i..].iter().position(|&b| b == b'\n') {
+                Some(p) => (&body[i..i + p], true, i + p + 1),
+                None => (&body[i..], false, body.len() + 1),
+            };
+            // Unescape: a `>` immediately before a `>*From ` sequence is the added one.
+            if line.first() == Some(&b'>') && mbox_line_needs_escape(&line[1..]) {
+                restored.extend_from_slice(&line[1..]);
+            } else {
+                restored.extend_from_slice(line);
+            }
+            if nl {
+                restored.push(b'\n');
+            }
+            i = next;
+        }
+        assert_eq!(restored, eml, "mboxrd round-trips to the original message");
     }
 
     #[test]

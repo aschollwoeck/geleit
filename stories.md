@@ -94,7 +94,7 @@ P10 each story is covered by **executable acceptance tests** named after its ID
 - **SEC-1** Have my mail encrypted at rest, transparently (no master password).
 - **SEC-2** Have credentials / tokens stored in the OS keychain.
 - **SEC-3** Have local data wiped when I remove an account.
-- **SEC-4** Export / back up my mail. `(later)`
+- **SEC-4** Export / back up my mail. ✅ *(per-folder → mbox; attachment bytes + whole-account export are follow-ups)*
 
 ## NOTIF — Notifications `(later)`
 - **NOTIF-1** Get notified of new mail.

@@ -1923,6 +1923,82 @@ pub async fn save_eml(state: tauri::State<'_, AppState>, id: i64) -> Result<bool
     .map_err(|_| "The save task stopped unexpectedly.".to_owned())?
 }
 
+/// Export a folder to an mbox file (SEC-4). Reconstructs each message's `.eml` (as "Save as .eml" does)
+/// and frames it mbox-style, then writes the lot to a path from the native save dialog. Returns the
+/// number written, or `None` if the user cancels. Attachment bytes aren't included — see the spec.
+#[tauri::command]
+pub async fn export_folder(
+    state: tauri::State<'_, AppState>,
+    folder_id: i64,
+    folder_name: String,
+) -> Result<Option<i64>, String> {
+    // Gather + build the whole archive on the store thread. (A big folder's mbox is held in memory here;
+    // export is a deliberate one-off, and a streaming writer is a follow-up if it ever matters.)
+    let (mbox, default_name, count) = with_store(state.inner().clone(), move |store| {
+        let (out, written) = build_folder_mbox(store, folder_id)?;
+        Ok((
+            out,
+            format!("{}.mbox", safe_filename_stem(&folder_name)),
+            written,
+        ))
+    })
+    .await?;
+    if count == 0 {
+        return Err("This folder has no mail to export.".to_owned());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(path) = pick_save_path(&default_name)? else {
+            return Ok(None); // cancelled
+        };
+        std::fs::write(&path, &mbox)
+            .map(|()| Some(count))
+            .map_err(|_| "Couldn't write that file.".to_owned())
+    })
+    .await
+    .map_err(|_| "The export task stopped unexpectedly.".to_owned())?
+}
+
+/// Build a folder's mbox archive from the store: each message reconstructed to `.eml` and mbox-framed,
+/// oldest-first, snoozed mail included. Returns `(bytes, count)`. Separated from the command so it's
+/// testable without the save dialog. A message that vanished mid-export is skipped, not fatal.
+fn build_folder_mbox(store: &Store, folder_id: i64) -> Result<(Vec<u8>, i64), String> {
+    let ids = store
+        .folder_message_ids(folder_id)
+        .map_err(|_| "Couldn't read the folder to export.".to_owned())?;
+    let mut out = Vec::new();
+    let mut written = 0i64;
+    for id in &ids {
+        let Some(header) = store.header_by_id(*id).ok().flatten() else {
+            continue;
+        };
+        let body = store.body_for(*id).ok().flatten();
+        let eml = geleit_engine::message::export_eml(&header, body.as_ref())?;
+        let sender = header
+            .from_addr
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("MAILER-DAEMON");
+        out.extend_from_slice(&geleit_engine::message::mbox_entry(
+            sender,
+            &mbox_when(header.date),
+            &eml,
+        ));
+        written += 1;
+    }
+    Ok((out, written))
+}
+
+/// A message's date as an mbox `From `-line timestamp (asctime, UTC). Informational — mbox readers key
+/// only on the leading `From `.
+fn mbox_when(date: Option<i64>) -> String {
+    date.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+        .map_or_else(
+            || "Thu Jan  1 00:00:00 1970".to_owned(),
+            |d| d.format("%a %b %e %T %Y").to_string(),
+        )
+}
+
 /// Save a message's `index`-th attachment to disk (READ-8). The bytes aren't stored locally, so this
 /// fetches the raw message from the server on demand (`BODY.PEEK[]`), extracts the part, and writes
 /// it via a native save dialog. Returns whether a file was written (`false` = cancelled).
@@ -2457,9 +2533,71 @@ pub async fn dev_folder() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{materialize_draft_attachments, read_attachments, server_drafts, AppState};
+    use super::{
+        build_folder_mbox, materialize_draft_attachments, read_attachments, server_drafts, AppState,
+    };
     use geleit_platform::secret::InMemorySecretStore;
     use geleit_store::{DraftContent, NewMessage, Store};
+
+    #[test]
+    fn build_folder_mbox_frames_oldest_first_and_escapes_bodies() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("me@x.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let m1 = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(1),
+                    date: Some(100),
+                    subject: Some("First".into()),
+                    from_addr: Some("alice@x.com".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.store_body(m1, Some("Hello from Alice."), None, Some("Hello"), false)
+            .unwrap();
+        let m2 = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(2),
+                    date: Some(200),
+                    subject: Some("Second".into()),
+                    from_addr: Some("bob@x.com".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // A body line that begins `From ` — mbox must escape it so it isn't read as a separator.
+        s.store_body(m2, Some("From the desk of Bob."), None, Some("From"), false)
+            .unwrap();
+
+        let (mbox, count) = build_folder_mbox(&s, inbox).unwrap();
+        assert_eq!(count, 2);
+        let text = String::from_utf8(mbox).unwrap();
+
+        // Exactly one `From ` separator per message (line-start; header `From:` has a colon, not a space).
+        let separators = usize::from(text.starts_with("From ")) + text.matches("\nFrom ").count();
+        assert_eq!(separators, 2, "one separator per message:\n{text}");
+        assert!(
+            text.contains("From alice@x.com "),
+            "sender in the separator"
+        );
+        // Oldest-first.
+        assert!(
+            text.find("First").unwrap() < text.find("Second").unwrap(),
+            "oldest-first"
+        );
+        // Bob's body line is escaped, so it can't be mistaken for the next record.
+        assert!(
+            text.contains(">From the desk of Bob."),
+            "body From-line escaped:\n{text}"
+        );
+    }
 
     /// The seam where the real data shapes meet the pure merge: a **namespaced** Drafts folder, read
     /// out of a real store, folded against the drafts we hold. Everything the pure tests can't see —

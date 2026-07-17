@@ -184,6 +184,12 @@ struct SnoozeArgs {
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ExportArgs {
+    folder_id: i64,
+    folder_name: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct OpenArgs {
     id: i64,
     mark_read: bool,
@@ -656,6 +662,18 @@ pub async fn pick_files() -> Result<Vec<String>, String> {
 /// Save an open message to disk as a `.eml`. `Ok(false)` if the user cancelled the save dialog.
 pub async fn save_eml(id: i64) -> Result<bool, String> {
     call("save_eml", &IdArgs { id }).await
+}
+
+/// Export a folder to an mbox file (SEC-4). `Some(count)` written, or `None` if cancelled.
+pub async fn export_folder(folder_id: i64, folder_name: String) -> Result<Option<i64>, String> {
+    call(
+        "export_folder",
+        &ExportArgs {
+            folder_id,
+            folder_name,
+        },
+    )
+    .await
 }
 
 /// Open a `.eml` file into the account's local Saved folder; returns the new message id (or `None`
