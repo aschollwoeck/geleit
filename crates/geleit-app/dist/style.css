@@ -427,6 +427,12 @@ iframe.mail { flex: 1; width: 100%; border: 0; background: #fff; }
 .dialog h2 { font-size: 16px; font-weight: 600; margin: 0; }
 .dialog p { font-size: 13.5px; color: var(--text-muted); margin: 6px 0 0; line-height: 1.5; }
 .dialog .drow { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+.snooze-dialog { width: 320px; }
+.snooze-choices { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.snooze-choice { display: flex; align-items: center; gap: 10px; justify-content: flex-start;
+  text-align: left; width: 100%; }
+.snooze-choice:hover { background: var(--surface-raised); border-color: var(--text-muted); }
+.snooze-choice svg { color: var(--text-muted); flex: 0 0 auto; }
 .btn-danger { background: var(--danger-strong); color: #fff; border: none; border-radius: var(--radius-md); padding: 8px 16px; font-weight: 600; font-size: 13.5px; cursor: pointer; }
 .btn-danger:hover { filter: brightness(.9); }
 

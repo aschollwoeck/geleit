@@ -1124,6 +1124,99 @@ pub async fn edit_outbox(
     .await
 }
 
+// --- Snooze (ORG-9) -------------------------------------------------------------------------------
+
+/// The snooze times to offer, computed in the user's local timezone (ORG-9). Only future ones.
+#[tauri::command]
+pub async fn snooze_presets() -> Result<Vec<crate::dto::SnoozePresetDto>, String> {
+    Ok(crate::snooze::presets(chrono::Local::now())
+        .into_iter()
+        .map(|p| crate::dto::SnoozePresetDto {
+            label: p.label,
+            at: p.at,
+        })
+        .collect())
+}
+
+/// Snooze messages until `until` (a unix timestamp): hide them until then. Refreshes the badge, since a
+/// snoozed unread message stops counting.
+#[tauri::command]
+pub async fn snooze_messages(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    ids: Vec<i64>,
+    until: i64,
+) -> Result<(), String> {
+    let st = state.inner().clone();
+    with_store(st.clone(), move |store| {
+        store
+            .snooze_messages(&ids, until)
+            .map_err(|_| "Couldn't snooze that message.".to_owned())
+    })
+    .await?;
+    set_badge(&app, &st).await;
+    Ok(())
+}
+
+/// Bring a snoozed message back now (ORG-9). Refreshes the badge (it may count again).
+#[tauri::command]
+pub async fn unsnooze_message(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<(), String> {
+    let st = state.inner().clone();
+    with_store(st.clone(), move |store| {
+        store
+            .unsnooze_message(id)
+            .map_err(|_| "Couldn't un-snooze that message.".to_owned())
+    })
+    .await?;
+    set_badge(&app, &st).await;
+    Ok(())
+}
+
+/// The messages still snoozed for an account, soonest-first — for the Snoozed view (ORG-9). Each row's
+/// resurface time is phrased in the user's local timezone here, so the UI just shows it.
+#[tauri::command]
+pub async fn list_snoozed(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+) -> Result<Vec<crate::dto::SnoozedItemDto>, String> {
+    with_store(state.inner().clone(), move |store| {
+        Ok(store
+            .snoozed_messages(account_id)
+            .map_err(|_| "Couldn't read your snoozed mail.".to_owned())?
+            .into_iter()
+            .map(|s| {
+                let when = format_local_when(s.snoozed_until);
+                crate::dto::snoozed_item(s, when)
+            })
+            .collect())
+    })
+    .await
+}
+
+/// Phrase a unix timestamp as a short local-time label for the Snoozed view, e.g. "Tue 21 Jul, 08:00".
+/// Falls back to the raw number only if the timestamp is out of range (never, in practice).
+fn format_local_when(ts: i64) -> String {
+    use chrono::TimeZone;
+    match chrono::Local.timestamp_opt(ts, 0).single() {
+        Some(dt) => dt.format("%a %-d %b, %H:%M").to_string(),
+        None => ts.to_string(),
+    }
+}
+
+/// Resurface any snoozed mail whose time has come (ORG-9), across every account. Returns how many, so
+/// the scheduler knows the list + badge are stale. Local and connectivity-independent.
+pub(crate) async fn resurface_snoozes(state: &AppState) -> usize {
+    with_store(state.clone(), |store| {
+        store.resurface_due_snoozes().map_err(|_| String::new())
+    })
+    .await
+    .unwrap_or(0)
+}
+
 /// Drain an account's outbox — a worker-awaited version for the scheduler and Refresh (SEND-10).
 ///
 /// Single-flight per account: if a drain is already running (a sweep and a Refresh overlapping), this

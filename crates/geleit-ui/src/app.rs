@@ -275,6 +275,11 @@ pub fn App() -> impl IntoView {
     let outbox = RwSignal::new((0i64, 0i64)); // (queued, failed) — the outbox indicator (SEND-10)
     let outbox_open = RwSignal::new(false); // the middle pane shows the outbox instead of a folder
     let outbox_list = RwSignal::new(Vec::<api::OutboxItem>::new());
+    let snoozed_open = RwSignal::new(false); // the middle pane shows snoozed mail instead of a folder
+    let snoozed_list = RwSignal::new(Vec::<api::SnoozedItem>::new());
+    // The snooze preset menu (ORG-9): `Some(ids)` = open for those messages; the presets to offer.
+    let snooze_menu = RwSignal::new(Option::<Vec<i64>>::None);
+    let snooze_presets = RwSignal::new(Vec::<api::SnoozePreset>::new());
     let quiet_on = RwSignal::new(false); // quiet hours: silent, but the mail is still owed a mention
     let quiet_bad = RwSignal::new(false); // a window the host would throw away — tell them, don't store it
     let quiet_from = RwSignal::new("22:00".to_owned());
@@ -366,6 +371,7 @@ pub fn App() -> impl IntoView {
         unified.set(false);
         drafts_open.set(false);
         outbox_open.set(true);
+        snoozed_open.set(false);
         selected.set(HashSet::new());
         selected_folder.set(None);
         open.set(None);
@@ -393,6 +399,79 @@ pub fn App() -> impl IntoView {
             }
             load_outbox(); // reconcile the pane if the discard didn't land
             refresh_outbox();
+        });
+    };
+    // --- Snooze (ORG-9) ---
+    // Load the account's snoozed mail into the pane (snooze is a per-account, local property).
+    let load_snoozed = move || {
+        let Some(aid) = account.get_untracked() else {
+            snoozed_list.set(Vec::new());
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            if let Ok(list) = api::list_snoozed(aid).await {
+                snoozed_list.set(list);
+            }
+        });
+    };
+    // Show the snoozed mail in the middle pane (reached from the "Snoozed" rail entry).
+    let open_snoozed = move || {
+        unified.set(false);
+        drafts_open.set(false);
+        outbox_open.set(false);
+        snoozed_open.set(true);
+        selected.set(HashSet::new());
+        selected_folder.set(None);
+        open.set(None);
+        search_open.set(false);
+        query.set(String::new());
+        acct_menu.set(false);
+        load_snoozed();
+    };
+    // Bring a snoozed message back now: it leaves the Snoozed pane and returns to its folder.
+    let unsnooze_msg = move |id: i64| {
+        snoozed_list.update(|l| l.retain(|s| s.id != id));
+        leptos::task::spawn_local(async move {
+            if let Err(e) = api::unsnooze_message(id).await {
+                error.set(Some(e));
+            }
+        });
+    };
+    // Open the snooze preset menu for a set of messages (the open message, or the bulk selection).
+    let open_snooze_menu = move |ids: Vec<i64>| {
+        if ids.is_empty() {
+            return;
+        }
+        snooze_menu.set(Some(ids));
+        // Presets are relative to now, so refresh them each time the menu opens.
+        leptos::task::spawn_local(async move {
+            if let Ok(p) = api::snooze_presets().await {
+                snooze_presets.set(p);
+            }
+        });
+    };
+    // Snooze the menu's messages until `until`: they leave the list immediately (and the reading pane,
+    // if it was one of them), the menu closes, and a toast confirms with the chosen label.
+    let do_snooze = move |until: i64, label: String| {
+        let Some(ids) = snooze_menu.get_untracked() else {
+            return;
+        };
+        snooze_menu.set(None);
+        let idset: HashSet<i64> = ids.iter().copied().collect();
+        messages.update(|m| m.retain(|msg| !idset.contains(&msg.id)));
+        if open
+            .get_untracked()
+            .map(|b| idset.contains(&b.id))
+            .unwrap_or(false)
+        {
+            open.set(None);
+        }
+        selected.set(HashSet::new());
+        toast.set(Some(format!("Snoozed until {label}")));
+        leptos::task::spawn_local(async move {
+            if let Err(e) = api::snooze_messages(ids, until).await {
+                error.set(Some(e));
+            }
         });
     };
 
@@ -511,6 +590,7 @@ pub fn App() -> impl IntoView {
         unified.set(false);
         drafts_open.set(false);
         outbox_open.set(false);
+        snoozed_open.set(false);
         selected.set(HashSet::new());
         selected_folder.set(Some(id));
         open.set(None);
@@ -533,6 +613,7 @@ pub fn App() -> impl IntoView {
         unified.set(true);
         drafts_open.set(false);
         outbox_open.set(false);
+        snoozed_open.set(false);
         selected.set(HashSet::new());
         acct_menu.set(false);
         selected_folder.set(None);
@@ -908,6 +989,7 @@ pub fn App() -> impl IntoView {
         unified.set(false); // picking a specific account leaves the merged view
         drafts_open.set(false); // and leaves the drafts view (drafts are per-account)
         outbox_open.set(false); // …and the outbox pane, so the rail and the middle pane agree
+        snoozed_open.set(false); // …and the snoozed pane
         selected.set(HashSet::new());
         acct_menu.set(false);
         account.set(Some(aid));
@@ -1286,6 +1368,7 @@ pub fn App() -> impl IntoView {
         unified.set(false);
         drafts_open.set(true);
         outbox_open.set(false);
+        snoozed_open.set(false);
         selected.set(HashSet::new()); // leaving the message list drops any bulk selection
         selected_folder.set(None);
         open.set(None);
@@ -1452,6 +1535,7 @@ pub fn App() -> impl IntoView {
                     attach_paths.set(attachments);
                     editing_outbox.set(Some(id));
                     outbox_open.set(false); // leave the outbox pane for the composer
+                    snoozed_open.set(false);
                 }
                 Ok(None) => {
                     load_outbox(); // it's gone (sent or discarded elsewhere) — refresh the pane
@@ -1987,8 +2071,8 @@ pub fn App() -> impl IntoView {
     // rank order, not date order), then emitted as a flat header/message stream for a single keyed
     // `<For>`. Keys are unique and stable: `h:<label>` for a header, `m:<id>` for a message.
     let rows = move || {
-        if drafts_open.get() || outbox_open.get() {
-            return Vec::new(); // the drafts / outbox panes render their own rows
+        if drafts_open.get() || outbox_open.get() || snoozed_open.get() {
+            return Vec::new(); // the drafts / outbox / snoozed panes render their own rows
         }
         let hidden = pending.get().map(|p| p.ids).unwrap_or_default();
         let mut buckets: [(&'static str, Vec<Message>); 3] = [
@@ -2165,6 +2249,12 @@ pub fn App() -> impl IntoView {
                             <span class="fic">{icon(icons::DRAFTS)}</span>
                             "Drafts"
                         </button>
+                        <button class="folder" class:active=move || snoozed_open.get()
+                            on:click=move |_| open_snoozed()>
+                            <span class="guide"></span>
+                            <span class="fic">{icon(icons::SNOOZE)}</span>
+                            "Snoozed"
+                        </button>
                         <button class="folder newfolder" on:click=move |_| folder_form.set(Some(FolderForm { rename_from: None, name: String::new() }))>
                             <span class="guide"></span>
                             <span class="fic">{icon(icons::PLUS)}</span>
@@ -2186,11 +2276,15 @@ pub fn App() -> impl IntoView {
             // ============ LIST ============
             <div class="list-col">
                 <div class="list-head">
-                    <div class="list-title">{move || if outbox_open.get() { "Outbox".to_string() } else if drafts_open.get() { "Drafts".to_string() } else if unified.get() { "All inboxes".to_string() } else { folders.get().into_iter().find(|f| selected_folder.get() == Some(f.id)).map(|f| f.name).unwrap_or_default() }}</div>
+                    <div class="list-title">{move || if outbox_open.get() { "Outbox".to_string() } else if snoozed_open.get() { "Snoozed".to_string() } else if drafts_open.get() { "Drafts".to_string() } else if unified.get() { "All inboxes".to_string() } else { folders.get().into_iter().find(|f| selected_folder.get() == Some(f.id)).map(|f| f.name).unwrap_or_default() }}</div>
                     <div class="list-sub">{move || {
                         if outbox_open.get() {
                             let n = outbox_list.get().len();
                             return if n == 1 { "1 message".to_owned() } else if n > 0 { format!("{n} messages") } else { String::new() };
+                        }
+                        if snoozed_open.get() {
+                            let n = snoozed_list.get().len();
+                            return match n { 0 => String::new(), 1 => "1 message".to_owned(), n => format!("{n} messages") };
                         }
                         if drafts_open.get() {
                             let n = drafts.get().len();
@@ -2208,7 +2302,7 @@ pub fn App() -> impl IntoView {
                         <Show when=in_trash>
                             <span class="icon-btn danger" title="Empty Trash" on:click=move |_| trash_ask.set(Some(TrashAsk::Empty))>{icon(icons::TRASH)}</span>
                         </Show>
-                        <Show when=move || { !drafts_open.get() && !outbox_open.get() }>
+                        <Show when=move || { !drafts_open.get() && !outbox_open.get() && !snoozed_open.get() }>
                             <span class="icon-btn" class:on=move || search_open.get() title="Search" on:click=move |_| search_open.update(|o| *o = !*o)>{icon(icons::SEARCH)}</span>
                         </Show>
                         <span class="icon-btn" title="Refresh"
@@ -2237,6 +2331,7 @@ pub fn App() -> impl IntoView {
                         <span class="icon-btn danger" title="Delete" on:click=move |_| bulk_move("trash", "deleted")>{icon(icons::TRASH)}</span>
                         <span class="icon-btn" title="Mark read" on:click=move |_| bulk_mark_read()>{icon(icons::MAILOPEN)}</span>
                         <span class="icon-btn" title="Mark unread" on:click=move |_| bulk_mark_unread()>{icon(icons::UNREAD)}</span>
+                        <span class="icon-btn" title="Snooze" on:click=move |_| open_snooze_menu(selected.get_untracked().into_iter().collect())>{icon(icons::SNOOZE)}</span>
                         <span class="icon-btn" title="Clear selection" on:click=move |_| { selected.set(HashSet::new()); select_anchor.set(None); }>{icon(icons::CLOSE)}</span>
                     </div>
                 </Show>
@@ -2266,7 +2361,7 @@ pub fn App() -> impl IntoView {
                     </div>
                 </Show>
                 <div class="list-scroll" class:selecting=move || !selected.get().is_empty()>
-                    <Show when=move || !drafts_open.get() && loaded.get() && messages.get().is_empty() && error.get().is_none()>
+                    <Show when=move || !drafts_open.get() && !outbox_open.get() && !snoozed_open.get() && loaded.get() && messages.get().is_empty() && error.get().is_none()>
                         <div class="list-empty">
                             <Show when=move || account.get().is_none() fallback=|| view! { <div class="big">"✓"</div><div class="msg">"Nothing here."</div> }>
                                 <div class="msg">"No account yet."</div>
@@ -2341,6 +2436,32 @@ pub fn App() -> impl IntoView {
                                                 <button class="btn-ghost small" on:click=move |_| edit_outbox_msg(id)>"Edit"</button>
                                             </Show>
                                             <button class="btn-ghost small danger" on:click=move |_| discard_outbox_msg(id)>"Discard"</button>
+                                        </div>
+                                    </div>
+                                }
+                            }
+                        </For>
+                    </Show>
+                    <Show when=move || { snoozed_open.get() && snoozed_list.get().is_empty() }>
+                        <div class="list-empty"><div class="msg">"Nothing snoozed."</div></div>
+                    </Show>
+                    <Show when=move || snoozed_open.get()>
+                        <For each=move || snoozed_list.get() key=|s| (s.id, s.when.clone()) let:s>
+                            {
+                                let id = s.id;
+                                let from = if s.from.trim().is_empty() { "(unknown sender)".to_owned() } else { s.from.clone() };
+                                let subject = s.subject.clone();
+                                let when = s.when.clone();
+                                view! {
+                                    <div class="row outbox-row">
+                                        <span class="guide"></span>
+                                        <div class="row-top">
+                                            <span class="sender">{from}</span>
+                                            <span class="time">{format!("↩ {when}")}</span>
+                                        </div>
+                                        <div class="subj">{subject}</div>
+                                        <div class="outbox-actions">
+                                            <button class="btn-ghost small" on:click=move |_| unsnooze_msg(id)>"Un-snooze"</button>
                                         </div>
                                     </div>
                                 }
@@ -2432,6 +2553,7 @@ pub fn App() -> impl IntoView {
                                         <span class="act" on:click=move |_| compose_from_open("reply_all")>{icon(icons::REPLY_ALL)} "Reply all"</span>
                                         <span class="act" on:click=move |_| compose_from_open("forward")>{icon(icons::FORWARD)} "Forward"</span>
                                         <span class="act" on:click=move |_| move_open("archive", "Archived")>{icon(icons::ARCHIVE)} "Archive"</span>
+                                        <span class="act" on:click=move |_| open_snooze_menu(vec![id])>{icon(icons::SNOOZE)} "Snooze"</span>
                                         <span class="act" on:click=move |_| move_menu.update(|o| *o = !*o)>{icon(icons::MOVE)} "Move"</span>
                                         <span class="act danger" on:click=move |_| { if in_trash() { trash_ask.set(Some(TrashAsk::DeleteOne(id))); } else { move_open("trash", "Deleted"); } }>{icon(icons::TRASH)} {move || if in_trash() { "Delete forever" } else { "Delete" }}</span>
                                         <span class="act" on:click=move |_| mark_unread()>{icon(icons::UNREAD)} "Unread"</span>
@@ -2808,6 +2930,31 @@ pub fn App() -> impl IntoView {
                         <div class="drow">
                             <button class="btn-ghost" on:click=move |_| formatted_ask.set(None)>"Cancel"</button>
                             <button class="btn" on:click=move |_| { if let Some(id) = formatted_ask.get() { resume_server_draft(id); } }>"Continue"</button>
+                        </div>
+                    </div>
+                </div>
+            </Show>
+
+            <Show when=move || snooze_menu.get().is_some()>
+                <div class="scrim" on:click=move |_| snooze_menu.set(None)>
+                    <div class="window dialog snooze-dialog" on:click=move |e| e.stop_propagation()>
+                        <h2>"Snooze until…"</h2>
+                        <div class="snooze-choices">
+                            <For each=move || snooze_presets.get() key=|p| p.label.clone() let:p>
+                                {
+                                    let (at, label) = (p.at, p.label.clone());
+                                    let shown = p.label.clone();
+                                    view! {
+                                        <button class="btn-ghost snooze-choice"
+                                            on:click=move |_| do_snooze(at, label.clone())>
+                                            {icon(icons::SNOOZE)} {shown}
+                                        </button>
+                                    }
+                                }
+                            </For>
+                        </div>
+                        <div class="drow">
+                            <button class="btn-ghost" on:click=move |_| snooze_menu.set(None)>"Cancel"</button>
                         </div>
                     </div>
                 </div>

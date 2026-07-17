@@ -71,6 +71,23 @@ pub struct OutboxItem {
     pub error: String,
 }
 
+/// A snoozed message row (mirrors `geleit-app::dto::SnoozedItemDto`).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SnoozedItem {
+    pub id: i64,
+    pub from: String,
+    pub subject: String,
+    /// Local-time phrasing of when it comes back (e.g. "Tue 21 Jul, 08:00").
+    pub when: String,
+}
+
+/// One offered snooze time (mirrors `geleit-app::dto::SnoozePresetDto`).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SnoozePreset {
+    pub label: String,
+    pub at: i64,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct DraftSummary {
     pub id: i64,
@@ -158,6 +175,12 @@ struct QueryArg {
 #[serde(rename_all = "camelCase")]
 struct IdArgs {
     id: i64,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnoozeArgs {
+    ids: Vec<i64>,
+    until: i64,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -550,6 +573,26 @@ pub async fn discard_outbox(id: i64) -> Result<(), String> {
 /// outbox row stays until the edited message is sent, so cancelling loses nothing.
 pub async fn edit_outbox(id: i64) -> Result<Option<ResumedDraft>, String> {
     call("edit_outbox", &IdArgs { id }).await
+}
+
+/// The snooze times to offer (ORG-9), computed in the user's local timezone; only future ones.
+pub async fn snooze_presets() -> Result<Vec<SnoozePreset>, String> {
+    call("snooze_presets", &NoArgs {}).await
+}
+
+/// Snooze messages until `until` (a unix timestamp): hide them until then.
+pub async fn snooze_messages(ids: Vec<i64>, until: i64) -> Result<(), String> {
+    call("snooze_messages", &SnoozeArgs { ids, until }).await
+}
+
+/// Bring a snoozed message back now.
+pub async fn unsnooze_message(id: i64) -> Result<(), String> {
+    call("unsnooze_message", &IdArgs { id }).await
+}
+
+/// The messages still snoozed for an account, soonest-first.
+pub async fn list_snoozed(account_id: i64) -> Result<Vec<SnoozedItem>, String> {
+    call("list_snoozed", &AccountArgs { account_id }).await
 }
 
 /// Save (or update) a local draft (with its attachment file paths); returns its id so the composer

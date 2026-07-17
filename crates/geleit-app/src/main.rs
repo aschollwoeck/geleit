@@ -21,6 +21,7 @@ mod mailproto;
 mod notify;
 mod schedule;
 mod scheduler;
+mod snooze;
 mod tray;
 
 use geleit_platform::os_secret::OsSecretStore;
@@ -171,6 +172,10 @@ fn main() {
         ipc::retry_outbox,
         ipc::discard_outbox,
         ipc::edit_outbox,
+        ipc::snooze_presets,
+        ipc::snooze_messages,
+        ipc::unsnooze_message,
+        ipc::list_snoozed,
         ipc::get_signature,
         ipc::set_signature,
         ipc::theme,
@@ -235,6 +240,10 @@ fn main() {
         ipc::retry_outbox,
         ipc::discard_outbox,
         ipc::edit_outbox,
+        ipc::snooze_presets,
+        ipc::snooze_messages,
+        ipc::unsnooze_message,
+        ipc::list_snoozed,
         ipc::get_signature,
         ipc::set_signature,
         ipc::theme,
