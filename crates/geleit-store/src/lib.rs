@@ -1298,6 +1298,20 @@ impl Store {
     }
 
     /// Message headers for a folder, newest first (by date), up to `limit`.
+    /// Every message id in a folder, **oldest-first** and with **no exclusions** (snoozed mail included)
+    /// — for a complete export/backup (SEC-4). Unlike the listing queries this is order-for-archive and
+    /// leaves nothing out; a backup that hid snoozed mail wouldn't be a backup.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn folder_message_ids(&self, folder_id: i64) -> Result<Vec<i64>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM message WHERE folder_id = ?1 ORDER BY date ASC, id ASC")?;
+        let rows = stmt.query_map([folder_id], |r| r.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn messages_in_folder(
         &self,
         folder_id: i64,
@@ -3266,6 +3280,53 @@ mod tests {
             s.messages_in_folder(inbox, 50).unwrap().len(),
             3,
             "keep back"
+        );
+    }
+
+    #[test]
+    fn folder_message_ids_are_chronological_and_include_snoozed() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@x.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let other = s.upsert_folder(acc, "Work").unwrap();
+        let mk = |folder: i64, uid: i64, date: i64| {
+            s.upsert_message(
+                acc,
+                folder,
+                &NewMessage {
+                    uid: Some(uid),
+                    date: Some(date),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let newest = mk(inbox, 1, 300);
+        let oldest = mk(inbox, 2, 100);
+        let mid = mk(inbox, 3, 200);
+        mk(other, 4, 250); // a different folder — must not appear
+
+        // Oldest-first, this folder only.
+        assert_eq!(
+            s.folder_message_ids(inbox).unwrap(),
+            vec![oldest, mid, newest]
+        );
+
+        // A snoozed message is still in the export (a backup leaves nothing out), unlike the listing.
+        s.snooze_messages(&[mid], now + 3600).unwrap();
+        assert_eq!(
+            s.messages_in_folder(inbox, 50).unwrap().len(),
+            2,
+            "the listing hides it"
+        );
+        assert_eq!(
+            s.folder_message_ids(inbox).unwrap(),
+            vec![oldest, mid, newest],
+            "the export keeps it"
         );
     }
 

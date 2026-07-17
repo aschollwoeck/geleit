@@ -36,6 +36,8 @@ pub const UNREAD: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill
 pub const STAR: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 1.6l1.86 3.77 4.16.6-3.01 2.94.71 4.14L8 11.2 4.28 13.05l.71-4.14L1.98 5.97l4.16-.6L8 1.6Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>"#;
 /// Filled star (flagged).
 pub const STAR_FILLED: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.6l1.86 3.77 4.16.6-3.01 2.94.71 4.14L8 11.2 4.28 13.05l.71-4.14L1.98 5.97l4.16-.6L8 1.6Z"/></svg>"#;
+/// A down-arrow into a tray — export / download (SEC-4).
+pub const EXPORT: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2v7.5M5.2 7l2.8 2.8L10.8 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.8 11.5v1.2a1 1 0 0 0 1 1h8.4a1 1 0 0 0 1-1v-1.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>"#;
 /// A clock with an alarm's little ears — the snooze glyph (ORG-9).
 pub const SNOOZE: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8.5" r="5.5" stroke="currentColor" stroke-width="1.5"/><path d="M8 5.5v3l2 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 3.2 4.8 1.4M13.5 3.2 11.2 1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>"#;
 /// The Markdown mark (rounded rect with an "M" and a down chevron).

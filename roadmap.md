@@ -256,7 +256,7 @@ Slices defined when we reach them.
 - **Power search** (SEARCH-4 operators, SEARCH-5 cross-account).
 - **Rules / filters** (ORG-8); **snooze** (ORG-9) ✅ (`specs/snooze/`).
 - **Notifications** (NOTIF-1, NOTIF-2, NOTIF-3).
-- **Export / backup** (SEC-4), **self-update** (APP-7).
+- **Export / backup** (SEC-4) ✅ per-folder → mbox (`specs/export-mbox/`); **self-update** (APP-7).
 - **Later platforms** — mobile, then maybe web.
 
 ---

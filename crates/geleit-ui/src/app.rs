@@ -474,6 +474,31 @@ pub fn App() -> impl IntoView {
             }
         });
     };
+    // Export the currently-viewed folder to an mbox file (SEC-4).
+    let export_current_folder = move || {
+        let Some(fid) = selected_folder.get_untracked() else {
+            return;
+        };
+        let name = folders
+            .get_untracked()
+            .into_iter()
+            .find(|f| f.id == fid)
+            .map(|f| f.name)
+            .unwrap_or_else(|| "mail".to_owned());
+        // No "Exporting…" toast: the native save dialog is the feedback, and a fixed-duration toast
+        // would self-dismiss while the dialog is still open. The result speaks when it's done.
+        leptos::task::spawn_local(async move {
+            match api::export_folder(fid, name).await {
+                Ok(Some(0)) => toast.set(Some("This folder has no mail to export.".to_owned())),
+                Ok(Some(n)) => toast.set(Some(format!(
+                    "Exported {n} message{}",
+                    if n == 1 { "" } else { "s" }
+                ))),
+                Ok(None) => {} // cancelled — say nothing
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
 
     // The background scheduler found new mail (NOTIF-1). Slip it into the list quietly — no toast, no
     // jump: it just appears, with its unread dot, the way mail should. The re-list goes through the
@@ -2304,6 +2329,11 @@ pub fn App() -> impl IntoView {
                         </Show>
                         <Show when=move || { !drafts_open.get() && !outbox_open.get() && !snoozed_open.get() }>
                             <span class="icon-btn" class:on=move || search_open.get() title="Search" on:click=move |_| search_open.update(|o| *o = !*o)>{icon(icons::SEARCH)}</span>
+                        </Show>
+                        // Export this folder to mbox — only for a real folder (not the merged inbox or the
+                        // drafts/outbox/snoozed panes, which aren't server folders of messages).
+                        <Show when=move || { !unified.get() && !drafts_open.get() && !outbox_open.get() && !snoozed_open.get() && selected_folder.get().is_some() }>
+                            <span class="icon-btn" title="Export this folder (.mbox)" on:click=move |_| export_current_folder()>{icon(icons::EXPORT)}</span>
                         </Show>
                         <span class="icon-btn" title="Refresh"
                             on:click=move |_| if drafts_open.get_untracked() { open_drafts() } else { do_refresh() }>

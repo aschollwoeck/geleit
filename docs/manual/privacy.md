@@ -63,4 +63,17 @@ connection. Talking to your provider is the only part that needs the network, an
 
 Nothing else about your mail leaves this machine.
 
+## Export your mail
+
+Your mail is yours to take with you. The **Export** button at the top of the message list (the
+down-arrow, next to Search) writes the folder you're looking at to a **`.mbox`** file — the standard,
+plain-text mail-archive format that Thunderbird, Apple Mail, mutt, and even `grep` and simple scripts
+can read. Choose it, pick where to save, and you have a portable, app-independent copy of that folder's
+mail: an archive, a backup, or a way to move to another client without asking anyone's permission.
+
+The file holds every message's **text** faithfully, including ones you've snoozed. It does **not**
+include attachment *files* — GeleitMail keeps those on your provider and fetches them only when you ask,
+so they aren't on this device to write out; save an attachment individually (from its message) if you
+need it alongside.
+
 For the developer-facing security review, see [`../security-review.md`](../security-review.md).
