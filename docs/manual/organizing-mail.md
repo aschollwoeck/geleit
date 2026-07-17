@@ -13,6 +13,9 @@ stay in the same place no matter how long the subject is:
 - **Star** — flag a message you want to find again; the button fills in gold and the message shows a
   gold **★** on its list row. Choose it again to unstar.
 - **Archive** — move it out of the inbox into your Archive folder.
+- **Snooze** — hide the message until later. Pick a time — *later today, this evening, tomorrow, this
+  weekend, next week* — and it leaves your inbox (and stops counting as unread) until then, when it comes
+  back and notifies you as if it had just arrived. See **Snoozing** below.
 - **Delete** — move it to Trash. When the message is **already in Trash**, this button reads **Delete
   forever** and permanently removes it (see below).
 - **Move…** — pick a folder to move the message into. The message goes to the folder you picked,
@@ -73,12 +76,30 @@ list showing how many you've picked, with actions for all of them:
 - **Archive** — move them all to Archive.
 - **Delete** — move them all to Trash.
 - **Mark read** / **Mark unread** — clear or bring back their unread dots.
+- **Snooze** — hide them all until a time you pick (see below).
 - **Clear** (the ✕) — deselect everything.
 
 The checkbox at the far left of that bar **selects (or clears) every message in the list** at once.
 Archive and Delete work just like single messages: the rows slide out with one **Undo** bar
 (*3 archived · Undo*), and nothing is sent to your provider until the moment passes — so a bulk Undo
 can never lose mail. Switching folders or accounts clears your selection.
+
+## Snoozing
+
+Some mail you can't act on yet — you're waiting on someone, or it's for the weekend. **Snooze** it and
+it leaves your inbox until the time you choose, then comes back to the top as if it had just arrived
+(with a notification), instead of scrolling away half-handled.
+
+Choose **Snooze** on an open message, or from the bulk bar for a whole selection, and pick when it should
+return: **Later today**, **This evening**, **Tomorrow**, **This weekend**, or **Next week**. The times
+are in your own timezone, and only the ones still ahead of you are offered.
+
+Everything you've snoozed waits in the **Snoozed** view — choose it in the folder list to see each
+message and when it's due back. To pull one back early, choose **Un-snooze**.
+
+Snoozing is local to this device: a message you snooze here still shows normally in webmail or on your
+phone, and it comes back here even if you were offline when its time arrived (on the next check, or the
+next time you open GeleitMail).
 
 ## Undo
 

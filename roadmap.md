@@ -254,7 +254,7 @@ Slices defined when we reach them.
 - **Unified inbox** (MULTI-3) — merged cross-account view.
 - **Offline compose + reconciliation** (SEND-10/OFF-3, OFF-4).
 - **Power search** (SEARCH-4 operators, SEARCH-5 cross-account).
-- **Rules / filters** (ORG-8), **snooze** (ORG-9).
+- **Rules / filters** (ORG-8); **snooze** (ORG-9) ✅ (`specs/snooze/`).
 - **Notifications** (NOTIF-1, NOTIF-2, NOTIF-3).
 - **Export / backup** (SEC-4), **self-update** (APP-7).
 - **Later platforms** — mobile, then maybe web.

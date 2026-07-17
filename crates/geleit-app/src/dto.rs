@@ -458,6 +458,35 @@ pub fn display_sender(from_name: Option<&str>, from_addr: Option<&str>) -> Strin
     geleit_engine::envelope::display_sender(from_name, from_addr)
 }
 
+/// One snoozed message as the Snoozed view shows it (ORG-9): sender, subject, and when it comes back.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SnoozedItemDto {
+    pub id: i64,
+    pub from: String,
+    pub subject: String,
+    /// A human, local-time phrasing of the resurface time (e.g. "Tue 21 Jul, 08:00") — built host-side.
+    pub when: String,
+}
+
+/// Map a stored snooze into its view row. `when` is the caller's local-time formatting of the resurface
+/// timestamp (kept out of here so this stays a pure, tz-free mapping of sender/subject).
+#[must_use]
+pub fn snoozed_item(s: geleit_store::SnoozedItem, when: String) -> SnoozedItemDto {
+    SnoozedItemDto {
+        id: s.id,
+        from: display_sender(s.from_name.as_deref(), s.from_addr.as_deref()),
+        subject: display_subject(s.subject.as_deref()),
+        when,
+    }
+}
+
+/// One offered snooze time (ORG-9): a label to show and the unix timestamp to store.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SnoozePresetDto {
+    pub label: String,
+    pub at: i64,
+}
+
 /// A message with no subject still needs a readable row. Pure — unit-tested.
 #[must_use]
 pub fn display_subject(subject: Option<&str>) -> String {

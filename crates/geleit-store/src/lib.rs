@@ -262,6 +262,14 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX outbox_account ON outbox(account_id);
     ",
+    // 20 — snooze (ORG-9): hide a message until a time you pick, then let it come back. A **local**
+    // property — nothing moves on the server — so it can't fail offline and needs no live server to be
+    // correct. NULL = not snoozed; a unix timestamp = hidden from its folder list and left out of the
+    // unread badge until then, when the scheduler resurfaces it (clears this + re-owes a notification).
+    "
+    ALTER TABLE message ADD COLUMN snoozed_until INTEGER;
+    CREATE INDEX message_snoozed ON message(snoozed_until) WHERE snoozed_until IS NOT NULL;
+    ",
 ];
 
 /// A parsed search query (SEARCH-1/4): an FTS5 `MATCH` string (`None` when there are no full-text
@@ -500,6 +508,18 @@ pub struct NewMessage {
     /// pop up a notification for a file the user opened by hand. Only ever written on insert: a re-sync
     /// of a message must not re-announce it.
     pub owed_notification: bool,
+}
+
+/// One snoozed message as the Snoozed view shows it (ORG-9) — who it's from, its subject, and when it
+/// comes back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnoozedItem {
+    pub id: i64,
+    pub from_name: Option<String>,
+    pub from_addr: Option<String>,
+    pub subject: Option<String>,
+    /// Unix timestamp it resurfaces at.
+    pub snoozed_until: i64,
 }
 
 /// One outbox message as the user sees it in the outbox view (SEND-10) — no raw bytes.
@@ -1195,7 +1215,9 @@ impl Store {
     pub fn folder_unread_counts(&self, account_id: i64) -> Result<Vec<(i64, i64)>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT folder_id, COUNT(*) FROM message \
-             WHERE account_id = ?1 AND seen = 0 GROUP BY folder_id",
+             WHERE account_id = ?1 AND seen = 0 \
+             AND (snoozed_until IS NULL OR snoozed_until <= unixepoch()) \
+             GROUP BY folder_id",
         )?;
         let rows = stmt.query_map([account_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1212,7 +1234,8 @@ impl Store {
     pub fn total_inbox_unread(&self) -> Result<i64, StoreError> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM message m JOIN folder f ON f.id = m.folder_id \
-             WHERE m.seen = 0 AND f.name = 'INBOX' COLLATE NOCASE",
+             WHERE m.seen = 0 AND f.name = 'INBOX' COLLATE NOCASE \
+             AND (m.snoozed_until IS NULL OR m.snoozed_until <= unixepoch())",
             [],
             |r| r.get(0),
         )?)
@@ -1283,7 +1306,9 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, uid, message_id, in_reply_to, subject, from_name, from_addr, date, seen, \
              has_attachments, snippet, flagged \
-             FROM message WHERE folder_id = ?1 ORDER BY date DESC, id DESC LIMIT ?2",
+             FROM message WHERE folder_id = ?1 \
+             AND (snoozed_until IS NULL OR snoozed_until <= unixepoch()) \
+             ORDER BY date DESC, id DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map((folder_id, limit), |r| {
             Ok(MessageHeader {
@@ -1485,7 +1510,9 @@ impl Store {
             "SELECT m.id, m.uid, m.message_id, m.in_reply_to, m.subject, m.from_name, m.from_addr, \
              m.date, m.seen, m.has_attachments, m.snippet, m.flagged, m.account_id \
              FROM message m JOIN folder f ON f.id = m.folder_id \
-             WHERE f.name = 'INBOX' COLLATE NOCASE ORDER BY m.date DESC, m.id DESC LIMIT ?1",
+             WHERE f.name = 'INBOX' COLLATE NOCASE \
+             AND (m.snoozed_until IS NULL OR m.snoozed_until <= unixepoch()) \
+             ORDER BY m.date DESC, m.id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit], |r| Ok((header_from_row(r)?, r.get::<_, i64>(12)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -2157,6 +2184,74 @@ impl Store {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?)
+    }
+
+    // --- Snooze (ORG-9) ---------------------------------------------------------------------------
+
+    /// Snooze messages until `until` (a unix timestamp): hide them from their folder list and the
+    /// unread badge until then. Idempotent per id; re-snoozing just moves the time.
+    ///
+    /// # Errors
+    /// The update failing (a corrupt or unreadable database).
+    pub fn snooze_messages(&self, ids: &[i64], until: i64) -> Result<(), StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("UPDATE message SET snoozed_until = ?2 WHERE id = ?1")?;
+        for &id in ids {
+            stmt.execute((id, until))?;
+        }
+        Ok(())
+    }
+
+    /// Bring a snoozed message back now — clear its snooze so it reappears in its folder immediately.
+    /// A no-op for one that isn't snoozed.
+    ///
+    /// # Errors
+    /// The update failing (a corrupt or unreadable database).
+    pub fn unsnooze_message(&self, id: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE message SET snoozed_until = NULL WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    /// Resurface every snooze whose time has come: clear it **and** mark the message owed a
+    /// notification (`notified = 0`), so it re-enters the notification pipeline (NOTIF-1) and is
+    /// announced as if it just arrived. Returns how many resurfaced, so the caller knows the list and
+    /// badge are stale. Uses SQLite's clock, so "due" means due right now.
+    ///
+    /// # Errors
+    /// The update failing (a corrupt or unreadable database).
+    pub fn resurface_due_snoozes(&self) -> Result<usize, StoreError> {
+        Ok(self.conn.execute(
+            "UPDATE message SET snoozed_until = NULL, notified = 0 \
+             WHERE snoozed_until IS NOT NULL AND snoozed_until <= unixepoch()",
+            [],
+        )?)
+    }
+
+    /// The messages still snoozed for an account (resurface time in the future), soonest-first — for the
+    /// Snoozed view.
+    ///
+    /// # Errors
+    /// The query failing (a corrupt or unreadable database).
+    pub fn snoozed_messages(&self, account_id: i64) -> Result<Vec<SnoozedItem>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, from_name, from_addr, subject, snoozed_until FROM message \
+             WHERE account_id = ?1 AND snoozed_until IS NOT NULL AND snoozed_until > unixepoch() \
+             ORDER BY snoozed_until ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([account_id], |r| {
+            Ok(SnoozedItem {
+                id: r.get(0)?,
+                from_name: r.get(1)?,
+                from_addr: r.get(2)?,
+                subject: r.get(3)?,
+                snoozed_until: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Remove a single message locally (optimistic archive/trash/move; body + attachments cascade).
@@ -3058,6 +3153,94 @@ mod tests {
             .collect();
         // newest first, merged across accounts, Sent excluded
         assert_eq!(got, [(Some(300), a), (Some(200), b), (Some(100), a)]);
+    }
+
+    #[test]
+    fn snooze_hides_from_list_and_badge_then_resurfaces_and_re_owes_a_notification() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@x.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let mk = |uid: i64| {
+            s.upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(uid),
+                    date: Some(uid),
+                    seen: false,
+                    owed_notification: false, // already accounted for — resurfacing must re-owe it
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let keep = mk(1);
+        let snoozed = mk(2);
+        assert_eq!(s.messages_in_folder(inbox, 50).unwrap().len(), 2);
+        assert_eq!(s.total_inbox_unread().unwrap(), 2);
+
+        // Snooze one into the future: it leaves the list, the badge, and the per-folder count.
+        s.snooze_messages(&[snoozed], now + 3600).unwrap();
+        let listed: Vec<i64> = s
+            .messages_in_folder(inbox, 50)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.id)
+            .collect();
+        assert_eq!(listed, vec![keep], "snoozed message is hidden");
+        assert_eq!(s.total_inbox_unread().unwrap(), 1, "badge drops");
+        assert_eq!(
+            s.folder_unread_counts(acc).unwrap(),
+            vec![(inbox, 1)],
+            "folder count drops"
+        );
+        assert!(
+            s.messages_in_all_inboxes(50)
+                .unwrap()
+                .iter()
+                .all(|(h, _)| h.id != snoozed),
+            "hidden from the unified inbox too"
+        );
+
+        // It shows in the Snoozed view, with its resurface time.
+        let pane = s.snoozed_messages(acc).unwrap();
+        assert_eq!(pane.len(), 1);
+        assert_eq!(pane[0].id, snoozed);
+        assert_eq!(pane[0].snoozed_until, now + 3600);
+
+        // Not yet due → resurface is a no-op.
+        assert_eq!(s.resurface_due_snoozes().unwrap(), 0);
+        assert_eq!(s.messages_in_folder(inbox, 50).unwrap().len(), 1);
+
+        // Make it due, then resurface: it returns to the list and is owed a notification again.
+        s.snooze_messages(&[snoozed], now - 10).unwrap();
+        assert_eq!(
+            s.messages_in_folder(inbox, 50).unwrap().len(),
+            2,
+            "a due-but-uncleared snooze already shows (clock-based exclusion)"
+        );
+        assert_eq!(s.resurface_due_snoozes().unwrap(), 1);
+        assert!(s.snoozed_messages(acc).unwrap().is_empty(), "cleared");
+        let owed: Vec<i64> = s
+            .pending_notifications(inbox, 50)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert!(
+            owed.contains(&snoozed),
+            "resurfaced message is re-owed a notification"
+        );
+
+        // Un-snooze brings one back immediately.
+        s.snooze_messages(&[keep], now + 3600).unwrap();
+        assert_eq!(s.messages_in_folder(inbox, 50).unwrap().len(), 1);
+        s.unsnooze_message(keep).unwrap();
+        assert_eq!(s.messages_in_folder(inbox, 50).unwrap().len(), 2);
     }
 
     #[test]

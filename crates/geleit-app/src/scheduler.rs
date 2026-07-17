@@ -105,7 +105,12 @@ async fn sweep(
         return Err(());
     };
 
-    let (mut changed, mut failed, mut tried) = (0usize, 0usize, 0usize);
+    // Bring back any snoozed mail whose time has come (ORG-9) — a local event, so it runs first and
+    // regardless of connectivity (even a sweep where every account is skipped must still resurface).
+    // A resurfaced message is marked owed a notification, so the per-account `announce` below picks it
+    // up; and it counts as a change, so the badge refreshes and the UI re-lists.
+    let mut changed = crate::ipc::resurface_snoozes(&state).await;
+    let (mut failed, mut tried) = (0usize, 0usize);
     for account_id in &accounts {
         let so_far = account_failures.get(account_id).copied().unwrap_or(0);
         // A failing account is tried progressively less often. "Unreachable" and "wrong password"

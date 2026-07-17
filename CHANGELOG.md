@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Defer it for later
+- **Snooze a message.** Can't deal with something yet? **Snooze** it — from an open message or a bulk
+  selection — and pick when it comes back: later today, this evening, tomorrow, this weekend, next week.
+  It leaves your inbox (and stops counting toward the unread badge) until then, when it reappears and
+  notifies you as if it had just arrived. A **Snoozed** view in the rail shows everything waiting to come
+  back, with an **Un-snooze** to pull one back now. Snooze is local to this device, and the times are in
+  your own timezone.
+
 ### Always there
 - **A system-tray icon** keeps GeleitMail running in the background. Closing the window now tucks it into
   the tray instead of quitting — so mail keeps arriving, and the count keeps updating. Click the tray

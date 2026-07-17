@@ -63,7 +63,7 @@ P10 each story is covered by **executable acceptance tests** named after its ID
 - **ORG-6** Create / rename / delete folders.
 - **ORG-7** Select multiple messages and act in bulk.
 - **ORG-8** Auto-sort with rules / filters. `(later)`
-- **ORG-9** Snooze a message. `(later)`
+- **ORG-9** Snooze a message. ✅
 
 ## SEARCH — Search
 - **SEARCH-1** Search my mail by sender / subject / body.
