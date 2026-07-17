@@ -101,6 +101,25 @@ Snoozing is local to this device: a message you snooze here still shows normally
 phone, and it comes back here even if you were offline when its time arrived (on the next check, or the
 next time you open GeleitMail).
 
+## Rules that sort your mail for you
+
+An inbox you triage the same way every morning can do some of that work itself. In **Settings → Rules**,
+a rule is *when this, do that*:
+
+- **When** a message's **From**, **Subject**, or **To** contains some text (case-insensitive) —
+- **do** one or more of: **move it to a folder**, **mark it read**, **star it**.
+
+Add a rule with the little sentence-builder — pick the field, type the text to match, choose a folder
+and/or tick *mark read* / *star*, and **Add rule**. Your rules show as plain sentences (*"If From
+contains **newsletter** → move to **Reading**, mark read"*), and you can **Delete** any of them.
+
+New mail is sorted **as it arrives**, while GeleitMail is checking your mail — so a rule fires on the next
+sync, not the instant you write it, and (since rules run here on your device) not while GeleitMail is
+closed. If two rules could match the same message, the **first** one wins.
+
+To tidy the mail already sitting in your inbox, choose **Run on inbox now** — it applies your rules to
+everything that's there.
+
 ## Undo
 
 When you **Archive** or **Delete** a message, it slides out of the list and a short bar appears at the

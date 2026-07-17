@@ -145,6 +145,13 @@ async fn sweep(
                 if !outcome.arrived.is_empty() || outcome.flag_updates > 0 {
                     changed += 1;
                 }
+                // Apply the account's rules to the new mail (ORG-8) BEFORE announcing — a rule that
+                // files a message to a folder or marks it read should keep it out of the notification
+                // (you don't want a popup for mail a rule just tidied away), and moves/flags make the
+                // on-screen list stale.
+                if crate::ipc::apply_rules(&state, *account_id).await > 0 {
+                    changed += 1;
+                }
                 // Tell the user — from the **store**, not from this sync's diff. A message the backfill
                 // swept up, or one that arrived while notifications were off or the user was asleep, is
                 // owed a notification just the same, and only the store remembers that (migration 17).

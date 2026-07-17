@@ -391,6 +391,15 @@ iframe.mail { flex: 1; width: 100%; border: 0; background: #fff; }
 .acct-card .sub { font-size: 12.5px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
 .remove-link { margin-left: auto; color: var(--danger-strong); font-size: 13px; font-weight: 600; cursor: pointer; }
 .privacy-note { display: flex; align-items: flex-start; gap: 8px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--divider); font-size: 12.5px; color: var(--text-muted); line-height: 1.5; }
+/* Rules (ORG-8) */
+.rule-row { display: flex; align-items: center; gap: 12px; padding: 9px 12px; background: var(--surface-raised); border: 1px solid var(--divider); border-radius: var(--radius-sm); }
+.rule-text { font-size: 13px; color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.rule-row .remove-link { flex: 0 0 auto; }
+.rule-add { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--divider); }
+.rule-add-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--text-muted); }
+.rule-add-line .folder-input { width: auto; margin: 0; }
+.rule-check { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; color: var(--text); cursor: pointer; }
+.rule-check input { cursor: pointer; }
 .sig-box { width: 100%; height: 64px; resize: none; border: 1px solid var(--divider); border-radius: 8px; padding: 10px 12px; font-size: 13.5px; color: var(--text); background: var(--surface-reading); line-height: 1.5; }
 
 /* wizard */

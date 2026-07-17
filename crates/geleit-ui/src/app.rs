@@ -267,7 +267,15 @@ pub fn App() -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     let toast_timer = RwSignal::new(Option::<i32>::None);
     let dark = RwSignal::new(document_is_dark());
-    // settings-backed prefs
+    // Rules (ORG-8): the account's rules + the add-rule form fields.
+    let rules_list = RwSignal::new(Vec::<api::Rule>::new());
+    let rule_field = RwSignal::new("from".to_owned());
+    let rule_pattern = RwSignal::new(String::new());
+    let rule_folder = RwSignal::new(String::new()); // target folder name; "" = don't move
+    let rule_read = RwSignal::new(false);
+    let rule_star = RwSignal::new(false);
+    let rules_busy = RwSignal::new(false); // a Run-now pass is in flight
+                                           // settings-backed prefs
     let block_remote = RwSignal::new(true);
     let sync_drafts = RwSignal::new(false); // opt-in: mirror drafts to the server (default OFF, P2)
     let mark_read = RwSignal::new(true);
@@ -1079,10 +1087,76 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    // --- Rules (ORG-8) ---
+    let load_rules = move || {
+        let Some(aid) = account.get_untracked() else {
+            rules_list.set(Vec::new());
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            if let Ok(rs) = api::list_rules(aid).await {
+                rules_list.set(rs);
+            }
+        });
+    };
+    let add_rule_action = move || {
+        let Some(aid) = account.get_untracked() else {
+            return;
+        };
+        let (field, pattern) = (rule_field.get_untracked(), rule_pattern.get_untracked());
+        let folder = rule_folder.get_untracked();
+        let folder = (!folder.trim().is_empty()).then_some(folder);
+        let (read, star) = (rule_read.get_untracked(), rule_star.get_untracked());
+        leptos::task::spawn_local(async move {
+            match api::add_rule(aid, field, pattern, folder, read, star).await {
+                Ok(_) => {
+                    // Clear the form and reload the list.
+                    rule_pattern.set(String::new());
+                    rule_folder.set(String::new());
+                    rule_read.set(false);
+                    rule_star.set(false);
+                    if let Ok(rs) = api::list_rules(aid).await {
+                        rules_list.set(rs);
+                    }
+                }
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+    let delete_rule_action = move |id: i64| {
+        rules_list.update(|l| l.retain(|r| r.id != id));
+        leptos::task::spawn_local(async move {
+            if let Err(e) = api::delete_rule(id).await {
+                error.set(Some(e));
+            }
+        });
+    };
+    let run_rules_now_action = move || {
+        let Some(aid) = account.get_untracked() else {
+            return;
+        };
+        if rules_busy.get_untracked() {
+            return;
+        }
+        rules_busy.set(true);
+        leptos::task::spawn_local(async move {
+            match api::run_rules_now(aid).await {
+                Ok(n) => toast.set(Some(match n {
+                    0 => "No mail matched your rules.".to_owned(),
+                    1 => "1 message sorted.".to_owned(),
+                    n => format!("{n} messages sorted."),
+                })),
+                Err(e) => error.set(Some(e)),
+            }
+            rules_busy.set(false);
+        });
+    };
+
     // settings
     let open_settings = move || {
         acct_menu.set(false);
         settings_open.set(true);
+        load_rules();
     };
     let toggle_block = move || {
         let next = !block_remote.get();
@@ -2772,6 +2846,65 @@ pub fn App() -> impl IntoView {
                                         <div class="toggle" class:on=move || mark_read.get() on:click=move |_| toggle_mark()><span class="knob"></span></div>
                                     </div>
                                 </Show>
+                                // Rules (ORG-8)
+                                <Show when=move || settings_tab.get() == "rules">
+                                    <div style="font-size:13px;color:var(--text-muted)">
+                                        "Rules sort new mail as it arrives — move it to a folder, mark it read, or star it. They run on this device when GeleitMail checks your mail. The first rule a message matches wins."
+                                    </div>
+                                    // Existing rules, as sentences.
+                                    <div style="display:flex;flex-direction:column;gap:8px;margin-top:16px">
+                                        <Show when=move || rules_list.get().is_empty()>
+                                            <div style="font-size:13px;color:var(--text-muted);font-style:italic">"No rules yet."</div>
+                                        </Show>
+                                        <For each=move || rules_list.get() key=|r| r.id let:r>
+                                            {
+                                                let id = r.id;
+                                                view! {
+                                                    <div class="rule-row">
+                                                        <span class="rule-text">{rule_sentence(&r)}</span>
+                                                        <span class="remove-link" on:click=move |_| delete_rule_action(id)>"Delete"</span>
+                                                    </div>
+                                                }
+                                            }
+                                        </For>
+                                    </div>
+                                    // Add-rule form.
+                                    <div class="rule-add">
+                                        <div class="rule-add-line">
+                                            <span>"If"</span>
+                                            <select class="folder-input" prop:value=move || rule_field.get()
+                                                on:change=move |e| rule_field.set(event_target_value(&e))>
+                                                <option value="from">"From"</option>
+                                                <option value="subject">"Subject"</option>
+                                                <option value="to">"To"</option>
+                                            </select>
+                                            <span>"contains"</span>
+                                            <input class="folder-input" style="flex:1" placeholder="text to match"
+                                                prop:value=move || rule_pattern.get()
+                                                on:input=move |e| rule_pattern.set(event_target_value(&e))/>
+                                        </div>
+                                        <div class="rule-add-line">
+                                            <span>"then"</span>
+                                            <span>"move to"</span>
+                                            <select class="folder-input" prop:value=move || rule_folder.get()
+                                                on:change=move |e| rule_folder.set(event_target_value(&e))>
+                                                <option value="">"— nowhere —"</option>
+                                                <For each=move || folders.get() key=|f| f.id let:f>
+                                                    <option value=f.name.clone()>{f.name.clone()}</option>
+                                                </For>
+                                            </select>
+                                            <label class="rule-check"><input type="checkbox" prop:checked=move || rule_read.get() on:change=move |e| rule_read.set(event_target_checked(&e))/>"mark read"</label>
+                                            <label class="rule-check"><input type="checkbox" prop:checked=move || rule_star.get() on:change=move |e| rule_star.set(event_target_checked(&e))/>"star"</label>
+                                        </div>
+                                        <button class="btn-ghost" style="align-self:flex-start;display:inline-flex;align-items:center;gap:8px" on:click=move |_| add_rule_action()>{icon(icons::PLUS)} "Add rule"</button>
+                                    </div>
+                                    <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--divider);display:flex;align-items:center;gap:12px">
+                                        <button class="btn-ghost" prop:disabled=move || rules_busy.get() on:click=move |_| run_rules_now_action()>
+                                            {move || if rules_busy.get() { "Running…" } else { "Run on inbox now" }}
+                                        </button>
+                                        <span style="font-size:12.5px;color:var(--text-muted)">"Apply these rules to the mail already in your inbox."</span>
+                                    </div>
+                                </Show>
                                 // Appearance
                                 <Show when=move || settings_tab.get() == "appearance">
                                     <div class="setting-row">
@@ -3075,15 +3208,45 @@ pub fn App() -> impl IntoView {
 }
 
 /// The settings tabs, in order: `(key, label, icon-svg)`.
-const SETTINGS_TABS: [(&str, &str, &str); 5] = [
+const SETTINGS_TABS: [(&str, &str, &str); 6] = [
     ("accounts", "Accounts", icons::IC_ACCOUNTS),
     ("general", "General", icons::IC_GENERAL),
+    ("rules", "Rules", icons::IC_RULES),
     ("appearance", "Appearance", icons::THEME),
     ("privacy", "Privacy", icons::IC_PRIVACY),
     ("notifications", "Notifications", icons::IC_BELL),
 ];
 
 /// The heading shown for a settings tab.
+/// A rule rendered as a readable sentence for the Rules list (ORG-8).
+fn rule_sentence(r: &api::Rule) -> String {
+    let field = match r.field.as_str() {
+        "from" => "From",
+        "subject" => "Subject",
+        "to" => "To",
+        other => other,
+    };
+    let mut actions = Vec::new();
+    if let Some(f) = r.target_folder.as_deref().filter(|f| !f.is_empty()) {
+        actions.push(format!("move to {f}"));
+    }
+    if r.mark_read {
+        actions.push("mark read".to_owned());
+    }
+    if r.star {
+        actions.push("star".to_owned());
+    }
+    let acts = if actions.is_empty() {
+        "do nothing".to_owned()
+    } else {
+        actions.join(", ")
+    };
+    format!(
+        "If {field} contains \u{201c}{}\u{201d} \u{2192} {acts}",
+        r.pattern
+    )
+}
+
 fn settings_tab_title(tab: &str) -> &'static str {
     SETTINGS_TABS
         .iter()
