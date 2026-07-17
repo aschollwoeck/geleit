@@ -1141,11 +1141,33 @@ pub fn App() -> impl IntoView {
         rules_busy.set(true);
         leptos::task::spawn_local(async move {
             match api::run_rules_now(aid).await {
-                Ok(n) => toast.set(Some(match n {
-                    0 => "No mail matched your rules.".to_owned(),
-                    1 => "1 message sorted.".to_owned(),
-                    n => format!("{n} messages sorted."),
-                })),
+                Ok(n) => {
+                    toast.set(Some(match n {
+                        0 => "No mail matched your rules.".to_owned(),
+                        1 => "1 message sorted.".to_owned(),
+                        n => format!("{n} messages sorted."),
+                    }));
+                    // Reflect the changes on screen right away — a rule may have moved mail out of the
+                    // inbox or starred/marked it read. (The background sweep re-lists via `mail-arrived`;
+                    // the manual button has to do it itself.) Guarded by the `request` epoch like every
+                    // other re-list, so it can't clobber a folder switch in flight.
+                    if n > 0 {
+                        let epoch = request.get_untracked() + 1;
+                        request.set(epoch);
+                        if let Some(fid) = selected_folder.get_untracked() {
+                            if let Ok(m) = api::list_messages(fid, PAGE).await {
+                                if request.get_untracked() == epoch {
+                                    messages.set(m);
+                                }
+                            }
+                        }
+                        if let Ok(fs) = api::list_folders(aid).await {
+                            if account.get_untracked() == Some(aid) {
+                                folders.set(fs);
+                            }
+                        }
+                    }
+                }
                 Err(e) => error.set(Some(e)),
             }
             rules_busy.set(false);
