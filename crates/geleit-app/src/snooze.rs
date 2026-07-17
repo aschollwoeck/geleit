@@ -21,10 +21,13 @@ pub fn presets<Tz: TimeZone>(now: DateTime<Tz>) -> Vec<Preset> {
     let mut out = Vec::new();
     let mut offer = |label: &str, when: Option<DateTime<Tz>>| {
         if let Some(w) = when {
-            if w > now {
+            let at = w.timestamp();
+            // Future only, and never a duplicate instant — on a Friday "Tomorrow" and "This weekend"
+            // are both Saturday 08:00, and offering the same time twice is just noise.
+            if w > now && !out.iter().any(|p: &Preset| p.at == at) {
                 out.push(Preset {
                     label: label.to_owned(),
-                    at: w.timestamp(),
+                    at,
                 });
             }
         }
@@ -153,6 +156,24 @@ mod tests {
             find(&mon, "Next week").unwrap().at,
             at(2026, 7, 27, 8, 0).timestamp()
         );
+    }
+
+    #[test]
+    fn friday_does_not_offer_the_same_instant_twice() {
+        // Friday the 17th: "Tomorrow" and "This weekend" would both be Saturday 08:00 — offer it once.
+        let p = presets(at(2026, 7, 17, 10, 0));
+        let sat_8 = at(2026, 7, 18, 8, 0).timestamp();
+        assert_eq!(
+            p.iter().filter(|x| x.at == sat_8).count(),
+            1,
+            "Saturday 08:00 offered exactly once on a Friday"
+        );
+        // Every offered time is distinct.
+        let mut times: Vec<i64> = p.iter().map(|x| x.at).collect();
+        times.sort_unstable();
+        let n = times.len();
+        times.dedup();
+        assert_eq!(times.len(), n, "no duplicate preset instants");
     }
 
     #[test]

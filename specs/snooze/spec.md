@@ -34,9 +34,12 @@ clock waiting for a sweep.
 - `resurface_due_snoozes()` — `snoozed_until <= now`: clear it **and** set `notified = 0`, so a
   resurfaced message re-enters the existing notification pipeline (NOTIF-1) and is announced again.
   Returns how many, so the scheduler knows the list is stale.
-- **Exclusion**: `messages_in_folder`, `total_inbox_unread`, and `folder_unread_counts` gain
-  `AND (snoozed_until IS NULL OR snoozed_until <= unixepoch())` — a still-snoozed message is neither
-  listed nor counted, in any folder or the badge.
+- **Exclusion**: `messages_in_folder`, `total_inbox_unread`, `folder_unread_counts`, and
+  `messages_in_all_inboxes` gain `AND (snoozed_until IS NULL OR snoozed_until <= unixepoch())` — a
+  still-snoozed message is neither listed nor counted, in any folder, the unified inbox, or the badge.
+  **Search is deliberately not excluded**: searching is an explicit act to *find* a message, so a
+  snoozed one still turns up in results (as it does in webmail) rather than becoming unfindable until it
+  resurfaces.
 
 ## Resurfacing — reuses the scheduler, not a new timer
 

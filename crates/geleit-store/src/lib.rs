@@ -2216,16 +2216,19 @@ impl Store {
         Ok(())
     }
 
-    /// Resurface every snooze whose time has come: clear it **and** mark the message owed a
-    /// notification (`notified = 0`), so it re-enters the notification pipeline (NOTIF-1) and is
-    /// announced as if it just arrived. Returns how many resurfaced, so the caller knows the list and
-    /// badge are stale. Uses SQLite's clock, so "due" means due right now.
+    /// Resurface every snooze whose time has come: clear it, and re-owe a notification (`notified = 0`)
+    /// **only for messages still unread** — so a message snoozed while read doesn't come back owing a
+    /// spurious "new mail" alert the day it's marked unread again. An unread one re-enters the
+    /// notification pipeline (NOTIF-1) and is announced as if it just arrived. Returns how many
+    /// resurfaced, so the caller knows the list and badge are stale. Uses SQLite's clock, so "due"
+    /// means due right now.
     ///
     /// # Errors
     /// The update failing (a corrupt or unreadable database).
     pub fn resurface_due_snoozes(&self) -> Result<usize, StoreError> {
         Ok(self.conn.execute(
-            "UPDATE message SET snoozed_until = NULL, notified = 0 \
+            "UPDATE message SET snoozed_until = NULL, \
+                    notified = CASE WHEN seen = 0 THEN 0 ELSE notified END \
              WHERE snoozed_until IS NOT NULL AND snoozed_until <= unixepoch()",
             [],
         )?)
@@ -3236,11 +3239,34 @@ mod tests {
             "resurfaced message is re-owed a notification"
         );
 
-        // Un-snooze brings one back immediately.
+        // A message snoozed while READ resurfaces WITHOUT being re-owed a notification — so marking it
+        // unread later can't pop a "new mail" alert for old mail.
+        let read = mk(3);
+        s.set_seen(read, true).unwrap();
+        s.snooze_messages(&[read], now - 10).unwrap();
+        assert_eq!(s.resurface_due_snoozes().unwrap(), 1);
+        assert!(
+            !s.pending_notifications(inbox, 50)
+                .unwrap()
+                .iter()
+                .any(|p| p.id == read),
+            "a read-then-snoozed message is not re-owed a notification"
+        );
+
+        // Un-snooze brings one back immediately. (Three messages are visible now: keep, the resurfaced
+        // `snoozed`, and the resurfaced `read`.)
         s.snooze_messages(&[keep], now + 3600).unwrap();
-        assert_eq!(s.messages_in_folder(inbox, 50).unwrap().len(), 1);
+        assert_eq!(
+            s.messages_in_folder(inbox, 50).unwrap().len(),
+            2,
+            "keep hidden"
+        );
         s.unsnooze_message(keep).unwrap();
-        assert_eq!(s.messages_in_folder(inbox, 50).unwrap().len(), 2);
+        assert_eq!(
+            s.messages_in_folder(inbox, 50).unwrap().len(),
+            3,
+            "keep back"
+        );
     }
 
     #[test]

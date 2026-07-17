@@ -53,22 +53,25 @@ pub(crate) fn spawn(app: tauri::AppHandle) {
 
         sleep_or_wake(fast.unwrap_or(FIRST_SWEEP_DELAY), &wake).await;
         loop {
-            match sweep(&app, tick, &mut account_failures).await {
-                Ok(changed) => {
-                    failures = 0;
-                    // The badge is set every sweep, not only when mail arrives: a sweep is also when
-                    // mail read on another device comes back `\Seen`, and the count should fall for
-                    // that too.
-                    crate::ipc::set_badge(&app, app.state::<AppState>().inner()).await;
-                    if changed > 0 {
-                        // Tell the UI to re-list — for new mail, or for a flag pulled from another
-                        // device. It goes through the same `request` epoch as every other re-list, so
-                        // it can never clobber a search being typed or a folder just switched to.
-                        let _ = app.emit("mail-arrived", changed as i64);
-                    }
-                }
-                // A failed sweep is ordinary — the machine sleeps, the wifi drops. Never surface it:
-                // an error the user didn't ask for, about a sync they didn't start, is noise.
+            let (changed, verdict) = sweep(&app, tick, &mut account_failures).await;
+            // Refresh the badge whenever the count could have moved: a successful sweep (mail read on
+            // another device comes back `\Seen`, so the count should fall for that too) OR a local
+            // snooze resurfacing — which happens even when every account is offline, and a failed
+            // verdict must not swallow.
+            if verdict.is_ok() || changed > 0 {
+                crate::ipc::set_badge(&app, app.state::<AppState>().inner()).await;
+            }
+            if changed > 0 {
+                // Tell the UI to re-list — for new mail, a flag pulled from another device, or a
+                // resurfaced snooze. It goes through the same `request` epoch as every other re-list,
+                // so it can never clobber a search being typed or a folder just switched to.
+                let _ = app.emit("mail-arrived", changed as i64);
+            }
+            // A failed sweep is ordinary — the machine sleeps, the wifi drops. Never surface it: an
+            // error the user didn't ask for, about a sync they didn't start, is noise. It only feeds
+            // the backoff.
+            match verdict {
+                Ok(()) => failures = 0,
                 Err(()) => failures = failures.saturating_add(1),
             }
             tick = tick.wrapping_add(1);
@@ -95,14 +98,18 @@ async fn sleep_or_wake(delay: Duration, wake: &tokio::sync::Notify) {
 
 /// One pass over the accounts' inboxes. Returns how many accounts had a change the UI should re-list
 /// for — mail that arrived, or a read/star flag pulled from another device (SYNC-5).
+/// Run one sweep. Returns `(changed, verdict)`: `changed` is how much the on-screen list / badge is now
+/// stale by (new mail, pulled flags, a resurfaced snooze) — acted on **regardless** of the verdict,
+/// because a snooze resurfacing is a local event that must refresh the UI even when every account is
+/// offline; `verdict` is `Err` only when every account we *tried* failed, and drives the backoff.
 async fn sweep(
     app: &tauri::AppHandle,
     tick: u64,
     account_failures: &mut HashMap<i64, u32>,
-) -> Result<usize, ()> {
+) -> (usize, Result<(), ()>) {
     let state = app.state::<AppState>().inner().clone();
     let Ok(accounts) = crate::ipc::account_ids(&state).await else {
-        return Err(());
+        return (0, Err(()));
     };
 
     // Bring back any snoozed mail whose time has come (ORG-9) — a local event, so it runs first and
@@ -150,8 +157,10 @@ async fn sweep(
         }
     }
     // Judge the sweep on what it actually *tried* — an account we deliberately skipped isn't a
-    // failure, and shouldn't drag the whole schedule into backoff.
-    sweep_verdict(changed, failed, tried)
+    // failure, and shouldn't drag the whole schedule into backoff. The verdict is separate from
+    // `changed`: an all-offline sweep is a failure for backoff, yet may still have resurfaced a snooze
+    // that the UI must reflect.
+    (changed, sweep_verdict(changed, failed, tried).map(|_| ()))
 }
 
 /// Tell the user about the mail this account is owed a notification for.
