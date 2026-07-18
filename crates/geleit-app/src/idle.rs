@@ -23,8 +23,9 @@ const RECONNECT_MAX: Duration = Duration::from_secs(5 * 60);
 
 /// Start an IDLE watcher for every account. Runs for the life of the app on Tauri's async runtime.
 ///
-/// Accounts added later fall back to the poll until the next launch — a named limitation, not a bug:
-/// the 5-minute scheduler still delivers their mail.
+/// An account **added while the app is running** gets its watcher at once via [`watch_new_account`], so
+/// it no longer waits for the next launch for instant push — the poll was always its safety net, and now
+/// isn't its only fast path.
 pub(crate) fn spawn(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(FIRST_DELAY).await;
@@ -33,15 +34,52 @@ pub(crate) fn spawn(app: tauri::AppHandle) {
             return;
         };
         for account_id in accounts {
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move { watch_account(app, account_id).await });
+            start_watch(app.clone(), account_id);
         }
     });
 }
 
-/// Keep an IDLE connection to one account's INBOX alive, reconnecting with backoff when it drops.
-async fn watch_account(app: tauri::AppHandle, account_id: i64) {
+/// Start watching an account that was **just added**, so it gets instant push without a restart. A
+/// no-op if it's already watched (re-configuring an existing account keeps its one watcher).
+pub(crate) fn watch_new_account(app: &tauri::AppHandle, account_id: i64) {
+    start_watch(app.clone(), account_id);
+}
+
+/// Spawn the watcher for `account_id` — but only if one isn't already running, so an account is never
+/// watched by two tasks (double connections, double wakes).
+fn start_watch(app: tauri::AppHandle, account_id: i64) {
+    let Some(cancel) = app.state::<AppState>().inner().claim_idle_watch(account_id) else {
+        return; // already watched
+    };
+    tauri::async_runtime::spawn(async move { watch_account(app, account_id, cancel).await });
+}
+
+/// Keep an IDLE connection to one account's INBOX alive, reconnecting with backoff when it drops, until
+/// `cancel` fires (the account was removed). `cancel` is also the slot token, so freeing the slot on exit
+/// can't evict a replacement watcher that reused this id.
+async fn watch_account(
+    app: tauri::AppHandle,
+    account_id: i64,
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+) {
     let state = app.state::<AppState>().inner().clone();
+    // However this task leaves (cancelled, account gone, no server IDLE), free *its own* slot so the
+    // account can be watched again if it's re-added.
+    struct Release {
+        state: AppState,
+        account_id: i64,
+        cancel: std::sync::Arc<tokio::sync::Notify>,
+    }
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.state.release_idle_watch(self.account_id, &self.cancel);
+        }
+    }
+    let _release = Release {
+        state: state.clone(),
+        account_id,
+        cancel: cancel.clone(),
+    };
     let mut backoff = RECONNECT_MIN;
     loop {
         // Resolve the account's config on a worker (it opens the encrypted store). Gone → stop the
@@ -62,10 +100,15 @@ async fn watch_account(app: tauri::AppHandle, account_id: i64) {
         let wake = state.wake_sync();
         let on_activity = move || wake.notify_one();
 
-        // `idle_watch` only ever returns an error — it loops forever otherwise.
+        // `idle_watch` only ever returns an error — it loops forever otherwise. Race it against `cancel`
+        // so a removed account drops its connection at once, instead of lingering (authenticated) until
+        // the next server push or timeout.
         let started = std::time::Instant::now();
-        match geleit_engine::imap::idle_watch(&config, &*state.secrets, "INBOX", &on_activity).await
-        {
+        let outcome = tokio::select! {
+            () = cancel.notified() => return, // account removed — stop now
+            r = geleit_engine::imap::idle_watch(&config, &*state.secrets, "INBOX", &on_activity) => r,
+        };
+        match outcome {
             // The server has no IDLE — stop; the poll is this account's only path, and that's fine.
             Err(geleit_engine::imap::ImapError::IdleUnsupported) => return,
             // A dropped connection (a laptop sleeps, wifi blips): wait, then reconnect. Ordinary and
@@ -77,7 +120,11 @@ async fn watch_account(app: tauri::AppHandle, account_id: i64) {
                 if started.elapsed() >= RECONNECT_MAX {
                     backoff = RECONNECT_MIN;
                 }
-                tokio::time::sleep(backoff).await;
+                // The reconnect wait also races cancel — a removal during backoff shouldn't wait it out.
+                tokio::select! {
+                    () = cancel.notified() => return,
+                    () = tokio::time::sleep(backoff) => {}
+                }
                 backoff = (backoff * 2).min(RECONNECT_MAX);
             }
         }

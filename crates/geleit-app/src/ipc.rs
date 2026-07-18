@@ -66,6 +66,13 @@ pub struct AppState {
     /// read the same `pending_move` rows and run every move twice (a wasted round-trip, and a second
     /// `move_message` for a message already gone from the source folder is an error, not a no-op).
     draining_moves: Arc<Mutex<HashMap<i64, bool>>>,
+    /// The accounts that already have a live IMAP IDLE watcher (instant new-mail push), each mapped to a
+    /// **cancel signal** for its watcher. Populated by [`crate::idle`] at startup and when an account is
+    /// added, so a just-added account gets IDLE at once instead of only after the next launch — and so
+    /// the same account is never watched twice. Removing an account fires its cancel so the watcher stops
+    /// promptly (rather than lingering on an authenticated connection) and frees the slot — which matters
+    /// because SQLite reuses a removed account's id, and the next account added could take it.
+    idle_watchers: Arc<Mutex<HashMap<i64, Arc<tokio::sync::Notify>>>>,
 }
 
 impl AppState {
@@ -94,6 +101,51 @@ impl AppState {
             flushing: Arc::new(Mutex::new(HashMap::new())),
             draining_outbox: Arc::new(Mutex::new(HashMap::new())),
             draining_moves: Arc::new(Mutex::new(HashMap::new())),
+            idle_watchers: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Claim the IDLE watch for `account_id`. `Some(cancel)` if this caller should start the watcher
+    /// (and the token to stop it on); `None` if one is already running. The watcher passes the same token
+    /// to [`Self::release_idle_watch`] when it stops.
+    pub(crate) fn claim_idle_watch(&self, account_id: i64) -> Option<Arc<tokio::sync::Notify>> {
+        use std::collections::hash_map::Entry;
+        match self
+            .idle_watchers
+            .lock()
+            .expect("idle set")
+            .entry(account_id)
+        {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(slot) => {
+                let cancel = Arc::new(tokio::sync::Notify::new());
+                slot.insert(cancel.clone());
+                Some(cancel)
+            }
+        }
+    }
+
+    /// Free `account_id`'s slot when its watcher stops — but only if the slot still holds **this**
+    /// watcher's `cancel` token. An account removed and re-added reuses its id (SQLite doesn't
+    /// `AUTOINCREMENT`), so a successor watcher may already own the slot with a *different* token; the
+    /// pointer check stops a departing watcher from evicting its replacement.
+    pub(crate) fn release_idle_watch(&self, account_id: i64, cancel: &Arc<tokio::sync::Notify>) {
+        let mut map = self.idle_watchers.lock().expect("idle set");
+        if map.get(&account_id).is_some_and(|c| Arc::ptr_eq(c, cancel)) {
+            map.remove(&account_id);
+        }
+    }
+
+    /// Stop `account_id`'s IDLE watcher (on removal): fire its cancel so it drops its connection promptly,
+    /// and free the slot so the next account to take this id can be watched. A no-op if it isn't watched.
+    pub(crate) fn stop_idle_watch(&self, account_id: i64) {
+        if let Some(cancel) = self
+            .idle_watchers
+            .lock()
+            .expect("idle set")
+            .remove(&account_id)
+        {
+            cancel.notify_one();
         }
     }
 
@@ -217,6 +269,9 @@ pub async fn remove_account(
     state: tauri::State<'_, AppState>,
     account_id: i64,
 ) -> Result<bool, String> {
+    // Stop its IDLE watcher first, so it drops the authenticated connection promptly and frees the slot
+    // — the account's id can be reused by the next account added, which must then be watchable.
+    state.stop_idle_watch(account_id);
     let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
     tauri::async_runtime::spawn_blocking(move || {
         geleit_engine::sync_actions::run_remove_account(&db, &*secrets, account_id)
@@ -829,6 +884,7 @@ pub async fn delete_folder(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn add_account(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     email: String,
     display_name: String,
@@ -855,7 +911,7 @@ pub async fn add_account(
     let display = (!display_name.trim().is_empty()).then(|| display_name.trim().to_owned());
 
     let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
-    tauri::async_runtime::spawn_blocking(move || {
+    let account_id = tauri::async_runtime::spawn_blocking(move || {
         geleit_engine::sync_actions::run_setup(
             &db,
             &*secrets,
@@ -868,7 +924,11 @@ pub async fn add_account(
         )
     })
     .await
-    .map_err(|_| "The setup task stopped unexpectedly.".to_owned())?
+    .map_err(|_| "The setup task stopped unexpectedly.".to_owned())??;
+    // Give the new account instant new-mail push right away (idempotent — reconfiguring an existing
+    // account keeps its one watcher). The background poll already covers it regardless.
+    crate::idle::watch_new_account(&app, account_id);
+    Ok(account_id)
 }
 
 /// Search an account's mail (FTS5, M6). Instant + local (P1); supports `from:`/`subject:`/
@@ -3072,6 +3132,43 @@ mod tests {
     };
     use geleit_platform::secret::InMemorySecretStore;
     use geleit_store::{DraftContent, NewMessage, Store};
+
+    #[test]
+    fn idle_watch_is_claimed_once_and_the_pointer_check_protects_a_reused_id() {
+        // The dedup behind instant-IDLE-for-new-accounts: a second claim must NOT start a second watcher
+        // (double connections/wakes). And because SQLite reuses a removed account's id, a departing
+        // watcher must free the slot ONLY if it still owns it — never evict the successor that took the id.
+        let state = AppState::new(
+            "unused.db".to_owned(),
+            std::sync::Arc::new(InMemorySecretStore::new()),
+        );
+        let first = state
+            .claim_idle_watch(7)
+            .expect("first claim starts the watcher");
+        assert!(
+            state.claim_idle_watch(7).is_none(),
+            "second claim is a no-op — already watched"
+        );
+
+        // Simulate remove (stop frees the slot) + re-add reusing id 7 → a *new* token owns the slot.
+        state.stop_idle_watch(7);
+        let second = state
+            .claim_idle_watch(7)
+            .expect("after stop, the reused id is claimable again");
+
+        // The original watcher now exits and releases with ITS token — it must not evict the successor.
+        state.release_idle_watch(7, &first);
+        assert!(
+            state.claim_idle_watch(7).is_none(),
+            "the successor's watcher still holds the slot"
+        );
+        // The successor releasing its own token does free it.
+        state.release_idle_watch(7, &second);
+        assert!(
+            state.claim_idle_watch(7).is_some(),
+            "once the real owner releases, the slot is free"
+        );
+    }
 
     #[test]
     fn build_folder_mbox_frames_oldest_first_and_escapes_bodies() {
