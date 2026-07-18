@@ -12,6 +12,9 @@ geleit-core = { path = "../geleit-core" }
 # there's no system OpenSSL dependency; the key is supplied at open time via PRAGMA key.
 rusqlite = { version = "0.40.1", features = ["bundled-sqlcipher-vendored-openssl"] }
 thiserror = "2.0.18"
+# Wipe the SQLCipher key's hex form (and the PRAGMA string built from it) from memory on drop, so the
+# key doesn't linger in freed heap after the store is opened (§9, ADR-0008). Already in the tree.
+zeroize = { version = "1.9", features = ["alloc"] }
 
 [lints]
 workspace = true

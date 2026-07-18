@@ -421,7 +421,10 @@ pub enum SendStatus {
 /// outbox drain.
 struct SendContext {
     settings: SmtpSettings,
-    password: String,
+    /// The account password. Wiped from the heap when the context drops (§9). Note that `build_transport`
+    /// hands it to lettre's `Credentials`, which keeps its own un-wiped copy for the transport's life —
+    /// outside our control; this clears the copy *we* own, not lettre's.
+    password: zeroize::Zeroizing<String>,
     imap_config: ImapConfig,
     sent_folder: Option<String>,
 }
@@ -441,11 +444,20 @@ fn send_context(
         .ok()
         .flatten()
         .ok_or_else(|| "No outgoing (SMTP) server is configured for this account.".to_owned())?;
-    let password = imap::password(secrets, &imap.username)
-        .map_err(|_| "Couldn't read your saved password.".to_owned())?
-        .ok_or_else(|| "Enter your password (Refresh to reconnect) before sending.".to_owned())?;
-    let password =
-        String::from_utf8(password).map_err(|_| "The saved password looks corrupt.".to_owned())?;
+    // Wrap the raw bytes in `Zeroizing` first, so they're wiped even on the non-UTF-8 (corrupt) path, and
+    // then take an owned `Zeroizing<String>` for the context to hold.
+    let raw = zeroize::Zeroizing::new(
+        imap::password(secrets, &imap.username)
+            .map_err(|_| "Couldn't read your saved password.".to_owned())?
+            .ok_or_else(|| {
+                "Enter your password (Refresh to reconnect) before sending.".to_owned()
+            })?,
+    );
+    let password = zeroize::Zeroizing::new(
+        std::str::from_utf8(&raw)
+            .map_err(|_| "The saved password looks corrupt.".to_owned())?
+            .to_owned(),
+    );
     let settings = SmtpSettings {
         host: smtp.host,
         port: smtp.port,

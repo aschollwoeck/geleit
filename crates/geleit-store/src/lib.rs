@@ -712,8 +712,21 @@ impl Store {
         // The hex is always valid SQL (64 chars of [0-9a-f]), so this PRAGMA can't fail at
         // prepare-time and surface the key inside a `SqlInputError`; a wrong key fails later on the
         // first read (in `migrate`), whose SQL carries no key (P2).
-        let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
-        conn.execute_batch(&format!("PRAGMA key = \"x'{hex}'\";"))?;
+        //
+        // Both the hex and the PRAGMA string carry the key material, so both are `Zeroizing` — wiped
+        // from the heap on drop rather than left in freed memory (§9, ADR-0008). SQLite copies the key
+        // into its own cipher context; our transient copies here are the ones we can clear.
+        //
+        // The hex is written **in place** into a pre-sized `Zeroizing` buffer, not built with
+        // `format!`-per-byte — a per-byte `format!` would strew 32 little heap strings, each holding two
+        // nibbles of the key, that get freed un-wiped.
+        use std::fmt::Write as _;
+        let mut hex = zeroize::Zeroizing::new(String::with_capacity(key.len() * 2));
+        for b in key {
+            let _ = write!(hex, "{b:02x}");
+        }
+        let pragma = zeroize::Zeroizing::new(format!("PRAGMA key = \"x'{}'\";", &*hex));
+        conn.execute_batch(&pragma)?;
         Self::init(conn)
     }
 

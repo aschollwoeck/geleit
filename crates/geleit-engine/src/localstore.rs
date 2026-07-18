@@ -6,6 +6,7 @@
 //! discarding the real key and bricking the user's mailbox.
 use geleit_platform::secret::SecretStore;
 use geleit_store::Store;
+use zeroize::Zeroizing;
 
 const DB_KEY_SERVICE: &str = "geleit-db";
 const DB_KEY_ACCOUNT: &str = "key";
@@ -18,14 +19,24 @@ const KEY_LEN: usize = 32;
 /// A key is generated **only** when the keychain reports the entry genuinely *absent*. A read error,
 /// or a present-but-wrong-size key, is surfaced instead — never overwritten. Overwriting would
 /// silently discard the real key and leave the encrypted database permanently unopenable.
-pub fn db_key(secrets: &dyn SecretStore) -> Result<Vec<u8>, String> {
+///
+/// Returned in a [`Zeroizing`] wrapper so the key is wiped from the heap when the caller is done with it
+/// (§9, ADR-0008), rather than left in freed memory.
+pub fn db_key(secrets: &dyn SecretStore) -> Result<Zeroizing<Vec<u8>>, String> {
     match secrets.get(DB_KEY_SERVICE, DB_KEY_ACCOUNT) {
-        Ok(Some(key)) if key.len() == KEY_LEN => return Ok(key),
-        Ok(Some(_)) => return Err("The stored encryption key looks corrupt.".to_owned()),
+        // Wrap the fetched bytes in `Zeroizing` **before** inspecting them, so a wrong-size ("corrupt")
+        // key — which may still be real key material — is wiped on the error return, not just the good one.
+        Ok(Some(key)) => {
+            let key = Zeroizing::new(key);
+            if key.len() == KEY_LEN {
+                return Ok(key);
+            }
+            return Err("The stored encryption key looks corrupt.".to_owned());
+        }
         Ok(None) => {} // first run → generate below
         Err(_) => return Err("Couldn't read the encryption key from the keychain.".to_owned()),
     }
-    let mut key = vec![0u8; KEY_LEN];
+    let mut key = Zeroizing::new(vec![0u8; KEY_LEN]);
     getrandom::fill(&mut key).map_err(|_| "Couldn't generate an encryption key.".to_owned())?;
     secrets
         .set(DB_KEY_SERVICE, DB_KEY_ACCOUNT, &key)
@@ -61,7 +72,7 @@ mod tests {
         secrets
             .set(DB_KEY_SERVICE, DB_KEY_ACCOUNT, &stored)
             .unwrap();
-        assert_eq!(db_key(&secrets).unwrap(), stored);
+        assert_eq!(db_key(&secrets).unwrap().as_slice(), stored.as_slice());
     }
 
     /// The brick-the-mailbox guard: a corrupt key must be *reported*, never silently replaced.

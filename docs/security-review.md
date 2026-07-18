@@ -1,8 +1,13 @@
 # GeleitMail — Security & Privacy Review (M8 / S8.5, PRIV-5)
 
-Date: 2026-06-22. Scope: the crypto, HTML-rendering, secrets, and network paths, and confirmation
-of **no telemetry**. This is the first-release review; findings that were fixed during development
-are noted as such.
+Date: 2026-06-22; **re-audited 2026-07-19** (whole-app pass + in-memory secret zeroization). Scope: the
+crypto, HTML-rendering, secrets, custom-protocol/IPC, filesystem, SQL, and network paths, and
+confirmation of **no telemetry**. Findings fixed during development are noted as such.
+
+**2026-07-19 verdict:** the core guarantees — no-egress, no-script-in-mail, encrypted-at-rest,
+no-injection, no cross-account leak — each hold, enforced by multiple independent layers; no
+critical/high-severity break found. The only actionable item is the low-severity popup-routing check
+noted under *HTML safety*.
 
 ## Privacy posture (honest framing)
 GeleitMail is **local-first**: mail is fetched from, and sent to, **your own provider's servers** and
@@ -34,12 +39,34 @@ to the servers you configure, plus (only if you opt in per message) remote image
 - Account passwords + the DB key live in the OS keychain via the `SecretStore` seam
   (`OsSecretStore`, Secret Service on Linux). They are **never logged**: error types carry no
   credentials or message content, and `SmtpSettings`/`ImapConfig` have redacting `Debug`.
+- **In-memory lifetime is bounded (§9, `zeroize`).** The transient copies the app holds while working —
+  the DB key returned by `db_key` and the hex/PRAGMA strings built from it (`open_encrypted`), the IMAP
+  password at login (`connect`), and the SMTP password in `SendContext` — are `Zeroizing`, so they're
+  wiped from the heap on drop rather than left in freed memory. (Copies inside third-party crates that
+  take the key/password by value — SQLCipher's cipher context, lettre's SMTP `Credentials` — are outside
+  our control; the wrapping clears every copy we own.)
 
-## HTML safety (M3)
-- Two layers: `ammonia` sanitization (strips scripts/handlers, denies relative + scheme-relative
-  URLs, strips remote `img`/`data:`/unsafe `href`) **and** the CSP network boundary. JavaScript is
-  disabled in the webview. Fixes during dev: scheme-relative `//host` (→ `url_relative(Deny)`),
-  `data:text/html` href phishing (→ external-open handler + href scheme allow-list).
+## HTML safety (M3 / M9) — four independent layers
+Mail HTML must clear **all four** before it could run anything (re-audited 2026-07-19, whole-app pass):
+1. **`ammonia` sanitization** (over html5ever, which re-serializes — the recommended mXSS defence):
+   strips `<script>`, `on*` handlers, `javascript:`/`vbscript:`, `<iframe>`/`<object>`/`<base>`/`<meta>`;
+   `href` restricted to http(s)/mailto; remote `img` blocked by default, https-only on opt-in.
+2. **Own origin, not `srcdoc`** — served from `mail://` so it carries its own CSP (a `srcdoc` frame would
+   inherit the app's and strip the message's styles).
+3. **CSP** (emitted both as a `mail://` response header and an in-page `<meta>`, with a test asserting the
+   two are identical): `default-src 'none'` — **no `script-src` at all** — `form-action 'none'`,
+   `base-uri 'none'`, `img-src`/`font-src` with no network host unless remote images are opted in.
+4. **iframe sandbox** without `allow-scripts` or `allow-same-origin`, so even a CSP slip couldn't run
+   script or reach the parent's IPC bridge.
+- The privileged UI never renders mail HTML: the only `inner_html` sinks are compile-time SVG icon
+  constants; the message body is never returned to the frontend as a string.
+- **Noted follow-up (low):** the mail frame carries `allow-popups allow-popups-to-escape-sandbox` so a
+  user-clicked `target=_blank` link surfaces as a new-window request the shell routes to the system
+  browser (`navigation_action`). Since scripts are off, a popup is only ever user-initiated; worth a
+  runtime test that a clicked link opens the *system* browser (not an in-app webview), and — if a popup
+  can slip the `on_navigation` guard — an explicit new-window handler.
+- CSS (inline/`<style>`/`url()`) is not parsed; the CSP is what blocks CSS-based tracking beacons — a
+  deliberate trade-off with no second layer, so the `mailproto` CSP-parity test is load-bearing.
 
 ## Insecure-TLS escape — build-gated
 - `allow_invalid_certs` (for the local self-signed Dovecot in dev) is compiled **only** under the
@@ -49,10 +76,12 @@ to the servers you configure, plus (only if you opt in per message) remote image
 - `cargo deny` runs in CI: advisories, licenses (allow-list), sources, and the no-egress bans above.
 
 ## Residual risks / follow-ups (not release blockers)
-- Read/flag state is **local-only** (no server `\Seen`/`\Flagged` write-back yet) — a correctness/sync
-  gap, not a security one.
 - macOS/Windows keychain backends + webview porting are pending (Linux is the supported platform).
-- Trusted-sender persistence for remote images (currently per-message) is a future convenience.
+- Trusted-sender persistence for remote images (currently per-message) is a future convenience — and a
+  deliberate default: auto-loading remote content is the tracking-pixel exposure the per-message opt-in
+  (PRIV-2) exists to avoid.
+- Secret material copied *into* third-party crates by value (SQLCipher's cipher context, lettre's SMTP
+  `Credentials`) can't be zeroized by us; our own transient copies are (see Secrets).
 
 ## Conclusion
 No telemetry, no tracking, no unexpected network egress; secrets and data encrypted at rest; HTML
