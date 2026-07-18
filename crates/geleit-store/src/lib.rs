@@ -2393,6 +2393,52 @@ impl Store {
         Ok(())
     }
 
+    /// Move a rule one step up (`up = true`) or down its account's evaluation order (ORG-8) — rules are
+    /// first-match-wins, so this is how the user sets priority. Swaps the rule's `position` with its
+    /// immediate neighbour. A no-op at the top/bottom edge, or for an unknown id.
+    ///
+    /// # Errors
+    /// The query or swap failing (a corrupt or unreadable database).
+    pub fn move_rule(&self, id: i64, up: bool) -> Result<(), StoreError> {
+        let Some((account_id, position)) = self
+            .conn
+            .query_row(
+                "SELECT account_id, position FROM rule WHERE id = ?1",
+                [id],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(());
+        };
+        // The neighbour to swap with: the closest rule above (up) or below (down) in the order.
+        let sql = if up {
+            "SELECT id, position FROM rule WHERE account_id = ?1 AND position < ?2 ORDER BY position DESC LIMIT 1"
+        } else {
+            "SELECT id, position FROM rule WHERE account_id = ?1 AND position > ?2 ORDER BY position ASC LIMIT 1"
+        };
+        let Some((neighbour_id, neighbour_pos)) = self
+            .conn
+            .query_row(sql, (account_id, position), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })
+            .optional()?
+        else {
+            return Ok(()); // already at the edge
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE rule SET position = ?2 WHERE id = ?1",
+            (id, neighbour_pos),
+        )?;
+        tx.execute(
+            "UPDATE rule SET position = ?2 WHERE id = ?1",
+            (neighbour_id, position),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// The account's INBOX messages still awaiting a rule pass (`filtered = 0`), oldest-first, with the
     /// fields a rule condition tests (ORG-8).
     ///
@@ -3473,6 +3519,22 @@ mod tests {
         assert!(rules[0].mark_read && !rules[0].star);
         assert_eq!(rules[1].target_folder, None);
         assert!(!rules[1].mark_read && rules[1].star);
+
+        // Reorder: moving r2 up swaps the evaluation order (first-match-wins priority).
+        let order = |s: &Store| {
+            s.list_rules(acc)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>()
+        };
+        s.move_rule(r2, true).unwrap();
+        assert_eq!(order(&s), vec![r2, r1], "r2 moved above r1");
+        s.move_rule(r2, true).unwrap(); // already at the top — no-op
+        assert_eq!(order(&s), vec![r2, r1]);
+        s.move_rule(r2, false).unwrap();
+        assert_eq!(order(&s), vec![r1, r2], "r2 back below r1");
+        s.move_rule(999, true).unwrap(); // unknown id — no-op, no panic
 
         // A genuinely-new message is owed a rule pass; a backfilled one is not.
         let fresh = s

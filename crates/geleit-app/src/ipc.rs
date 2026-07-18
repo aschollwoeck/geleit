@@ -1465,6 +1465,18 @@ pub async fn delete_rule(state: tauri::State<'_, AppState>, id: i64) -> Result<(
     .await
 }
 
+/// Move a rule up or down its account's evaluation order (ORG-8) — rules are first-match-wins, so this
+/// sets priority. A no-op at the edges.
+#[tauri::command]
+pub async fn move_rule(state: tauri::State<'_, AppState>, id: i64, up: bool) -> Result<(), String> {
+    with_store(state.inner().clone(), move |store| {
+        store
+            .move_rule(id, up)
+            .map_err(|_| "Couldn't reorder that rule.".to_owned())
+    })
+    .await
+}
+
 /// **Run on inbox now** (ORG-8): re-arm the whole INBOX for a rule pass and apply the rules to it, so a
 /// rule the user just added tidies the mail already sitting there. Returns how many messages it acted on.
 #[tauri::command]

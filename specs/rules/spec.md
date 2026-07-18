@@ -81,8 +81,8 @@ form (field, contains-text, folder picker + mark-read + star checkboxes); and **
 ## Out of scope (named)
 
 Server-side/Sieve rules (run-while-closed); multiple conditions or any/all logic; regex; actions beyond
-move/read/star (forward, auto-reply, delete); reordering in the UI (rules apply in creation order);
-rules on folders other than the INBOX.
+move/read/star (forward, auto-reply, delete); rules on folders other than the INBOX. *(Reordering — the
+`↑ ↓` priority controls, `move_rule` — was a follow-up, now shipped.)*
 
 ## Acceptance criteria
 
