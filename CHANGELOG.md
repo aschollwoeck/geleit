@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Keeps itself current
+- **GeleitMail can update itself.** It checks for a newer **signed** release and, when you choose,
+  installs it and restarts — so security and bug fixes reach you without a manual re-download. In
+  **Settings → General** you'll find your version, a **Check for updates** button, and an **Automatically
+  check for updates** switch (on by default). The check contacts only the release server and sends
+  **nothing about you or your mail** — it just fetches a public list of releases and compares versions on
+  your device — and an update that isn't correctly signed is refused. Installing is always your call.
+
 ### Mail that sorts itself
 - **Rules that auto-sort your inbox.** In **Settings → Rules**, set up *when this, do that*: when a
   message's **From**, **Subject**, or **To** contains some text, **move it to a folder**, **mark it

@@ -33,3 +33,9 @@ window.geleitOnSyncProgress = function (cb) {
 window.geleitOnMailArrived = function (cb) {
   window.__TAURI__.event.listen('mail-arrived', function (e) { cb(e.payload); });
 };
+
+// Subscribe to the on-launch auto-update check (APP-7). `cb` gets {version, notes} when a newer signed
+// release is available. Same npm-free shim as above.
+window.geleitOnUpdateAvailable = function (cb) {
+  window.__TAURI__.event.listen('update-available', function (e) { cb(e.payload); });
+};

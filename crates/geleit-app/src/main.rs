@@ -23,6 +23,7 @@ mod schedule;
 mod scheduler;
 mod snooze;
 mod tray;
+mod update;
 
 use geleit_platform::os_secret::OsSecretStore;
 use ipc::AppState;
@@ -120,6 +121,9 @@ fn main() {
 
     let builder = tauri::Builder::default()
         .manage(state)
+        // Auto-update (APP-7, ADR-0013): the one sanctioned outbound-HTTP path — a signed-update check
+        // against a static release feed, no user data. See `update.rs`.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // A message's HTML is served here, on its own origin — never `srcdoc` (which would inherit
         // the app's CSP and strip every message's styles). See `mailproto`.
         .register_uri_scheme_protocol("mail", mailproto::handle);
@@ -181,6 +185,9 @@ fn main() {
         ipc::add_rule,
         ipc::delete_rule,
         ipc::run_rules_now,
+        ipc::app_version,
+        ipc::check_update,
+        ipc::install_update,
         ipc::get_signature,
         ipc::set_signature,
         ipc::theme,
@@ -254,6 +261,9 @@ fn main() {
         ipc::add_rule,
         ipc::delete_rule,
         ipc::run_rules_now,
+        ipc::app_version,
+        ipc::check_update,
+        ipc::install_update,
         ipc::get_signature,
         ipc::set_signature,
         ipc::theme,
@@ -288,6 +298,8 @@ fn main() {
             // sits idle (a webview throttles timers in a hidden window).
             scheduler::spawn(app.handle().clone());
             idle::spawn(app.handle().clone());
+            // Look for a newer signed release once, shortly after boot (unless the user opted out).
+            update::spawn(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

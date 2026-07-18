@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "GeleitMail",
-  "version": "0.1.0",
   "identifier": "app.geleitmail",
   "build": {
     "frontendDist": "dist"
@@ -18,6 +17,17 @@
   },
   "bundle": {
     "active": false,
-    "icon": ["icons/icon.png"]
+    "icon": [
+      "icons/icon.png"
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/aschollwoeck/geleit/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY3RDIxQjY0RDU1NEI0M0EKUldRNnRGVFZaQnZTOXpXa2RkQ2lXQWx2RlRxZVpNRXdldE9WczcvOGdGcW42UjJuejJKb3pvSTgK"
+    }
   }
 }

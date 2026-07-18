@@ -22,7 +22,14 @@ geleit-platform = { path = "../geleit-platform" }
 # (a build + runtime system dependency — see README prerequisites); the tray-icon/muda crates were already
 # in the lock graph, so no new Rust crate, but it IS the project's first non-Rust dependency.
 tauri = { version = "2", features = ["tray-icon"] }
+# Auto-update (APP-7, ADR-0013): the official Tauri updater. Its transport is `reqwest` — the ONE
+# sanctioned exception to the "no HTTP client" ban (deny.toml). It contacts a single static release feed,
+# sends no user data, and signature-verifies every update before installing.
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
+# Required by `tauri::generate_context!` once tauri.conf.json carries a `plugins` block (updater). Already
+# in the tree (tauri depends on it) — no new crate.
+serde_json = "1"
 # navigation guard: parse + classify URLs (already in the tree via tauri)
 url = "2"
 # the background sync scheduler: a per-folder async lock + an interval timer. Already in the tree

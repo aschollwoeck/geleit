@@ -59,7 +59,11 @@ connection. Talking to your provider is the only part that needs the network, an
 - you open **Drafts** — GeleitMail looks in your provider's Drafts folder for drafts you started
   elsewhere — or continue and save one of those drafts;
 - you **fetch a file**: saving an attachment, or opening a draft that has one;
-- you **send**, or act on mail in a way that has to reach the server (archive, move, delete).
+- you **send**, or act on mail in a way that has to reach the server (archive, move, delete);
+- GeleitMail **checks for a newer version of itself** (Settings → General; on by default, and you can
+  turn it off). This is the one thing it contacts that *isn't* your mail provider — a release server —
+  and it sends **nothing about you or your mail** — it just fetches a public list of releases and compares
+  versions on your own device. Updates are signed, and install only when you choose.
 
 Nothing else about your mail leaves this machine.
 

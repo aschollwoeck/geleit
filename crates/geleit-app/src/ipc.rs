@@ -1487,6 +1487,30 @@ pub async fn run_rules_now(
     Ok(acted as i64)
 }
 
+// --- Auto-update (APP-7) --------------------------------------------------------------------------
+
+/// The running app version, for the Settings "Updates" block.
+#[tauri::command]
+pub fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_owned()
+}
+
+/// Check the release feed (APP-7). `None` = up to date; `Some({version, notes})` = a newer signed build
+/// is available. Sends only the app version + platform — no user data.
+#[tauri::command]
+pub async fn check_update(
+    app: tauri::AppHandle,
+) -> Result<Option<crate::update::UpdateInfo>, String> {
+    crate::update::check(&app).await
+}
+
+/// Download, verify, and install the pending update, then relaunch (APP-7). Never called on its own —
+/// the user confirms in the UI.
+#[tauri::command]
+pub async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    crate::update::install(&app).await
+}
+
 /// Drain an account's outbox — a worker-awaited version for the scheduler and Refresh (SEND-10).
 ///
 /// Single-flight per account: if a drain is already running (a sweep and a Refresh overlapping), this

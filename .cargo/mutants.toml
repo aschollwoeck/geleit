@@ -36,6 +36,9 @@ exclude_globs = [
     # idle.rs: the IMAP IDLE watcher — a long-lived tokio task per account needing a live server; its
     # only decision (reconnect backoff) is trivial and its effect (wake the scheduler) is glue.
     "**/geleit-app/src/idle.rs",
+    # update.rs: auto-update glue over tauri-plugin-updater — needs a live feed + a real signed artifact;
+    # the version comparison is the plugin's, so there's no logic of ours to mutate here.
+    "**/geleit-app/src/update.rs",
     # tray.rs: the system-tray icon — needs a live AppHandle + a desktop tray (libayatana-appindicator3);
     # its callbacks (show/hide the window, quit) are single-line glue with no logic to mutate.
     "**/geleit-app/src/tray.rs",

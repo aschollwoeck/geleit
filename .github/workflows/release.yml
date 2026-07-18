@@ -33,8 +33,52 @@ jobs:
           tool: wasm-bindgen-cli@0.2.125
       - name: Package (Linux x86_64)
         run: ./packaging/package-linux.sh "${GITHUB_REF_NAME}"
-      - name: Attach to the GitHub Release
+      - name: Attach the tarball to the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.tar.gz
           generate_release_notes: true
+
+      # --- Auto-update artifacts (APP-7, ADR-0013) --------------------------------------------------
+      # A SIGNED AppImage + `latest.json` for the in-app updater feed. Runs ONLY when the maintainer's
+      # signing key is configured as a secret; a release without it still ships the manual tarball above.
+      # The maintainer must generate the keypair (`cargo tauri signer generate`), set these two secrets,
+      # and put the public key in `tauri.conf.json`. See packaging/README.md + ADR-0013.
+      - name: Detect signing key
+        id: signing
+        run: |
+          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
+            echo "have_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No TAURI_SIGNING_PRIVATE_KEY secret — skipping the auto-update (AppImage) artifacts; the tarball still shipped."
+          fi
+      - name: Install tauri-cli
+        if: steps.signing.outputs.have_key == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+      - name: AppImage build dep (tray lib)
+        if: steps.signing.outputs.have_key == 'true'
+        run: sudo apt-get install -y libayatana-appindicator3-dev
+      - name: Build signed AppImage + updater signature
+        if: steps.signing.outputs.have_key == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          ./scripts/build-ui.sh --release
+          # `createUpdaterArtifacts: true` (tauri.conf.json) makes this also emit the signed
+          # `.AppImage.sig` next to the AppImage.
+          cargo tauri build --bundles appimage
+      - name: Generate latest.json
+        if: steps.signing.outputs.have_key == 'true'
+        run: ./packaging/make-latest-json.sh "${GITHUB_REF_NAME}"
+      - name: Attach the updater artifacts
+        if: steps.signing.outputs.have_key == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/appimage/*.AppImage.sig
+            latest.json
