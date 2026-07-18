@@ -422,6 +422,33 @@ pub async fn push_flags(
     Ok(pushed)
 }
 
+/// Push a batch of queued moves out of one **source** folder (OFF-4), mirroring [`push_flags`]: connect
+/// and `SELECT` the source once, then `UID MOVE` each message to its (possibly different) target. Each
+/// item is `(uid, target)`.
+///
+/// The two failure kinds are kept apart, and that split is the whole point:
+/// - **Couldn't connect or select the source** → the outer `Err`. The account is unreachable (offline)
+///   or the source folder is gone; the caller leaves every move in the batch queued to retry.
+/// - **The session is up but a `UID MOVE` is refused** (unknown target, a uid already gone) → that item
+///   comes back `false`. Retrying it never helps, so the caller stops hiding it. A move that *landed*
+///   comes back `true`.
+pub async fn move_batch(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    source: &str,
+    items: &[(u32, String)],
+) -> Result<Vec<(u32, bool)>, ImapError> {
+    let mut session = connect(config, secrets).await?;
+    session.select(source).await?;
+    let mut results = Vec::with_capacity(items.len());
+    for (uid, target) in items {
+        let moved = session.uid_mv(uid.to_string(), target).await.is_ok();
+        results.push((*uid, moved));
+    }
+    let _ = session.logout().await; // best-effort
+    Ok(results)
+}
+
 /// Set or clear the `\Flagged` (star) flag on a message by UID in `folder` (ORG-4 write-back).
 pub async fn set_flag(
     config: &ImapConfig,

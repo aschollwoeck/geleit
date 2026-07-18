@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Organizing works offline
+- **Archive, delete, and move mail without a connection.** Filing mail no longer needs a signal:
+  Archive, Delete, mark as Spam, and Move to… now take effect instantly whether you're online or not.
+  A move made offline is remembered and reaches your server the moment you reconnect — it won't snap
+  back with an error, and your mail is never lost while it waits. (Permanently emptying the Trash still
+  needs a connection.)
+
 ### Notifications you can click
 - **Click a new-mail notification to jump to GeleitMail.** New-mail notifications are now clickable — clicking one brings the app to the front.
 
