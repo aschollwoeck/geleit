@@ -145,9 +145,11 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 - **S5.6** ✅ Multi-select + bulk Archive/Delete/Star (ORG-7).
 
 > **Model:** every action applies optimistically to the local store, then a worker writes it back over
-> IMAP; failures self-heal on the next refresh. **Follow-ups (backlog):** COPY+EXPUNGE fallback for
-> non-MOVE servers; bulk move-to-arbitrary-folder + bulk mark-read; permanent bulk-delete in Trash;
-> persistent offline action queue (survives restart mid-flight); cross-client flag sync after first sync.
+> IMAP; failures self-heal on the next refresh. **Follow-ups:** COPY+EXPUNGE fallback for non-MOVE servers
+> ✅ (`move_one` in `imap.rs`: `UID MOVE` when advertised, else `UID COPY` + `\Deleted` + `UID EXPUNGE`);
+> persistent offline action queue ✅ (OFF-4, `specs/offline-moves/`). **Still backlog:** bulk
+> move-to-arbitrary-folder + bulk mark-read; permanent bulk-delete in Trash; cross-client flag sync after
+> first sync.
 
 ## M6 — Search ✅ COMPLETE
 **Delivers:** SEARCH-1, SEARCH-2, SEARCH-3, OFF-2.

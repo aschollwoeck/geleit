@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Moves work on more mail servers
+- **Archive, delete, and move now work on servers without the IMAP `MOVE` extension.** On a provider
+  that doesn't support `MOVE`, GeleitMail now files mail the portable way (copy, then remove the original)
+  instead of the action silently failing.
+
 ### Backups now keep your attachments
 - **Exported mail includes attachments.** Exporting a folder or a whole account to `.mbox` now writes
   each message exactly as your server holds it — attachments and all — instead of text only. When you're
