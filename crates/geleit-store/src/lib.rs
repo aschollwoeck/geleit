@@ -2879,6 +2879,41 @@ mod tests {
     }
 
     #[test]
+    fn a_queued_move_is_left_out_of_notifications_and_the_rules_pass() {
+        // A message the user files the instant it lands — before the notify sweep raises it, or the rule
+        // pass sorts it — must not then get a popup or be moved somewhere else by a rule. So `pending_move`
+        // hides it from the notification queue and from `unfiltered_inbox` too, not just the visible lists.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        // owed_notification = true ⇒ notified = 0 (owed a popup) AND filtered = 0 (owed a rule pass).
+        let id = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(11),
+                    message_id: Some("<m11@example.com>".to_owned()),
+                    subject: Some("just arrived".to_owned()),
+                    owed_notification: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // Before the move: it's owed a notification and awaiting a rule pass.
+        assert_eq!(s.pending_notifications(inbox, 50).unwrap().len(), 1);
+        assert_eq!(s.owed_message_ids(inbox).unwrap().len(), 1);
+        assert_eq!(s.unfiltered_inbox(acc).unwrap().len(), 1);
+
+        s.queue_move(id, "Archive").unwrap();
+        // After the move: dropped from every one of them.
+        assert!(s.pending_notifications(inbox, 50).unwrap().is_empty());
+        assert_eq!(s.pending_notification_summary(inbox).unwrap().0, 0);
+        assert!(s.owed_message_ids(inbox).unwrap().is_empty());
+        assert!(s.unfiltered_inbox(acc).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_local_only_message_is_never_a_pending_move() {
         // A Saved draft (no uid) isn't on any server, so it can't be a server move — `pending_moves`
         // must skip it, or the flush would try to move a message the server has never seen.
