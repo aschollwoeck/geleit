@@ -41,9 +41,9 @@ server and is a named follow-up.) The mbox `From ` date is the message's own dat
 
 ## Out of scope (named)
 
-Account-wide "export everything" in one action (per-folder composes to the same end; a one-click
-whole-account export is a follow-up); attachment bytes (see above); importing mbox *in*; other formats
-(Maildir, PST); scheduled/automatic backups.
+Attachment bytes (see above); importing mbox *in*; other formats (Maildir, PST); scheduled/automatic
+backups. *(Whole-account export — `export_account`, Settings → Accounts → **Export mail**, one `.mbox`
+per folder into a chosen directory — was a follow-up, now shipped.)*
 
 ## Acceptance criteria
 

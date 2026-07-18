@@ -75,6 +75,10 @@ plain-text mail-archive format that Thunderbird, Apple Mail, mutt, and even `gre
 can read. Choose it, pick where to save, and you have a portable, app-independent copy of that folder's
 mail: an archive, a backup, or a way to move to another client without asking anyone's permission.
 
+To back up **everything** at once, go to **Settings → Accounts** and choose **Export mail** on an
+account: pick a folder on your computer, and GeleitMail writes one `.mbox` per mail folder into it —
+your whole account, folder structure and all.
+
 The file holds every message's **text** faithfully, including ones you've snoozed. It does **not**
 include attachment *files* — GeleitMail keeps those on your provider and fetches them only when you ask,
 so they aren't on this device to write out; save an attachment individually (from its message) if you
