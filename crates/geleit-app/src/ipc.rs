@@ -61,6 +61,11 @@ pub struct AppState {
     /// made *during* a drain (which clears a row's `failed` after the drain read its pending set) is
     /// still picked up by that drain's rerun, not deferred to the next sweep.
     draining_outbox: Arc<Mutex<HashMap<i64, bool>>>,
+    /// Single-flight for the offline-move flush, per account (OFF-4) — same shape and reason as
+    /// `draining_outbox`. A scheduler sweep and a fresh move can both flush at once; without this they'd
+    /// read the same `pending_move` rows and run every move twice (a wasted round-trip, and a second
+    /// `move_message` for a message already gone from the source folder is an error, not a no-op).
+    draining_moves: Arc<Mutex<HashMap<i64, bool>>>,
 }
 
 impl AppState {
@@ -88,6 +93,7 @@ impl AppState {
             notifier,
             flushing: Arc::new(Mutex::new(HashMap::new())),
             draining_outbox: Arc::new(Mutex::new(HashMap::new())),
+            draining_moves: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -547,12 +553,12 @@ pub async fn move_to_role(
     };
     let st = state.inner().clone();
 
-    // Plan the move — but do NOT delete the local row yet. The safety net for an optimistic local
-    // delete ("self-heals on the next refresh") doesn't exist until S9.4, so deleting first would
-    // leave a failed move absent locally with no way back. Instead the local delete happens *after*
-    // the server confirms, below — so a failed move never removes the row from the store at all.
+    // Plan the move, then record it as a `pending_move` (OFF-4). The row is not deleted here and not
+    // moved on the server here: the marker hides it at once (the move feels instant, no network needed)
+    // and is the durable queue the flush drains. A move made offline is safely recorded and pushed on
+    // reconnect; the message stays in the store, hidden, until the server confirms — never lost.
     let plan = with_store(st.clone(), move |store| {
-        let Some((source, uid)) = store
+        let Some((source, _uid)) = store
             .message_location(id)
             .map_err(|_| "Couldn't move the message.".to_owned())?
         else {
@@ -571,33 +577,25 @@ pub async fn move_to_role(
         if target == source {
             return Ok(None); // already there
         }
-        Ok(Some((account_id, source, uid, target)))
+        Ok(Some((account_id, target)))
     })
     .await?;
 
-    let Some((account_id, source, uid, target)) = plan else {
+    let Some((account_id, target)) = plan else {
         return Ok(false);
     };
 
-    // Do the server move first, on a blocking thread. `uid_mv` is a single server-atomic
-    // copy-and-remove, so there is no window where the message is duplicated or lost.
-    let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
-    let (src, tgt) = (source.clone(), target.clone());
-    let moved = tauri::async_runtime::spawn_blocking(move || {
-        geleit_engine::sync_actions::run_move(&db, &*secrets, account_id, &src, uid as u32, &tgt)
-    })
-    .await
-    .map_err(|_| "The mailbox task stopped unexpectedly.".to_owned())?;
-    moved?; // a server failure returns here with the row still present locally — nothing lost
-
-    // Only now remove it locally, so the store and server agree. It reappears in the target folder
-    // on the next sync; it is never expunged, so no mail is lost.
-    with_store(st, move |store| {
+    // Record the move locally — instant, offline-safe (OFF-4). The message vanishes from the list now;
+    // the actual server move happens in the flush below (when online) or on the next reconnect.
+    with_store(st.clone(), move |store| {
         store
-            .delete_message(id)
-            .map_err(|_| "Couldn't update the local mailbox.".to_owned())
+            .queue_move(id, &target)
+            .map_err(|_| "Couldn't move the message.".to_owned())
     })
     .await?;
+    // Push it to the server now if we can reach it, so an online move settles at once. Offline this is a
+    // no-op that leaves it queued for the scheduler to retry — either way the move is already recorded.
+    flush_moves(&st, account_id).await;
     Ok(true)
 }
 
@@ -618,7 +616,7 @@ pub async fn move_to_folder(
     let st = state.inner().clone();
     let target = folder.clone();
     let plan = with_store(st.clone(), move |store| {
-        let Some((source, uid)) = store
+        let Some((source, _uid)) = store
             .message_location(id)
             .map_err(|_| "Couldn't move the message.".to_owned())?
         else {
@@ -638,28 +636,22 @@ pub async fn move_to_folder(
         if !known || target == source {
             return Ok(None);
         }
-        Ok(Some((account_id, source, uid)))
+        Ok(Some(account_id))
     })
     .await?;
-    let Some((account_id, source, uid)) = plan else {
+    let Some(account_id) = plan else {
         return Ok(false);
     };
 
-    // Server first — as in `move_to_role`, so a failed move never removes the row locally.
-    let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        geleit_engine::sync_actions::run_move(
-            &db, &*secrets, account_id, &source, uid as u32, &folder,
-        )
-    })
-    .await
-    .map_err(|_| "The mailbox task stopped unexpectedly.".to_owned())??;
-    with_store(st, move |store| {
+    // Queue the move (OFF-4) — instant and offline-safe, exactly as in `move_to_role`. The message
+    // hides now; the flush below pushes it to the server when online, or the scheduler does on reconnect.
+    with_store(st.clone(), move |store| {
         store
-            .delete_message(id)
-            .map_err(|_| "Couldn't update the local mailbox.".to_owned())
+            .queue_move(id, &folder)
+            .map_err(|_| "Couldn't move the message.".to_owned())
     })
     .await?;
+    flush_moves(&st, account_id).await;
     Ok(true)
 }
 
@@ -1555,6 +1547,41 @@ pub(crate) async fn flush_outbox(state: &AppState, account_id: i64) -> usize {
         }
     }
     sent
+}
+
+/// Push this account's queued offline moves to the server (OFF-4). Single-flight per account, same as
+/// [`flush_outbox`]: a sweep and a fresh move mustn't run the same `pending_move` rows at once. Returns
+/// how many moves reached the server, so a caller can tell the on-screen list is now stale. Awaited (a
+/// worker thread does the blocking IMAP work) so a move made online completes before the command
+/// returns and the list settles immediately; offline it simply queues and the scheduler retries.
+pub(crate) async fn flush_moves(state: &AppState, account_id: i64) -> usize {
+    {
+        let mut g = state.draining_moves.lock().expect("moves guard");
+        if let Some(rerun) = g.get_mut(&account_id) {
+            *rerun = true; // a flush is running — have it go round once more, then skip our own
+            return 0;
+        }
+        g.insert(account_id, false);
+    }
+    let mut moved = 0usize;
+    loop {
+        let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
+        moved += tauri::async_runtime::spawn_blocking(move || {
+            geleit_engine::sync_actions::run_flush_moves(&db, &*secrets, account_id).unwrap_or(0)
+        })
+        .await
+        .unwrap_or(0);
+        let mut g = state.draining_moves.lock().expect("moves guard");
+        match g.get_mut(&account_id) {
+            // A move was queued while we were flushing — go round once more so it goes out now too.
+            Some(rerun) if *rerun => *rerun = false,
+            _ => {
+                g.remove(&account_id);
+                break;
+            }
+        }
+    }
+    moved
 }
 
 /// Save (or update) a local draft (SEND-5). Returns the draft's id so the composer can keep editing

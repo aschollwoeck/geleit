@@ -252,7 +252,8 @@ code-reviewed and each review caught ≥3 real bugs that CI-green had missed.
 Slices defined when we reach them.
 
 - **Unified inbox** (MULTI-3) — merged cross-account view.
-- **Offline compose + reconciliation** (SEND-10/OFF-3, OFF-4).
+- **Offline compose + reconciliation** — compose (SEND-10/OFF-3) ✅ (`specs/outbox/`); **offline moves**
+  (OFF-4) ✅ (`specs/offline-moves/`).
 - **Power search** (SEARCH-4 operators, SEARCH-5 cross-account).
 - **Rules / filters** (ORG-8) ✅ client-side (`specs/rules/`); **snooze** (ORG-9) ✅ (`specs/snooze/`).
 - **Notifications** (NOTIF-1, NOTIF-2, NOTIF-3).

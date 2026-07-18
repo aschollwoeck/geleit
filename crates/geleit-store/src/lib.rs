@@ -290,6 +290,19 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX rule_account ON rule(account_id, position);
     ALTER TABLE message ADD COLUMN filtered INTEGER NOT NULL DEFAULT 1;
     ",
+    // 22 — offline moves / deletes (OFF-4): a move (Archive / Trash / Spam / Move to…) you make while
+    // offline must survive and reach the server on reconnect, the way the outbox (19) does for sends and
+    // `flags_dirty` (18) does for read/star. NULL = normal; a folder **name** = this message is queued to
+    // move there. Two facts in one column, exactly like `flags_dirty`: it hides the row from every listing
+    // (the move looks instantaneous) AND, with the row's own source folder + uid, is the durable queue the
+    // flush drains. Deliberately absent from `upsert_message`'s ON CONFLICT set, so a re-sync of the source
+    // folder — where the message still is until the move lands — preserves the marker rather than
+    // re-showing the message. The mail is never expunged, so a move that never reaches the server loses
+    // nothing; it stays safe in its source folder, hidden, until the flush finally pushes it.
+    "
+    ALTER TABLE message ADD COLUMN pending_move TEXT;
+    CREATE INDEX message_pending_move ON message(account_id) WHERE pending_move IS NOT NULL;
+    ",
 ];
 
 /// A parsed search query (SEARCH-1/4): an FTS5 `MATCH` string (`None` when there are no full-text
@@ -564,6 +577,19 @@ pub struct UnfilteredMessage {
     pub from_addr: Option<String>,
     pub subject: Option<String>,
     pub to_addrs: Option<String>,
+}
+
+/// One queued move waiting to reach the server (OFF-4) — everything `run_move` needs to push it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMove {
+    /// The local row to delete once the server confirms the move.
+    pub id: i64,
+    /// The folder the message is still in on the server (the move's source).
+    pub source_folder: String,
+    /// Its IMAP uid in that folder.
+    pub uid: i64,
+    /// The folder to move it to.
+    pub target_folder: String,
 }
 
 /// One outbox message as the user sees it in the outbox view (SEND-10) — no raw bytes.
@@ -1259,7 +1285,7 @@ impl Store {
     pub fn folder_unread_counts(&self, account_id: i64) -> Result<Vec<(i64, i64)>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT folder_id, COUNT(*) FROM message \
-             WHERE account_id = ?1 AND seen = 0 \
+             WHERE account_id = ?1 AND seen = 0 AND pending_move IS NULL \
              AND (snoozed_until IS NULL OR snoozed_until <= unixepoch()) \
              GROUP BY folder_id",
         )?;
@@ -1278,7 +1304,7 @@ impl Store {
     pub fn total_inbox_unread(&self) -> Result<i64, StoreError> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM message m JOIN folder f ON f.id = m.folder_id \
-             WHERE m.seen = 0 AND f.name = 'INBOX' COLLATE NOCASE \
+             WHERE m.seen = 0 AND f.name = 'INBOX' COLLATE NOCASE AND m.pending_move IS NULL \
              AND (m.snoozed_until IS NULL OR m.snoozed_until <= unixepoch())",
             [],
             |r| r.get(0),
@@ -1369,7 +1395,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, uid, message_id, in_reply_to, subject, from_name, from_addr, date, seen, \
              has_attachments, snippet, flagged \
-             FROM message WHERE folder_id = ?1 \
+             FROM message WHERE folder_id = ?1 AND pending_move IS NULL \
              AND (snoozed_until IS NULL OR snoozed_until <= unixepoch()) \
              ORDER BY date DESC, id DESC LIMIT ?2",
         )?;
@@ -1410,7 +1436,7 @@ impl Store {
     ) -> Result<Vec<PendingNotification>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, from_name, from_addr, subject FROM message \
-             WHERE folder_id = ?1 AND notified = 0 AND seen = 0 \
+             WHERE folder_id = ?1 AND notified = 0 AND seen = 0 AND pending_move IS NULL \
              ORDER BY date DESC, id DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map((folder_id, limit), |r| {
@@ -1439,7 +1465,7 @@ impl Store {
     ) -> Result<(i64, Option<i64>), StoreError> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*), MAX(id) FROM message \
-             WHERE folder_id = ?1 AND notified = 0 AND seen = 0",
+             WHERE folder_id = ?1 AND notified = 0 AND seen = 0 AND pending_move IS NULL",
             [folder_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?)
@@ -1455,7 +1481,8 @@ impl Store {
     pub fn owed_message_ids(&self, folder_id: i64) -> Result<Vec<String>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT message_id FROM message \
-             WHERE folder_id = ?1 AND notified = 0 AND seen = 0 AND message_id IS NOT NULL",
+             WHERE folder_id = ?1 AND notified = 0 AND seen = 0 AND message_id IS NOT NULL \
+             AND pending_move IS NULL",
         )?;
         let rows = stmt.query_map([folder_id], |r| r.get(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1573,7 +1600,7 @@ impl Store {
             "SELECT m.id, m.uid, m.message_id, m.in_reply_to, m.subject, m.from_name, m.from_addr, \
              m.date, m.seen, m.has_attachments, m.snippet, m.flagged, m.account_id \
              FROM message m JOIN folder f ON f.id = m.folder_id \
-             WHERE f.name = 'INBOX' COLLATE NOCASE \
+             WHERE f.name = 'INBOX' COLLATE NOCASE AND m.pending_move IS NULL \
              AND (m.snoozed_until IS NULL OR m.snoozed_until <= unixepoch()) \
              ORDER BY m.date DESC, m.id DESC LIMIT ?1",
         )?;
@@ -1888,6 +1915,52 @@ impl Store {
             .optional()?)
     }
 
+    /// Queue a move to `target_folder` (OFF-4): mark the message pending so it vanishes from every
+    /// listing at once, and let [`Self::pending_moves`] hand it to the server flush. Local + instant —
+    /// no network — so a move made offline is recorded now and pushed on reconnect. Overwrites any
+    /// earlier pending target (moving a still-queued message again just changes where it's headed).
+    pub fn queue_move(&self, message_id: i64, target_folder: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE message SET pending_move = ?2 WHERE id = ?1",
+            (message_id, target_folder),
+        )?;
+        Ok(())
+    }
+
+    /// Cancel a message's queued move (OFF-4): drop the marker so it reappears in its source folder.
+    /// Used when the server **refuses** the move (an unknown target, or a uid that's already gone) —
+    /// retrying such a move never succeeds, so rather than hide the message forever the flush un-hides
+    /// it, and the user sees it back where it was. (A move that merely can't reach the server stays
+    /// queued instead — that's the offline case, handled by leaving the marker be.)
+    pub fn clear_pending_move(&self, message_id: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE message SET pending_move = NULL WHERE id = ?1",
+            [message_id],
+        )?;
+        Ok(())
+    }
+
+    /// Every move waiting to reach this account's server (OFF-4), each with the source folder + uid the
+    /// server call needs and the local id to delete once it lands. A message with no uid (a local-only
+    /// Saved draft) can't be moved on a server it isn't on, so it's left out.
+    pub fn pending_moves(&self, account_id: i64) -> Result<Vec<PendingMove>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, f.name, m.uid, m.pending_move \
+             FROM message m JOIN folder f ON f.id = m.folder_id \
+             WHERE m.account_id = ?1 AND m.pending_move IS NOT NULL AND m.uid IS NOT NULL \
+             ORDER BY m.id ASC",
+        )?;
+        let rows = stmt.query_map([account_id], |r| {
+            Ok(PendingMove {
+                id: r.get(0)?,
+                source_folder: r.get(1)?,
+                uid: r.get(2)?,
+                target_folder: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Set a message's local read state. Server write-back of `\Seen` is the engine's job (SYNC-5).
     pub fn set_seen(&self, message_id: i64, seen: bool) -> Result<(), StoreError> {
         // Mark the flag dirty: this is a local change the server doesn't know about yet, so the SYNC-5
@@ -1993,7 +2066,7 @@ impl Store {
                      m.from_addr, m.date, m.seen, m.has_attachments, m.snippet, m.flagged, \
                      snippet(message_fts, -1, '', '', '…', 10) \
                      FROM message_fts JOIN message m ON m.id = message_fts.rowid \
-                     WHERE message_fts MATCH ?1 AND m.account_id = ?2",
+                     WHERE message_fts MATCH ?1 AND m.account_id = ?2 AND m.pending_move IS NULL",
                 );
                 if parsed.require_attachment {
                     sql.push_str(" AND m.has_attachments = 1");
@@ -2016,7 +2089,7 @@ impl Store {
                     "SELECT m.id, m.uid, m.message_id, m.in_reply_to, m.subject, m.from_name, \
                      m.from_addr, m.date, m.seen, m.has_attachments, m.snippet, m.flagged \
                      FROM message m \
-                     WHERE m.account_id = ?1 AND m.has_attachments = 1 \
+                     WHERE m.account_id = ?1 AND m.has_attachments = 1 AND m.pending_move IS NULL \
                      ORDER BY m.date DESC, m.id DESC LIMIT ?2",
                 )?;
                 let rows = stmt.query_map((account_id, limit), header_from_row)?;
@@ -2041,7 +2114,7 @@ impl Store {
                      m.from_addr, m.date, m.seen, m.has_attachments, m.snippet, m.flagged, \
                      snippet(message_fts, -1, '', '', '…', 10), m.account_id \
                      FROM message_fts JOIN message m ON m.id = message_fts.rowid \
-                     WHERE message_fts MATCH ?1",
+                     WHERE message_fts MATCH ?1 AND m.pending_move IS NULL",
                 );
                 if parsed.require_attachment {
                     sql.push_str(" AND m.has_attachments = 1");
@@ -2063,7 +2136,8 @@ impl Store {
                     "SELECT m.id, m.uid, m.message_id, m.in_reply_to, m.subject, m.from_name, \
                      m.from_addr, m.date, m.seen, m.has_attachments, m.snippet, m.flagged, \
                      m.account_id FROM message m \
-                     WHERE m.has_attachments = 1 ORDER BY m.date DESC, m.id DESC LIMIT ?1",
+                     WHERE m.has_attachments = 1 AND m.pending_move IS NULL \
+                     ORDER BY m.date DESC, m.id DESC LIMIT ?1",
                 )?;
                 let rows =
                     stmt.query_map([limit], |r| Ok((header_from_row(r)?, r.get::<_, i64>(12)?)))?;
@@ -2449,6 +2523,7 @@ impl Store {
             "SELECT m.id, m.from_name, m.from_addr, m.subject, m.to_addrs \
              FROM message m JOIN folder f ON f.id = m.folder_id \
              WHERE m.account_id = ?1 AND f.name = 'INBOX' COLLATE NOCASE AND m.filtered = 0 \
+             AND m.pending_move IS NULL \
              ORDER BY m.id ASC",
         )?;
         let rows = stmt.query_map([account_id], |r| {
@@ -2727,6 +2802,102 @@ mod tests {
         let msgs = s.messages_in_folder(fld, 50).unwrap();
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].seen);
+    }
+
+    #[test]
+    fn a_queued_move_hides_the_message_and_survives_a_resync() {
+        // OFF-4: a move made offline is a `pending_move` marker. It must (1) hide the message from every
+        // listing at once, (2) show up in `pending_moves` with the source folder + uid the server call
+        // needs, and — the property that makes it safe — (3) survive a re-sync of the source folder,
+        // where the message still is, rather than being un-hidden and re-shown.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let m = NewMessage {
+            uid: Some(7),
+            subject: Some("Hi".to_owned()),
+            seen: false,
+            ..Default::default()
+        };
+        let id = s.upsert_message(acc, inbox, &m).unwrap();
+        assert_eq!(s.messages_in_folder(inbox, 50).unwrap().len(), 1);
+
+        s.queue_move(id, "Archive").unwrap();
+        // Hidden everywhere the user would see it — including search, which is a listing too.
+        assert!(s.messages_in_folder(inbox, 50).unwrap().is_empty());
+        assert!(s.messages_in_all_inboxes(50).unwrap().is_empty());
+        assert_eq!(s.total_inbox_unread().unwrap(), 0);
+        assert!(s.folder_unread_counts(acc).unwrap().is_empty());
+        assert!(
+            s.search_messages(acc, "Hi", 50).unwrap().is_empty(),
+            "a queued move must hide the message from search too"
+        );
+        assert!(s.pending_notifications(inbox, 50).unwrap().is_empty());
+        assert_eq!(s.pending_notification_summary(inbox).unwrap().0, 0);
+        // Queued, with everything the server move needs.
+        let pending = s.pending_moves(acc).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id);
+        assert_eq!(pending[0].source_folder, "INBOX");
+        assert_eq!(pending[0].uid, 7);
+        assert_eq!(pending[0].target_folder, "Archive");
+
+        // A re-sync of INBOX (the message is still there on the server until the move lands) must not
+        // clear the marker: the row stays hidden and stays queued.
+        let id2 = s.upsert_message(acc, inbox, &m).unwrap();
+        assert_eq!(id2, id);
+        assert!(s.messages_in_folder(inbox, 50).unwrap().is_empty());
+        assert_eq!(s.pending_moves(acc).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn clearing_a_pending_move_brings_the_message_back() {
+        // OFF-4 recovery: when the server refuses a move (unknown target / gone uid), the flush clears
+        // the marker so the message reappears in its source folder rather than hiding behind a move that
+        // can never complete.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let id = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(9),
+                    subject: Some("back soon".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.queue_move(id, "Nowhere").unwrap();
+        assert!(s.messages_in_folder(inbox, 50).unwrap().is_empty());
+        s.clear_pending_move(id).unwrap();
+        let back = s.messages_in_folder(inbox, 50).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].id, id);
+        assert!(s.pending_moves(acc).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_local_only_message_is_never_a_pending_move() {
+        // A Saved draft (no uid) isn't on any server, so it can't be a server move — `pending_moves`
+        // must skip it, or the flush would try to move a message the server has never seen.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let drafts = s.upsert_folder(acc, "Drafts").unwrap();
+        let id = s
+            .upsert_message(
+                acc,
+                drafts,
+                &NewMessage {
+                    uid: None,
+                    subject: Some("wip".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.queue_move(id, "Archive").unwrap();
+        assert!(s.pending_moves(acc).unwrap().is_empty());
     }
 
     #[test]

@@ -132,6 +132,12 @@ async fn sweep(
         // offline reaches the server here, and going out first means the sync's flag pull sees a
         // server that already agrees rather than a stale one.
         crate::ipc::flush_flags(&state, *account_id).await;
+        // Push any moves made while offline (OFF-4): a message Archived / Trashed / Moved without a
+        // connection reaches the server now. One that lands leaves its source folder and reappears in
+        // the target, so the list is stale — count it as a change.
+        if crate::ipc::flush_moves(&state, *account_id).await > 0 {
+            changed += 1;
+        }
         // Send anything waiting in the outbox (SEND-10): mail composed while offline goes out now that
         // we've reached the server. A message that goes out lands in Sent, so the list is stale too.
         if crate::ipc::flush_outbox(&state, *account_id).await > 0 {

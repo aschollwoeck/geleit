@@ -123,6 +123,73 @@ pub fn run_move(
         .map_err(|_| "Couldn't move the message on the server.".to_owned())
 }
 
+/// Push this account's queued moves (OFF-4) to the server — the offline-durable sibling of
+/// [`run_flush_flags`]. Each move made while offline was recorded as a `pending_move` marker (local +
+/// instant); here we finally hand it to the server. Moves are grouped by **source folder** so each is
+/// one session ([`imap::move_batch`]), and every outcome has exactly one of three fates:
+///
+/// - **Landed** → the local row is deleted. Its source no longer has it on the server, and a sync of the
+///   target folder re-adds it with the real uid — so deleting here can't lose or duplicate it.
+/// - **Unreachable** (couldn't connect or select the source) → the whole group is left queued; the
+///   marker is untouched, the message keeps hiding, and the next sweep retries. This is the offline case
+///   — mail composed on the train stays filed-in-intent and reconciles on reconnect.
+/// - **Refused** (the session is up but the server rejected the move — unknown target, a uid already
+///   gone) → the marker is cleared, so the message reappears in its source folder rather than hiding
+///   forever behind a move that can never complete.
+///
+/// Returns how many moves reached the server. Blocking + network: **worker thread.**
+pub fn run_flush_moves(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+) -> Result<usize, String> {
+    let store = open_store(db_path, secrets)?;
+    let pending = store
+        .pending_moves(account_id)
+        .map_err(|_| "Couldn't read pending moves.".to_owned())?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let config = account_imap(db_path, secrets, account_id)?;
+    let rt = runtime()?;
+
+    // Group by source folder so each folder is one session, and keep a (source, uid) → message-id map
+    // to act on exactly the right local rows once the batch reports back.
+    let mut by_source: std::collections::HashMap<String, Vec<(u32, String)>> =
+        std::collections::HashMap::new();
+    let mut id_of: std::collections::HashMap<(String, u32), i64> = std::collections::HashMap::new();
+    for p in pending {
+        let uid = p.uid as u32;
+        by_source
+            .entry(p.source_folder.clone())
+            .or_default()
+            .push((uid, p.target_folder));
+        id_of.insert((p.source_folder, uid), p.id);
+    }
+
+    let mut moved = 0usize;
+    for (source, items) in by_source {
+        // Couldn't reach the server (or select the source): offline — leave the whole group queued.
+        let Ok(results) = rt.block_on(imap::move_batch(&config, secrets, &source, &items)) else {
+            continue;
+        };
+        for (uid, landed) in results {
+            let Some(&id) = id_of.get(&(source.clone(), uid)) else {
+                continue;
+            };
+            if landed {
+                if store.delete_message(id).is_ok() {
+                    moved += 1;
+                }
+            } else {
+                // Server refused this move (bad target / gone uid): un-hide it rather than loop forever.
+                let _ = store.clear_pending_move(id);
+            }
+        }
+    }
+    Ok(moved)
+}
+
 /// Fetch one attachment's bytes on demand (READ-8, save to disk). Fetches the whole raw message by
 /// UID and extracts the `index`-th attachment. Returns its filename (if the message names it) and
 /// bytes. Blocking + network: **worker thread.**
