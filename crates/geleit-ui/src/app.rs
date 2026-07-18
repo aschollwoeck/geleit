@@ -513,6 +513,20 @@ pub fn App() -> impl IntoView {
             }
         });
     };
+    // Export a whole account — one mbox per folder into a chosen directory (SEC-4).
+    let export_account_action = move |account_id: i64| {
+        leptos::task::spawn_local(async move {
+            match api::export_account(account_id).await {
+                Ok(Some(0)) => toast.set(Some("This account has no mail to export.".to_owned())),
+                Ok(Some(n)) => toast.set(Some(format!(
+                    "Exported {n} message{} — one .mbox per folder.",
+                    if n == 1 { "" } else { "s" }
+                ))),
+                Ok(None) => {} // cancelled
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
 
     // The background scheduler found new mail (NOTIF-1). Slip it into the list quietly — no toast, no
     // jump: it just appears, with its unread dot, the way mail should. The re-list goes through the
@@ -2931,6 +2945,7 @@ pub fn App() -> impl IntoView {
                                                             <div style="font-weight:600;font-size:14px">{email}</div>
                                                             <div class="sub"><span class="dot" style=format!("background:{}", account_color(i))></span>"IMAP · signed in"</div>
                                                         </div>
+                                                        <span class="acct-link" title="Save every folder as a .mbox file" on:click=move |_| export_account_action(id)>"Export mail"</span>
                                                         <span class="remove-link" on:click=move |_| confirm.set(Some((id, email2.clone())))>"Remove"</span>
                                                     </div>
                                                 }

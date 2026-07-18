@@ -19,11 +19,12 @@
   there.
 
 ### Your mail is yours
-- **Export a folder to a standard mbox file.** A new **Export** button in the message-list header writes
-  the folder you're viewing to a portable `.mbox` file — the format Thunderbird, mutt, `grep`, and every
-  other mail tool can read — so you can archive or move your mail whenever you like. (It writes each
-  message's text faithfully; attachment *files* aren't included, since GeleitMail keeps them on your
-  provider and fetches them on demand — save an attachment individually if you need it.)
+- **Export your mail to standard mbox files.** The **Export** button in the message-list header writes the
+  folder you're viewing to a portable `.mbox` file — the format Thunderbird, mutt, `grep`, and every other
+  mail tool can read — and **Settings → Accounts → Export mail** exports a whole account, one `.mbox` per
+  folder, into a directory you choose (so the folder structure is kept). Archive or move your mail whenever
+  you like. (It writes each message's text faithfully; attachment *files* aren't included, since GeleitMail
+  keeps them on your provider and fetches them on demand — save an attachment individually if you need it.)
 
 ### Defer it for later
 - **Snooze a message.** Can't deal with something yet? **Snooze** it — from an open message or a bulk

@@ -2167,6 +2167,32 @@ pub async fn pick_files() -> Result<Vec<String>, String> {
 /// A native "save as" dialog, pre-filled with `default_name`. `Ok(Some(path))` = chosen,
 /// `Ok(None)` = the user cancelled, `Err` = no dialog tool is installed (so the caller can say so,
 /// rather than silently no-op). Blocking — call inside `spawn_blocking`.
+/// Native "choose a folder" dialog (for the whole-account export destination). `None` if cancelled.
+fn pick_directory() -> Result<Option<String>, String> {
+    let attempts: [(&str, Vec<String>); 2] = [
+        (
+            "zenity",
+            vec![
+                "--file-selection".into(),
+                "--directory".into(),
+                "--title=Choose a folder to export into".into(),
+            ],
+        ),
+        ("kdialog", vec!["--getexistingdirectory".into(), ".".into()]),
+    ];
+    for (cmd, args) in attempts {
+        match std::process::Command::new(cmd).args(&args).output() {
+            Ok(out) if out.status.success() => {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                return Ok((!path.is_empty()).then_some(path));
+            }
+            Ok(_) => return Ok(None), // ran but cancelled
+            Err(_) => continue,       // not installed → try the next tool
+        }
+    }
+    Err("No folder picker found — install zenity or kdialog.".to_owned())
+}
+
 fn pick_save_path(default_name: &str) -> Result<Option<String>, String> {
     let attempts: [(&str, Vec<String>); 2] = [
         (
@@ -2261,6 +2287,50 @@ pub async fn export_folder(
         std::fs::write(&path, &mbox)
             .map(|()| Some(count))
             .map_err(|_| "Couldn't write that file.".to_owned())
+    })
+    .await
+    .map_err(|_| "The export task stopped unexpectedly.".to_owned())?
+}
+
+/// Export a whole account to a folder the user picks (SEC-4) — one `.mbox` file per mail folder, so the
+/// folder structure is preserved (unlike jamming everything into a single file). Returns the total
+/// messages written, `Some(0)` if the account has none, or `None` if cancelled. Attachment bytes aren't
+/// included, same as the single-folder export.
+#[tauri::command]
+pub async fn export_account(
+    state: tauri::State<'_, AppState>,
+    account_id: i64,
+) -> Result<Option<i64>, String> {
+    // Build every folder's mbox on the store thread: (safe filename, bytes) for the non-empty ones.
+    let (files, total) = with_store(state.inner().clone(), move |store| {
+        let folders = store
+            .folders_for_account(account_id)
+            .map_err(|_| "Couldn't read your folders.".to_owned())?;
+        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut total = 0i64;
+        for f in folders {
+            let (bytes, count) = build_folder_mbox(store, f.id)?;
+            if count > 0 {
+                files.push((format!("{}.mbox", safe_filename_stem(&f.name)), bytes));
+                total += count;
+            }
+        }
+        Ok((files, total))
+    })
+    .await?;
+    if total == 0 {
+        return Ok(Some(0));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(dir) = pick_directory()? else {
+            return Ok(None); // cancelled
+        };
+        let base = std::path::Path::new(&dir);
+        for (name, bytes) in &files {
+            std::fs::write(base.join(name), bytes)
+                .map_err(|_| "Couldn't write the export files.".to_owned())?;
+        }
+        Ok(Some(total))
     })
     .await
     .map_err(|_| "The export task stopped unexpectedly.".to_owned())?

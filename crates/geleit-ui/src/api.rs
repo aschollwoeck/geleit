@@ -748,6 +748,12 @@ pub async fn export_folder(folder_id: i64, folder_name: String) -> Result<Option
     .await
 }
 
+/// Export a whole account — one mbox per folder into a chosen directory (SEC-4). `Some(total)` messages
+/// written, `Some(0)` if empty, `None` if cancelled.
+pub async fn export_account(account_id: i64) -> Result<Option<i64>, String> {
+    call("export_account", &AccountArgs { account_id }).await
+}
+
 /// Open a `.eml` file into the account's local Saved folder; returns the new message id (or `None`
 /// if cancelled) so the caller can switch to Saved and open it.
 pub async fn open_eml_file(account_id: i64) -> Result<Option<i64>, String> {
