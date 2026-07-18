@@ -69,7 +69,7 @@ impl Notifier for DesktopNotifier {
                 // (app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout)
                 &(
                     self.app_name.as_str(),
-                    0u32,          // replaces_id: 0 = a new notification, never overwrite another app's
+                    0u32, // replaces_id: 0 = a new notification, never overwrite another app's
                     "mail-unread", // a stock icon name; desktops that don't have it show none
                     n.summary.as_str(),
                     n.body.as_str(),

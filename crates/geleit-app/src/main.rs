@@ -303,10 +303,12 @@ fn main() {
             // the window (GTK is main-thread-only).
             {
                 let handle = app.handle().clone();
-                app.state::<AppState>().notifier.set_on_activate(Box::new(move || {
-                    let h = handle.clone();
-                    let _ = handle.run_on_main_thread(move || tray::show_main(&h));
-                }));
+                app.state::<AppState>()
+                    .notifier
+                    .set_on_activate(Box::new(move || {
+                        let h = handle.clone();
+                        let _ = handle.run_on_main_thread(move || tray::show_main(&h));
+                    }));
             }
             // Mail arrives on its own from here — the host polls, so it keeps working while the UI
             // sits idle (a webview throttles timers in a hidden window).
