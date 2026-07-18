@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Notifications you can click
+- **Click a new-mail notification to jump to GeleitMail.** New-mail notifications are now clickable — clicking one brings the app to the front.
+
 ### Keeps itself current
 - **GeleitMail can update itself.** It checks for a newer **signed** release and, when you choose,
   installs it and restarts — so security and bug fixes reach you without a manual re-download. In

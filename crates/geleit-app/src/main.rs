@@ -28,7 +28,7 @@ mod update;
 use geleit_platform::os_secret::OsSecretStore;
 use ipc::AppState;
 use std::sync::Arc;
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// Hand a URL to the user's real browser. Deliberately a subprocess rather than a Tauri plugin: no
 /// new capability to grant, and — the point — **no HTTP client in the app**. GeleitMail never fetches
@@ -298,6 +298,16 @@ fn main() {
             // The tray icon keeps GeleitMail present after the window is closed — closing hides to the
             // tray rather than quitting, so mail keeps arriving. Built after the window it reveals.
             tray::setup(app.handle());
+            // Clicking a new-mail notification brings the window forward (NOTIF-1). The click arrives on
+            // the notifier's own D-Bus listener thread, so hop to Tauri's main thread before touching
+            // the window (GTK is main-thread-only).
+            {
+                let handle = app.handle().clone();
+                app.state::<AppState>().notifier.set_on_activate(Box::new(move || {
+                    let h = handle.clone();
+                    let _ = handle.run_on_main_thread(move || tray::show_main(&h));
+                }));
+            }
             // Mail arrives on its own from here — the host polls, so it keeps working while the UI
             // sits idle (a webview throttles timers in a hidden window).
             scheduler::spawn(app.handle().clone());
