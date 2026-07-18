@@ -448,13 +448,61 @@ pub async fn move_batch(
 ) -> Result<Vec<(u32, bool)>, ImapError> {
     let mut session = connect(config, secrets).await?;
     session.select(source).await?;
+    let move_capable = server_moves(&mut session).await;
     let mut results = Vec::with_capacity(items.len());
     for (uid, target) in items {
-        let moved = session.uid_mv(uid.to_string(), target).await.is_ok();
+        let moved = move_one(&mut session, *uid, target, move_capable)
+            .await
+            .is_ok();
         results.push((*uid, moved));
     }
     let _ = session.logout().await; // best-effort
     Ok(results)
+}
+
+/// Whether the server advertises the `MOVE` extension (RFC 6851). Best-effort: a `CAPABILITY` that can't
+/// be read is treated as **no MOVE**, so we take the portable COPY+delete path rather than send a `UID
+/// MOVE` the server might reject — the fallback works everywhere.
+async fn server_moves(session: &mut ImapSession) -> bool {
+    session
+        .capabilities()
+        .await
+        .map(|caps| caps.has_str("MOVE"))
+        .unwrap_or(false)
+}
+
+/// Move one message by UID on an already-selected source folder. Uses `UID MOVE` (RFC 6851) when the
+/// server has it; otherwise the portable equivalent — **COPY** to the target, mark the source copy
+/// `\Deleted`, then **UID EXPUNGE** it. `UID EXPUNGE` (UIDPLUS, already relied on by
+/// [`delete_permanently`]) removes *only this uid*, never other `\Deleted` mail in the folder.
+///
+/// **The COPY is the move.** `Ok` means the message reached the target; `Err` means it did not, and
+/// nothing on the server changed. That contract matters for [`move_batch`]: its caller un-hides a move
+/// that came back `false`, and un-hiding a message whose copy already landed would show it in two places.
+/// So on the fallback path the COPY is `?`-propagated (a failure there is a genuine "didn't move"), but
+/// the source cleanup afterwards is **best-effort** — once the copy is in the target the move has
+/// happened, and a failed expunge only leaves a `\Deleted` straggler in the source for a later expunge to
+/// clear, never a lost message and never a bounced-back duplicate. (Non-atomic by nature; the atomic
+/// `UID MOVE` path has no such window.)
+async fn move_one(
+    session: &mut ImapSession,
+    uid: u32,
+    target: &str,
+    move_capable: bool,
+) -> Result<(), ImapError> {
+    if move_capable {
+        session.uid_mv(uid.to_string(), target).await?;
+        return Ok(());
+    }
+    session.uid_copy(uid.to_string(), target).await?; // the move itself — a failure here means untouched
+    let _ = drain(
+        session
+            .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
+            .await,
+    )
+    .await; // best-effort source cleanup; the copy already landed
+    let _ = drain(session.uid_expunge(uid.to_string()).await).await;
+    Ok(())
 }
 
 /// Set or clear the `\Flagged` (star) flag on a message by UID in `folder` (ORG-4 write-back).
@@ -480,7 +528,8 @@ pub async fn set_seen(
 }
 
 /// Move a message by UID from `source` to `target` (ORG-1/2/3 write-back; archive/trash/move all
-/// reduce to a move). Uses the IMAP `MOVE` extension (`UID MOVE`); the target mailbox must exist.
+/// reduce to a move). Uses the `MOVE` extension (`UID MOVE`) when the server has it, else a portable
+/// COPY + `\Deleted` + `UID EXPUNGE` (see [`move_one`]); the target mailbox must exist.
 pub async fn move_message(
     config: &ImapConfig,
     secrets: &dyn SecretStore,
@@ -490,10 +539,31 @@ pub async fn move_message(
 ) -> Result<(), ImapError> {
     let mut session = connect(config, secrets).await?;
     session.select(source).await?;
-    let result = session.uid_mv(uid.to_string(), target).await;
+    let move_capable = server_moves(&mut session).await;
+    let result = move_one(&mut session, uid, target, move_capable).await;
     let _ = session.logout().await; // best-effort
     result?;
     Ok(())
+}
+
+/// Test seam: move a message using the **portable COPY + `\Deleted` + `UID EXPUNGE` fallback**,
+/// regardless of whether the server also supports `MOVE`. Lets the non-`MOVE` path be exercised against a
+/// server that *does* have `MOVE` (the local Dovecot), so `examples/live_copy_move_fallback.rs` can prove
+/// it lands a message just like `UID MOVE` would. Not used by the app — production goes through
+/// [`move_message`], which prefers `MOVE` when advertised.
+#[doc(hidden)]
+pub async fn move_message_via_copy(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    source: &str,
+    uid: u32,
+    target: &str,
+) -> Result<(), ImapError> {
+    let mut session = connect(config, secrets).await?;
+    session.select(source).await?;
+    let result = move_one(&mut session, uid, target, false).await; // force the fallback
+    let _ = session.logout().await; // best-effort
+    result
 }
 
 /// Permanently delete one message by UID (ORG-2): mark `\Deleted` then `UID EXPUNGE`.
