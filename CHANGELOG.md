@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Under the hood: tighter secret handling
+- **Your encryption key and passwords are wiped from memory as soon as they're used**, instead of
+  lingering in freed memory, and the whole app got a fresh security review (no issues found in its
+  no-tracking, encrypted-at-rest, and safe-mail-rendering guarantees).
+
 ### All your accounts stay complete in the background
 - **Every account's full mailbox now downloads in the background, not just the one you're viewing.**
   GeleitMail progressively catches up all folders of all accounts, so a secondary account you rarely open

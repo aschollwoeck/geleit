@@ -24,6 +24,9 @@ thiserror = "2.0.18"
 tokio = { version = "1.52.3", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "logging"] }
 webpki-roots = "1.0.8"
+# Wipe the DB key and account passwords from memory once we're done with them (§9, ADR-0004/0008), so
+# a secret doesn't outlive its use in freed heap. Already in the tree (via rustls/secret-service).
+zeroize = { version = "1.9", features = ["alloc"] }
 
 [features]
 # Compiles in the dev-only "accept any server certificate" path (for the local self-signed

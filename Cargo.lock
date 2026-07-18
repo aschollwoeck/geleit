@@ -1645,6 +1645,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "webpki-roots",
+ "zeroize",
 ]
 
 [[package]]
@@ -1663,6 +1664,7 @@ dependencies = [
  "geleit-core",
  "rusqlite",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]

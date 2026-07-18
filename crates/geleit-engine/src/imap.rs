@@ -102,10 +102,17 @@ pub(crate) async fn connect(
     // D-Bus call. It's safe today — `run_setup`/`run_refresh` drive this on a dedicated worker
     // runtime, never the UI executor — but if connect() is ever called on a shared async executor,
     // move this behind `spawn_blocking` (guidelines §5).
-    let password = secrets
-        .get(SECRET_SERVICE, &config.username)?
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .ok_or(ImapError::NoPassword)?;
+    // `Zeroizing`: the fetched password bytes are wiped from the heap when this fn returns, not left in
+    // freed memory after login (§9) — and wrapping the *bytes* (before any UTF-8 conversion) means even a
+    // non-UTF-8 stored password is wiped, not dropped raw. We borrow a `&str` view for login rather than
+    // making an owned copy. (async-imap builds its own `LOGIN` command string from it, which it doesn't
+    // zeroize and we can't reach — the boundary of what this covers.)
+    let password = zeroize::Zeroizing::new(
+        secrets
+            .get(SECRET_SERVICE, &config.username)?
+            .ok_or(ImapError::NoPassword)?,
+    );
+    let password = std::str::from_utf8(&password).map_err(|_| ImapError::NoPassword)?;
 
     let tcp = TcpStream::connect((config.host.as_str(), config.port)).await?;
     let connector = TlsConnector::from(Arc::new(tls_config(config.allow_invalid_certs)?));
@@ -119,7 +126,7 @@ pub(crate) async fn connect(
     let _greeting = client.read_response().await?.ok_or(ImapError::NoGreeting)?;
 
     client
-        .login(&config.username, &password)
+        .login(&config.username, password)
         .await
         .map_err(|(err, _client)| ImapError::from(err))
 }
