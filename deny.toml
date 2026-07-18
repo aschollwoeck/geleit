@@ -91,18 +91,22 @@ wildcards = "deny"
 # Our internal crates are path deps (no version req); don't flag them as wildcards.
 allow-wildcard-paths = true
 # No-telemetry guard (PRIV-5, S8.5). The app's network egress is: IMAP/SMTP to the user's own server
-# (a raw TCP+TLS socket), and — strictly opt-in, per message — fetching a message's remote images
-# when the user clicks "Load images" (PRIV-2). That image fetch uses `ureq` (minimal, blocking,
-# rustls), the ONLY allowed HTTP client; it never runs on its own. Ban every other general HTTP
-# client and any telemetry/analytics SDK so none can be pulled in (silently shipping egress) without
-# a deliberate, reviewed change here. If a future feature genuinely needs one, justify it.
+# (a raw TCP+TLS socket); and — auto-update (APP-7, ADR-0013) — a GET of a static release feed via
+# `tauri-plugin-updater` (which uses `reqwest`). That updater request carries only the app version +
+# platform (to serve the right binary) and NO user data; updates are signature-verified before install.
+# It is the ONE explicit, documented exception to "no HTTP client". Ban every OTHER general HTTP client
+# and any telemetry/analytics SDK so none can be pulled in (silently shipping egress) without a
+# deliberate, reviewed change here. If a future feature genuinely needs one, justify it.
 deny = [
     # ureq was the only HTTP client, for the Slint app's opt-in image loading (remoteimg.rs). Both are
-    # gone (M9/S9.7): "Load images" is now a CSP relaxation the OS webview honours, so the app has NO
-    # HTTP client at all. Banned so one can't return unnoticed.
+    # gone (M9/S9.7): "Load images" is now a CSP relaxation the OS webview honours. `reqwest` is NOT
+    # banned: it's the transport of `tauri-plugin-updater` (auto-update, ADR-0013) — its ONE sanctioned
+    # use. It must never be used directly by our code; if it appears outside the updater's tree, that's
+    # a reviewed change that has to justify itself here.
     { name = "ureq" },
-    { name = "reqwest" },
-    { name = "hyper" },
+    # `hyper` is reqwest's HTTP engine, so it rides in with the updater exception above (ADR-0013) — the
+    # same single, signed, no-user-data egress path. Not banned for that reason; it must not be used
+    # directly by our code.
     { name = "isahc" },
     { name = "surf" },
     { name = "sentry" },

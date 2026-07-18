@@ -400,6 +400,10 @@ iframe.mail { flex: 1; width: 100%; border: 0; background: #fff; }
 .rule-add-line .folder-input { width: auto; margin: 0; }
 .rule-check { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; color: var(--text); cursor: pointer; }
 .rule-check input { cursor: pointer; }
+/* Updates (APP-7) */
+.update-box { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--divider); }
+.update-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.update-line .setting-desc { margin-right: auto; }
 .sig-box { width: 100%; height: 64px; resize: none; border: 1px solid var(--divider); border-radius: 8px; padding: 10px 12px; font-size: 13.5px; color: var(--text); background: var(--surface-reading); line-height: 1.5; }
 
 /* wizard */

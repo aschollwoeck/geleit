@@ -279,6 +279,12 @@ pub fn App() -> impl IntoView {
     let block_remote = RwSignal::new(true);
     let sync_drafts = RwSignal::new(false); // opt-in: mirror drafts to the server (default OFF, P2)
     let mark_read = RwSignal::new(true);
+    // Auto-update (APP-7): the running version, the auto-check toggle, and the state of a check.
+    let app_ver = RwSignal::new(String::new());
+    let auto_update = RwSignal::new(true);
+    let update_info = RwSignal::new(Option::<api::UpdateInfo>::None); // Some = a newer build is offered
+    let update_busy = RwSignal::new(false); // a check or install is in flight
+    let update_note = RwSignal::new(String::new()); // the status line under "Check for updates"
     let notify = RwSignal::new(true); // a mail client that never tells you about mail is a strange one
     let outbox = RwSignal::new((0i64, 0i64)); // (queued, failed) — the outbox indicator (SEND-10)
     let outbox_open = RwSignal::new(false); // the middle pane shows the outbox instead of a folder
@@ -551,6 +557,16 @@ pub fn App() -> impl IntoView {
         });
     });
 
+    // The on-launch auto-update check found a newer signed build (APP-7): note it (so Settings shows
+    // "Install & restart") and mention it once, quietly. Installing is always the user's choice.
+    api::on_update_available(move |info| {
+        update_note.set(format!("Update available: {}", info.version));
+        update_info.set(Some(info));
+        toast.set(Some(
+            "An update is available — see Settings → General.".to_owned(),
+        ));
+    });
+
     // Boot: accounts → the first account's folders + messages; load persisted prefs.
     Effect::new(move |_| {
         leptos::task::spawn_local(async move {
@@ -570,6 +586,17 @@ pub fn App() -> impl IntoView {
             );
             mark_read.set(
                 api::get_bool_setting("mark_read")
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(true),
+            );
+            // Auto-update (APP-7): the version to show, and whether on-launch checks are on.
+            if let Ok(v) = api::app_version().await {
+                app_ver.set(v);
+            }
+            auto_update.set(
+                api::get_bool_setting("auto_update")
                     .await
                     .ok()
                     .flatten()
@@ -1179,6 +1206,49 @@ pub fn App() -> impl IntoView {
         acct_menu.set(false);
         settings_open.set(true);
         load_rules();
+    };
+    // --- Auto-update (APP-7) ---
+    let toggle_auto_update = move || {
+        let next = !auto_update.get();
+        auto_update.set(next);
+        leptos::task::spawn_local(async move {
+            let _ = api::set_bool_setting("auto_update", next).await;
+        });
+    };
+    let check_updates_action = move || {
+        if update_busy.get_untracked() {
+            return;
+        }
+        update_busy.set(true);
+        update_note.set("Checking…".to_owned());
+        leptos::task::spawn_local(async move {
+            match api::check_update().await {
+                Ok(Some(info)) => {
+                    update_note.set(format!("Update available: {}", info.version));
+                    update_info.set(Some(info));
+                }
+                Ok(None) => {
+                    update_note.set("You're up to date.".to_owned());
+                    update_info.set(None);
+                }
+                Err(e) => update_note.set(e),
+            }
+            update_busy.set(false);
+        });
+    };
+    let install_update_action = move || {
+        if update_busy.get_untracked() {
+            return;
+        }
+        update_busy.set(true);
+        update_note.set("Downloading and installing… the app will restart.".to_owned());
+        leptos::task::spawn_local(async move {
+            // On success the app relaunches into the new version, so this only returns on failure.
+            if let Err(e) = api::install_update().await {
+                update_note.set(e);
+                update_busy.set(false);
+            }
+        });
     };
     let toggle_block = move || {
         let next = !block_remote.get();
@@ -2866,6 +2936,30 @@ pub fn App() -> impl IntoView {
                                     <div class="setting-row">
                                         <div><div class="setting-name">"Mark as read when opened"</div><div class="setting-desc">"Turn off to mark read manually."</div></div>
                                         <div class="toggle" class:on=move || mark_read.get() on:click=move |_| toggle_mark()><span class="knob"></span></div>
+                                    </div>
+                                    // Updates (APP-7)
+                                    <div class="setting-row divide">
+                                        <div>
+                                            <div class="setting-name">"Automatically check for updates"</div>
+                                            <div class="setting-desc">"Looks for a newer signed release when GeleitMail starts. Only the app version is ever sent — never your mail. Updates install only when you choose."</div>
+                                        </div>
+                                        <div class="toggle" class:on=move || auto_update.get() on:click=move |_| toggle_auto_update()><span class="knob"></span></div>
+                                    </div>
+                                    <div class="update-box">
+                                        <div class="update-line">
+                                            <span class="setting-desc">{move || format!("GeleitMail {}", app_ver.get())}</span>
+                                            <button class="btn-ghost small" prop:disabled=move || update_busy.get()
+                                                on:click=move |_| check_updates_action()>
+                                                {move || if update_busy.get() && update_info.get().is_none() { "Checking…" } else { "Check for updates" }}
+                                            </button>
+                                            <Show when=move || update_info.get().is_some()>
+                                                <button class="btn-ghost small" prop:disabled=move || update_busy.get()
+                                                    on:click=move |_| install_update_action()>"Install & restart"</button>
+                                            </Show>
+                                        </div>
+                                        <Show when=move || !update_note.get().is_empty()>
+                                            <div class="setting-desc" style="margin-top:6px">{move || update_note.get()}</div>
+                                        </Show>
                                     </div>
                                 </Show>
                                 // Rules (ORG-8)

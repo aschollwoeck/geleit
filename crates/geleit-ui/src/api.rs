@@ -344,6 +344,8 @@ extern "C" {
     fn geleit_on_sync_progress(cb: &wasm_bindgen::JsValue);
     #[wasm_bindgen(js_name = geleitOnMailArrived)]
     fn geleit_on_mail_arrived(cb: &wasm_bindgen::JsValue);
+    #[wasm_bindgen(js_name = geleitOnUpdateAvailable)]
+    fn geleit_on_update_available(cb: &wasm_bindgen::JsValue);
 }
 
 /// Call a shell command and decode its reply. Errors come back as the shell's calm, PII-free strings.
@@ -882,6 +884,44 @@ pub fn on_mail_arrived(cb: impl Fn(i64) + 'static) {
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub fn on_mail_arrived(_cb: impl Fn(i64) + 'static) {}
+
+/// An available update (mirrors `geleit-app::update::UpdateInfo`).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct UpdateInfo {
+    pub version: String,
+    pub notes: String,
+}
+
+/// The running app version (APP-7).
+pub async fn app_version() -> Result<String, String> {
+    call("app_version", &NoArgs {}).await
+}
+
+/// Check the release feed for a newer signed build (APP-7). `None` = up to date.
+pub async fn check_update() -> Result<Option<UpdateInfo>, String> {
+    call("check_update", &NoArgs {}).await
+}
+
+/// Download, verify, and install the pending update, then relaunch (APP-7).
+pub async fn install_update() -> Result<(), String> {
+    call("install_update", &NoArgs {}).await
+}
+
+/// The on-launch auto-check found an update (APP-7). `cb` gets its version. Subscribed once.
+#[cfg(target_arch = "wasm32")]
+pub fn on_update_available(cb: impl Fn(UpdateInfo) + 'static) {
+    let closure = wasm_bindgen::closure::Closure::<dyn Fn(wasm_bindgen::JsValue)>::new(
+        move |v: wasm_bindgen::JsValue| {
+            if let Ok(info) = serde_wasm_bindgen::from_value::<UpdateInfo>(v) {
+                cb(info);
+            }
+        },
+    );
+    geleit_on_update_available(closure.as_ref());
+    closure.forget();
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub fn on_update_available(_cb: impl Fn(UpdateInfo) + 'static) {}
 
 /// Dev/test seam — see `geleit-app::ipc::dev_compose`. Always `None` in a release build.
 pub async fn dev_compose() -> Result<Option<String>, String> {

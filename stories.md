@@ -108,4 +108,4 @@ P10 each story is covered by **executable acceptance tests** named after its ID
 - **APP-4** Adjust settings / preferences.
 - **APP-5** Run the app on Windows, macOS, and Linux.
 - **APP-6** Use keyboard shortcuts.
-- **APP-7** Have the app update itself. `(later)`
+- **APP-7** Have the app update itself. ✅ *(signed, no-user-data auto-update; ADR-0013)*
