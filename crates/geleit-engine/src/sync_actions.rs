@@ -202,10 +202,26 @@ pub fn run_fetch_attachment(
     index: usize,
 ) -> Result<(Option<String>, Vec<u8>), String> {
     let config = account_imap(db_path, secrets, account_id)?;
+    // The folder's synced UIDVALIDITY, so the fetch refuses a stale uid rather than saving the wrong
+    // message's attachment after a server UID reset. Best-effort: unreadable → `None` → guard skipped.
+    let expected_uidvalidity = open_store(db_path, secrets).ok().and_then(|store| {
+        store
+            .folder_uidvalidity_by_name(account_id, folder)
+            .ok()
+            .flatten()
+    });
     let raw = runtime()?
-        .block_on(imap::fetch_raw_message(&config, secrets, folder, uid))
+        .block_on(imap::fetch_raw_message(
+            &config,
+            secrets,
+            folder,
+            uid,
+            expected_uidvalidity,
+        ))
         .map_err(|_| "Couldn't fetch the attachment from the server.".to_owned())?
-        .ok_or_else(|| "That message is no longer on the server.".to_owned())?;
+        .ok_or_else(|| {
+            "That message is no longer on the server — Refresh and try again.".to_owned()
+        })?;
     let att = crate::mime::extract_attachment(&raw, index)
         .ok_or_else(|| "Couldn't find that attachment in the message.".to_owned())?;
     Ok((att.filename, att.data))

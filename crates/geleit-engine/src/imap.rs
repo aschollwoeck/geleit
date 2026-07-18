@@ -625,9 +625,19 @@ pub async fn fetch_raw_message(
     secrets: &dyn SecretStore,
     folder: &str,
     uid: u32,
+    expected_uidvalidity: Option<i64>,
 ) -> Result<Option<Vec<u8>>, ImapError> {
     let mut session = connect(config, secrets).await?;
-    session.select(folder).await?;
+    let mailbox = session.select(folder).await?;
+    // UIDVALIDITY guard (mirrors `fetch_raw_batch`): if the server reset its UIDs since we synced, the
+    // stored uid now names a *different* message — so return `None` ("no longer available; refresh")
+    // rather than hand back the wrong message's bytes. Only fires when both values are known and differ.
+    if let (Some(expected), Some(current)) = (expected_uidvalidity, mailbox.uid_validity) {
+        if expected != i64::from(current) {
+            let _ = session.logout().await; // best-effort
+            return Ok(None);
+        }
+    }
     let result = fetch_first_body(&mut session, uid).await;
     let _ = session.logout().await; // best-effort
     result
@@ -1657,8 +1667,9 @@ mod tests {
             uid
         };
 
-        // Fetch the whole raw message on demand, then extract attachment index 0.
-        let fetched = fetch_raw_message(&cfg, &secrets, "INBOX", uid)
+        // Fetch the whole raw message on demand, then extract attachment index 0. `None` uidvalidity =
+        // no guard (this test doesn't exercise a reset).
+        let fetched = fetch_raw_message(&cfg, &secrets, "INBOX", uid, None)
             .await
             .expect("fetch")
             .expect("a message body");

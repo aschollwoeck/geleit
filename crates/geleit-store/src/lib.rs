@@ -1777,6 +1777,25 @@ impl Store {
             .flatten())
     }
 
+    /// A folder's synced UIDVALIDITY looked up by **account + name** — for a caller that has the folder
+    /// name (not its id), e.g. saving one attachment by uid. `None` if the folder is unknown or has no
+    /// validity on record yet; either way the caller treats that as "nothing to check against".
+    pub fn folder_uidvalidity_by_name(
+        &self,
+        account_id: i64,
+        name: &str,
+    ) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT uid_validity FROM folder WHERE account_id = ?1 AND name = ?2",
+                rusqlite::params![account_id, name],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// All message UIDs stored in a folder (UID-less rows are skipped).
     pub fn uids_in_folder(&self, folder_id: i64) -> Result<Vec<i64>, StoreError> {
         let mut stmt = self
@@ -2963,6 +2982,25 @@ mod tests {
         assert_eq!(s.pending_notification_summary(inbox).unwrap().0, 0);
         assert!(s.owed_message_ids(inbox).unwrap().is_empty());
         assert!(s.unfiltered_inbox(acc).unwrap().is_empty());
+    }
+
+    #[test]
+    fn folder_uidvalidity_by_name_reads_what_sync_stored() {
+        // The attachment-save UIDVALIDITY guard looks the folder up by account+name. Unknown folder or
+        // never-synced validity → None (nothing to check against); a stored value comes back.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        assert_eq!(s.folder_uidvalidity_by_name(acc, "INBOX").unwrap(), None); // synced, no validity yet
+        assert_eq!(s.folder_uidvalidity_by_name(acc, "Nope").unwrap(), None); // unknown folder
+        s.set_folder_uidvalidity(inbox, 42).unwrap();
+        assert_eq!(
+            s.folder_uidvalidity_by_name(acc, "INBOX").unwrap(),
+            Some(42)
+        );
+        // Scoped to the account: another account's folder of the same name is independent.
+        let acc2 = s.add_account("b@example.com", None).unwrap();
+        assert_eq!(s.folder_uidvalidity_by_name(acc2, "INBOX").unwrap(), None);
     }
 
     #[test]
