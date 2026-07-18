@@ -2291,17 +2291,12 @@ pub async fn export_folder(
     folder_id: i64,
     folder_name: String,
 ) -> Result<Option<i64>, String> {
-    // Gather + build the whole archive on the store thread. (A big folder's mbox is held in memory here;
-    // export is a deliberate one-off, and a streaming writer is a follow-up if it ever matters.)
-    let (mbox, default_name, count) = with_store(state.inner().clone(), move |store| {
-        let (out, written) = build_folder_mbox(store, folder_id)?;
-        Ok((
-            out,
-            format!("{}.mbox", safe_filename_stem(&folder_name)),
-            written,
-        ))
-    })
-    .await?;
+    // Pull the raw originals from the server (best-effort — offline degrades to reconstruction), then
+    // build the archive. (A big folder's mbox is held in memory here; export is a deliberate one-off,
+    // and a streaming writer is a follow-up if it ever matters.)
+    let st = state.inner().clone();
+    let default_name = format!("{}.mbox", safe_filename_stem(&folder_name));
+    let (mbox, count, _reachable) = folder_mbox_complete(st, folder_id, folder_name, true).await?;
     if count == 0 {
         // An empty folder isn't an error — just nothing to write. `Some(0)` lets the UI say so calmly,
         // and there's no point opening a save dialog for an empty file.
@@ -2321,30 +2316,44 @@ pub async fn export_folder(
 
 /// Export a whole account to a folder the user picks (SEC-4) — one `.mbox` file per mail folder, so the
 /// folder structure is preserved (unlike jamming everything into a single file). Returns the total
-/// messages written, `Some(0)` if the account has none, or `None` if cancelled. Attachment bytes aren't
-/// included, same as the single-folder export.
+/// messages written, `Some(0)` if the account has none, or `None` if cancelled. Each message's raw
+/// original (attachments and all) is pulled from the server when reachable; offline it falls back to the
+/// stored envelope + body, so an export always produces a backup — a complete one when online.
 #[tauri::command]
 pub async fn export_account(
     state: tauri::State<'_, AppState>,
     account_id: i64,
 ) -> Result<Option<i64>, String> {
-    // Build every folder's mbox on the store thread: (safe filename, bytes) for the non-empty ones.
-    let (files, total) = with_store(state.inner().clone(), move |store| {
-        let folders = store
+    let st = state.inner().clone();
+    // The folder list (name for the filename + IMAP fetch, id for the build).
+    let folders = with_store(st.clone(), move |store| {
+        store
             .folders_for_account(account_id)
-            .map_err(|_| "Couldn't read your folders.".to_owned())?;
-        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-        let mut total = 0i64;
-        for f in folders {
-            let (bytes, count) = build_folder_mbox(store, f.id)?;
-            if count > 0 {
-                files.push((format!("{}.mbox", safe_filename_stem(&f.name)), bytes));
-                total += count;
-            }
-        }
-        Ok((files, total))
+            .map_err(|_| "Couldn't read your folders.".to_owned())
     })
     .await?;
+    // One folder at a time — fetch its raws, build its mbox, move on — so peak memory stays bounded to a
+    // single folder's raws, not the whole account's at once. `online` fails fast: the moment one folder's
+    // fetch finds the server unreachable, the rest skip the network and degrade to reconstruction
+    // straight away, so an offline export costs one connect attempt, not one per folder.
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut total = 0i64;
+    let mut online = true;
+    for f in folders {
+        let built = folder_mbox_complete(st.clone(), f.id, f.name.clone(), online).await;
+        let (bytes, count, reachable) = match built {
+            Ok(v) => v,
+            // A store hiccup on one folder skips it, rather than losing the whole account's export.
+            Err(_) => continue,
+        };
+        if !reachable {
+            online = false; // stop probing every remaining folder
+        }
+        if count > 0 {
+            files.push((format!("{}.mbox", safe_filename_stem(&f.name)), bytes));
+            total += count;
+        }
+    }
     if total == 0 {
         return Ok(Some(0));
     }
@@ -2363,11 +2372,68 @@ pub async fn export_account(
     .map_err(|_| "The export task stopped unexpectedly.".to_owned())?
 }
 
-/// Build a folder's mbox archive from the store: each message reconstructed to `.eml` and mbox-framed,
-/// oldest-first, snoozed mail included. Returns `(bytes, count)`. Separated from the command so it's
-/// testable without the save dialog. A single message that can't be read or built is **skipped**, not
-/// fatal — one odd message must not cost the user the export of the whole folder.
-fn build_folder_mbox(store: &Store, folder_id: i64) -> Result<(Vec<u8>, i64), String> {
+/// Assemble one folder's mbox for export (SEC-4): pull its messages' raw originals from the server
+/// (best-effort — offline yields an empty map and the build falls back to reconstruction), then frame
+/// them. Returns `(bytes, count)`. Shared by [`export_folder`] and [`export_account`].
+async fn folder_mbox_complete(
+    st: AppState,
+    folder_id: i64,
+    folder_name: String,
+    try_fetch: bool,
+) -> Result<(Vec<u8>, i64, bool), String> {
+    let (account_id, uids) = with_store(st.clone(), move |store| {
+        Ok((
+            store
+                .account_for_folder(folder_id)
+                .map_err(|_| "Couldn't read the folder to export.".to_owned())?,
+            store
+                .folder_uids(folder_id)
+                .map_err(|_| "Couldn't read the folder to export.".to_owned())?,
+        ))
+    })
+    .await?;
+    // Fetch the raw originals on a worker. Nothing to fetch (a purely local folder, or already offline)
+    // ⇒ empty map, still "reachable" — we didn't try, so the caller mustn't read it as an offline signal.
+    let (raws, reachable) = match account_id {
+        Some(account_id) if try_fetch && !uids.is_empty() => {
+            let (db, secrets) = (st.db_path.clone(), st.secrets.clone());
+            let fetched = tauri::async_runtime::spawn_blocking(move || {
+                geleit_engine::sync_actions::run_fetch_folder_raws(
+                    &db,
+                    &*secrets,
+                    account_id,
+                    &folder_name,
+                    &uids,
+                )
+            })
+            .await
+            .map_err(|_| "The export task stopped unexpectedly.".to_owned())?;
+            match fetched {
+                Some(map) => (map, true),        // reached the server
+                None => (HashMap::new(), false), // unreachable — degrade, and let the caller fail-fast
+            }
+        }
+        _ => (HashMap::new(), true),
+    };
+    let (bytes, count) =
+        with_store(st, move |store| build_folder_mbox(store, folder_id, raws)).await?;
+    Ok((bytes, count, reachable))
+}
+
+/// Build a folder's mbox archive, oldest-first, snoozed mail included. Returns `(bytes, count)`.
+/// Separated from the command so it's testable without the save dialog. A single message that can't be
+/// read or built is **skipped**, not fatal — one odd message must not cost the user the whole folder.
+///
+/// `raws` maps a message's IMAP uid to its **true original bytes** just pulled from the server (SEC-4).
+/// When present, that exact message is written — attachments and all, byte-for-byte as the server holds
+/// it. When absent (offline, a local-only Saved message, or a uid the server no longer has), the message
+/// is reconstructed from the stored envelope + body instead — complete when online, still a backup when
+/// not.
+fn build_folder_mbox(
+    store: &Store,
+    folder_id: i64,
+    mut raws: std::collections::HashMap<u32, Vec<u8>>,
+) -> Result<(Vec<u8>, i64), String> {
     let ids = store
         .folder_message_ids(folder_id)
         .map_err(|_| "Couldn't read the folder to export.".to_owned())?;
@@ -2377,9 +2443,18 @@ fn build_folder_mbox(store: &Store, folder_id: i64) -> Result<(Vec<u8>, i64), St
         let Some(header) = store.header_by_id(*id).ok().flatten() else {
             continue;
         };
-        let body = store.body_for(*id).ok().flatten();
-        let Ok(eml) = geleit_engine::message::export_eml(&header, body.as_ref()) else {
-            continue; // couldn't rebuild this one — skip it rather than abort the whole export
+        // Prefer the true original pulled from the server; fall back to reconstructing from what's stored.
+        // `remove` (not `get`) takes ownership so there's no clone, and frees each raw as it's written —
+        // so peak memory is the mbox being built, not the mbox *plus* a full second copy of every raw.
+        let eml = match header.uid.and_then(|u| raws.remove(&(u as u32))) {
+            Some(raw) => raw,
+            None => {
+                let body = store.body_for(*id).ok().flatten();
+                let Ok(eml) = geleit_engine::message::export_eml(&header, body.as_ref()) else {
+                    continue; // couldn't rebuild this one — skip it rather than abort the whole export
+                };
+                eml
+            }
         };
         let sender = header
             .from_addr
@@ -2984,7 +3059,7 @@ mod tests {
         s.store_body(m2, Some("From the desk of Bob."), None, Some("From"), false)
             .unwrap();
 
-        let (mbox, count) = build_folder_mbox(&s, inbox).unwrap();
+        let (mbox, count) = build_folder_mbox(&s, inbox, std::collections::HashMap::new()).unwrap();
         assert_eq!(count, 2);
         let text = String::from_utf8(mbox).unwrap();
 
@@ -3004,6 +3079,68 @@ mod tests {
         assert!(
             text.contains(">From the desk of Bob."),
             "body From-line escaped:\n{text}"
+        );
+    }
+
+    #[test]
+    fn build_folder_mbox_prefers_the_servers_raw_original_when_present() {
+        // SEC-4 completeness: when a message's true raw bytes are supplied (fetched from the server, so
+        // attachments are included), the export must write THOSE verbatim rather than the envelope+body
+        // reconstruction — and still fall back to reconstruction for a message with no raw supplied.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("me@x.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        let with_att = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(7),
+                    date: Some(100),
+                    subject: Some("Has attachment".into()),
+                    from_addr: Some("alice@x.com".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // The store only ever held the parsed body text — never the attachment bytes.
+        s.store_body(with_att, Some("see attached"), None, Some("see"), true)
+            .unwrap();
+        let plain = s
+            .upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid: Some(8),
+                    date: Some(200),
+                    subject: Some("No raw fetched".into()),
+                    from_addr: Some("bob@x.com".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.store_body(plain, Some("just text"), None, Some("just"), false)
+            .unwrap();
+
+        // The raw original the server would return for uid 7 — carrying the attachment the store lacks.
+        let raw = b"Subject: Has attachment\r\n\r\nbody\r\n--BOUNDARY\r\n\
+                    Content-Disposition: attachment; filename=\"report.pdf\"\r\n\r\nPDFBYTES\r\n"
+            .to_vec();
+        let mut raws = std::collections::HashMap::new();
+        raws.insert(7u32, raw);
+
+        let (mbox, count) = build_folder_mbox(&s, inbox, raws).unwrap();
+        assert_eq!(count, 2);
+        let text = String::from_utf8(mbox).unwrap();
+        // uid 7 was written from the raw original — the attachment part is present.
+        assert!(
+            text.contains("filename=\"report.pdf\"") && text.contains("PDFBYTES"),
+            "the server's raw original (with the attachment) must be exported verbatim:\n{text}"
+        );
+        // uid 8 had no raw supplied → reconstructed from the stored body.
+        assert!(
+            text.contains("just text"),
+            "a message with no fetched raw falls back to reconstruction:\n{text}"
         );
     }
 

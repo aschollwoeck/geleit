@@ -80,6 +80,14 @@ impl SyncOutcome {
 /// The `service` key under which IMAP passwords are stored in the [`SecretStore`].
 const SECRET_SERVICE: &str = "geleit-imap";
 
+/// How many UIDs go in one `UID FETCH` for a raw-body export (see [`collect_raw_bodies`]) — small enough
+/// that the command line can't hit a server/proxy length limit, large enough to keep round-trips down.
+const RAW_FETCH_CHUNK: usize = 256;
+
+/// How long to wait for an export's connect (TCP + TLS + login) before giving up and degrading to
+/// reconstruction — bounds an offline export instead of letting it hang on the OS TCP timeout.
+const CONNECT_TIMEOUT_SECS: u64 = 15;
+
 /// A logged-in IMAP session over the TLS stream.
 type ImapSession = async_imap::Session<tokio_rustls::client::TlsStream<TcpStream>>;
 
@@ -561,6 +569,66 @@ async fn fetch_first_body(
         }
     }
     Ok(None)
+}
+
+/// Fetch the **raw original bytes** of many messages in one folder, by UID, in a single session — for a
+/// complete export/backup (SEC-4). `BODY.PEEK[]` gets the whole RFC 5322 message *as the server holds
+/// it*, attachments and all, without setting `\Seen`. Returns a `uid → bytes` map holding only the ones
+/// the server actually returned (a uid that has since vanished is simply absent). Blocking + network:
+/// **worker thread.**
+pub async fn fetch_raw_batch(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    folder: &str,
+    uids: &[u32],
+) -> Result<std::collections::HashMap<u32, Vec<u8>>, ImapError> {
+    if uids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    // Bound the *connect* (TCP + TLS + login) so an unreachable server — a firewall dropping SYNs, not
+    // refusing — degrades an export in seconds instead of hanging on the OS TCP timeout (~75-120s). The
+    // fetch itself is left unbounded: a big folder legitimately takes a while to download, and cutting
+    // that off would silently turn a slow-but-complete export into an incomplete one.
+    let mut session = tokio::time::timeout(
+        std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS),
+        connect(config, secrets),
+    )
+    .await
+    .map_err(|_| ImapError::Io(std::io::Error::from(std::io::ErrorKind::TimedOut)))??;
+    session.select(folder).await?;
+    let result = collect_raw_bodies(&mut session, uids).await;
+    let _ = session.logout().await; // best-effort
+    result
+}
+
+/// The UID-fetch loop for [`fetch_raw_batch`], split out so the fetch stream (which borrows the session)
+/// is dropped before the caller logs out. Asks for `UID` alongside the body so each payload can be keyed
+/// back to its message.
+///
+/// UIDs are fetched in **chunks** rather than one command carrying every uid: a whole folder's worth
+/// (`1,2,…,50000`) is a hundreds-of-KB command line that a server or proxy may reject outright — which
+/// would fail the entire fetch and silently drop the folder to reconstruction. Chunking keeps each
+/// command small and bounded.
+async fn collect_raw_bodies(
+    session: &mut ImapSession,
+    uids: &[u32],
+) -> Result<std::collections::HashMap<u32, Vec<u8>>, ImapError> {
+    let mut out = std::collections::HashMap::new();
+    for chunk in uids.chunks(RAW_FETCH_CHUNK) {
+        let set = chunk
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut fetches = session.uid_fetch(set, "(UID BODY.PEEK[])").await?;
+        while let Some(fetch) = fetches.next().await {
+            let fetch = fetch?;
+            if let (Some(uid), Some(body)) = (fetch.uid, fetch.body()) {
+                out.insert(uid, body.to_vec());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Consume an IMAP response stream (e.g. STORE's FETCH replies) to completion, surfacing the first
