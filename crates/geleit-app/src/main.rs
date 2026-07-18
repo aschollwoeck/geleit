@@ -14,6 +14,7 @@
 //!
 //! Runs alongside the Slint `geleit-app` until S9.7's teardown, so the shipped app keeps working
 //! throughout the migration.
+mod backfill;
 mod dto;
 mod idle;
 mod ipc;
@@ -314,6 +315,9 @@ fn main() {
             // sits idle (a webview throttles timers in a hidden window).
             scheduler::spawn(app.handle().clone());
             idle::spawn(app.handle().clone());
+            // Progressively pull every account's older mail down in the background (SYNC-3), so search
+            // and offline reading become complete for all accounts, not just the one being viewed.
+            backfill::spawn(app.handle().clone());
             // Look for a newer signed release once, shortly after boot (unless the user opted out).
             update::spawn(app.handle().clone());
             Ok(())

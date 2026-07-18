@@ -73,6 +73,11 @@ pub struct AppState {
     /// promptly (rather than lingering on an authenticated connection) and frees the slot — which matters
     /// because SQLite reuses a removed account's id, and the next account added could take it.
     idle_watchers: Arc<Mutex<HashMap<i64, Arc<tokio::sync::Notify>>>>,
+    /// Single-flight for the progressive backfill, per `(account, folder)`. The background backfill
+    /// worker ([`crate::backfill`]) and a user-pressed Refresh both drive `run_backfill` for a folder;
+    /// without this they'd each compute the same missing-UID set and download it twice. Whoever claims
+    /// the pair backfills it; the other skips (the work still gets done).
+    backfilling: Arc<Mutex<std::collections::HashSet<(i64, String)>>>,
 }
 
 impl AppState {
@@ -102,7 +107,25 @@ impl AppState {
             draining_outbox: Arc::new(Mutex::new(HashMap::new())),
             draining_moves: Arc::new(Mutex::new(HashMap::new())),
             idle_watchers: Arc::new(Mutex::new(HashMap::new())),
+            backfilling: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
+    }
+
+    /// Claim the backfill of `(account_id, folder)`: `true` if this caller should do it, `false` if
+    /// another backfill of the same folder is already running. Pair with [`Self::end_backfill`].
+    pub(crate) fn try_begin_backfill(&self, account_id: i64, folder: &str) -> bool {
+        self.backfilling
+            .lock()
+            .expect("backfill set")
+            .insert((account_id, folder.to_owned()))
+    }
+
+    /// Release the backfill claim for `(account_id, folder)` once it finishes (or fails).
+    pub(crate) fn end_backfill(&self, account_id: i64, folder: &str) {
+        self.backfilling
+            .lock()
+            .expect("backfill set")
+            .remove(&(account_id, folder.to_owned()));
     }
 
     /// Claim the IDLE watch for `account_id`. `Some(cancel)` if this caller should start the watcher
@@ -2955,19 +2978,33 @@ pub async fn refresh(
     // Phase 2 — backfill older mail in the background, streaming progress. Detached: it may outlive
     // the command, and the UI shouldn't wait on it.
     std::thread::spawn(move || {
-        // A drop guard emits the completion sentinel **no matter how the thread leaves** — including a
-        // panic — so the UI's progress strip can never get stuck. `-1` = finished cleanly, `-2` = it
-        // stopped early (so the UI can show a calm "will resume next refresh" note, S9.4-4).
+        // If the background backfill worker is already on this folder, don't download it a second time —
+        // it'll finish. Close the UI's progress strip cleanly and step aside.
+        if !st.try_begin_backfill(account_id, &folder) {
+            let _ = app.emit("sync-progress", -1);
+            return;
+        }
+        // A drop guard releases the claim **and** emits the completion sentinel no matter how the thread
+        // leaves — including a panic — so the claim can't leak and the UI's progress strip can never get
+        // stuck. `-1` = finished cleanly, `-2` = it stopped early (the UI shows a calm "will resume"
+        // note, S9.4-4).
         struct Done {
+            st: AppState,
+            account_id: i64,
+            folder: String,
             app: tauri::AppHandle,
             code: i64,
         }
         impl Drop for Done {
             fn drop(&mut self) {
+                self.st.end_backfill(self.account_id, &self.folder);
                 let _ = self.app.emit("sync-progress", self.code);
             }
         }
         let mut done = Done {
+            st: st.clone(),
+            account_id,
+            folder: folder.clone(),
             app: app.clone(),
             code: -2,
         };
@@ -2982,7 +3019,7 @@ pub async fn refresh(
         {
             done.code = -1; // clean finish
         }
-        // `done` drops here (or on a panic unwinding through this scope), emitting its code.
+        // `done` drops here (or on a panic unwinding through this scope), releasing + emitting.
     });
     Ok(())
 }
@@ -3132,6 +3169,35 @@ mod tests {
     };
     use geleit_platform::secret::InMemorySecretStore;
     use geleit_store::{DraftContent, NewMessage, Store};
+
+    #[test]
+    fn backfill_is_single_flight_per_account_and_folder() {
+        // The background backfill worker and a user Refresh both drive `run_backfill`; the guard makes one
+        // of them step aside so a folder isn't downloaded twice. Distinct folders (and accounts) are
+        // independent, and the claim is reusable once released.
+        let state = AppState::new(
+            "unused.db".to_owned(),
+            std::sync::Arc::new(InMemorySecretStore::new()),
+        );
+        assert!(state.try_begin_backfill(1, "INBOX"), "first claim runs it");
+        assert!(
+            !state.try_begin_backfill(1, "INBOX"),
+            "second is a no-op — already running"
+        );
+        assert!(
+            state.try_begin_backfill(1, "Archive"),
+            "a different folder is independent"
+        );
+        assert!(
+            state.try_begin_backfill(2, "INBOX"),
+            "a different account is independent"
+        );
+        state.end_backfill(1, "INBOX");
+        assert!(
+            state.try_begin_backfill(1, "INBOX"),
+            "after it finishes, it can run again"
+        );
+    }
 
     #[test]
     fn idle_watch_is_claimed_once_and_the_pointer_check_protects_a_reused_id() {
