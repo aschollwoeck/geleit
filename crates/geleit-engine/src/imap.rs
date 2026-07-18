@@ -651,6 +651,7 @@ pub async fn fetch_raw_batch(
     secrets: &dyn SecretStore,
     folder: &str,
     uids: &[u32],
+    expected_uidvalidity: Option<i64>,
 ) -> Result<std::collections::HashMap<u32, Vec<u8>>, ImapError> {
     if uids.is_empty() {
         return Ok(std::collections::HashMap::new());
@@ -665,7 +666,22 @@ pub async fn fetch_raw_batch(
     )
     .await
     .map_err(|_| ImapError::Io(std::io::Error::from(std::io::ErrorKind::TimedOut)))??;
-    session.select(folder).await?;
+    let mailbox = session.select(folder).await?;
+    // UIDVALIDITY guard: our stored uids are only meaningful under the UIDVALIDITY they were synced at.
+    // If the server has since reset it, those uids now point at *different* messages — fetching by them
+    // would splice the wrong content into the mbox. Rather than that, fetch nothing (empty map) and let
+    // the caller reconstruct from stored envelopes: attachment-less, but never the wrong message.
+    //
+    // The guard fires only when *both* values are known and differ. A `None` expected means the folder
+    // has no synced UIDVALIDITY on record — but uids are only ever stored *by* a sync, which always
+    // records the validity first (see `run_refresh`), so a folder that has uids to fetch always has one
+    // too; there is nothing to check against here, not a hole to fetch stale uids through.
+    if let (Some(expected), Some(current)) = (expected_uidvalidity, mailbox.uid_validity) {
+        if expected != i64::from(current) {
+            let _ = session.logout().await; // best-effort
+            return Ok(std::collections::HashMap::new());
+        }
+    }
     let result = collect_raw_bodies(&mut session, uids).await;
     let _ = session.logout().await; // best-effort
     result

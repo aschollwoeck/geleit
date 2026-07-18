@@ -86,7 +86,7 @@ fn main() {
     );
 
     // The exact call the export makes: pull the raw originals from the server.
-    let raws = run_fetch_folder_raws(&path, &secrets, acc, "INBOX", &uids)
+    let raws = run_fetch_folder_raws(&path, &secrets, acc, "INBOX", &uids, None)
         .expect("server reachable — fetch should return a map, not None");
     let found = raws.values().any(|bytes| {
         let text = String::from_utf8_lossy(bytes);
@@ -98,6 +98,19 @@ fn main() {
     );
     println!(
         "✓ export completeness: the raw pulled from the server carries the attachment ({FILENAME})"
+    );
+
+    // UIDVALIDITY guard: with a *wrong* expected validity (as if the server had reset it since sync), the
+    // stored uids would point at different messages — so the fetch must return nothing rather than splice
+    // in the wrong content, and the export falls back to reconstruction.
+    let stale = run_fetch_folder_raws(&path, &secrets, acc, "INBOX", &uids, Some(-1))
+        .expect("server reachable — a validity mismatch is empty, not None");
+    assert!(
+        stale.is_empty(),
+        "a UIDVALIDITY mismatch must skip the raw fetch, not fetch by stale uids"
+    );
+    println!(
+        "✓ UIDVALIDITY guard: a validity mismatch fetches nothing (falls back to reconstruction)"
     );
     println!("\nSEC-4 export-attachment live check passed.");
     let _ = std::fs::remove_file(&path);

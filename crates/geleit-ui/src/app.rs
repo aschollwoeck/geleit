@@ -7,8 +7,8 @@ use crate::api::{
 };
 use crate::icons::{self, icon};
 use crate::view::{
-    all_selected, elide, format_date, is_protected_folder, is_trash_folder, merge_addrs, range_ids,
-    rank_suggestions, split_addrs,
+    all_selected, elide, export_message, format_date, is_protected_folder, is_trash_folder,
+    merge_addrs, range_ids, rank_suggestions, split_addrs,
 };
 use leptos::either::Either;
 use leptos::prelude::*;
@@ -503,11 +503,10 @@ pub fn App() -> impl IntoView {
         // would self-dismiss while the dialog is still open. The result speaks when it's done.
         leptos::task::spawn_local(async move {
             match api::export_folder(fid, name).await {
-                Ok(Some(0)) => toast.set(Some("This folder has no mail to export.".to_owned())),
-                Ok(Some(n)) => toast.set(Some(format!(
-                    "Exported {n} message{}",
-                    if n == 1 { "" } else { "s" }
-                ))),
+                Ok(Some(s)) if s.exported == 0 => {
+                    toast.set(Some("This folder has no mail to export.".to_owned()))
+                }
+                Ok(Some(s)) => toast.set(Some(export_message(s.exported, s.text_only))),
                 Ok(None) => {} // cancelled — say nothing
                 Err(e) => error.set(Some(e)),
             }
@@ -517,10 +516,12 @@ pub fn App() -> impl IntoView {
     let export_account_action = move |account_id: i64| {
         leptos::task::spawn_local(async move {
             match api::export_account(account_id).await {
-                Ok(Some(0)) => toast.set(Some("This account has no mail to export.".to_owned())),
-                Ok(Some(n)) => toast.set(Some(format!(
-                    "Exported {n} message{} — one .mbox per folder.",
-                    if n == 1 { "" } else { "s" }
+                Ok(Some(s)) if s.exported == 0 => {
+                    toast.set(Some("This account has no mail to export.".to_owned()))
+                }
+                Ok(Some(s)) => toast.set(Some(format!(
+                    "{} — one .mbox per folder.",
+                    export_message(s.exported, s.text_only)
                 ))),
                 Ok(None) => {} // cancelled
                 Err(e) => error.set(Some(e)),

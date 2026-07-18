@@ -79,6 +79,21 @@ pub fn elide(text: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
+/// The toast line for a finished mbox export (SEC-4): how many messages, and — only when some couldn't
+/// be fetched complete — how many went out text-only (attachments not saved). Honest by construction:
+/// a fully-online export reads "Exported 5 messages" with no caveat; a degraded one names the gap.
+#[must_use]
+pub fn export_message(exported: i64, text_only: i64) -> String {
+    let plural = if exported == 1 { "" } else { "s" };
+    if text_only > 0 {
+        format!(
+            "Exported {exported} message{plural} · {text_only} text-only (attachments not saved)"
+        )
+    } else {
+        format!("Exported {exported} message{plural}")
+    }
+}
+
 /// The list index to move to for keyboard navigation: from `current` (`None` = nothing selected),
 /// step by `delta` (+1 = next, -1 = previous) over `len` items. Clamps at both ends; from nothing, a
 /// forward step lands on the first item and a backward step on the last. `None` when the list is empty.
@@ -221,6 +236,21 @@ mod tests {
 
     /// 2026-07-11T12:00:00Z (a Saturday).
     const NOW: i64 = 1_783_771_200;
+
+    #[test]
+    fn export_message_names_text_only_only_when_some() {
+        assert_eq!(export_message(1, 0), "Exported 1 message");
+        assert_eq!(export_message(5, 0), "Exported 5 messages");
+        assert_eq!(
+            export_message(5, 2),
+            "Exported 5 messages · 2 text-only (attachments not saved)"
+        );
+        // Fully-degraded (offline): every message text-only, still named honestly.
+        assert_eq!(
+            export_message(3, 3),
+            "Exported 3 messages · 3 text-only (attachments not saved)"
+        );
+    }
 
     #[test]
     fn merge_addrs_dedups_case_insensitively_and_keeps_order() {

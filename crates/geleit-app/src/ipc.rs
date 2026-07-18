@@ -2282,66 +2282,103 @@ pub async fn save_eml(state: tauri::State<'_, AppState>, id: i64) -> Result<bool
     .map_err(|_| "The save task stopped unexpectedly.".to_owned())?
 }
 
-/// Export a folder to an mbox file (SEC-4). Reconstructs each message's `.eml` (as "Save as .eml" does)
-/// and frames it mbox-style, then writes the lot to a path from the native save dialog. Returns the
-/// number written, or `None` if the user cancels. Attachment bytes aren't included — see the spec.
+/// Export a folder to an mbox file (SEC-4): pull each message's raw original from the server (best-effort;
+/// offline falls back to the stored envelope + body), frame it mbox-style, and write the lot to a path
+/// from the native save dialog. Returns an [`ExportSummary`] (how many written, and how many were
+/// text-only), or `None` if the user cancels. (One folder's mbox is held in memory here — a deliberate
+/// one-off; per-message streaming is a follow-up.)
 #[tauri::command]
 pub async fn export_folder(
     state: tauri::State<'_, AppState>,
     folder_id: i64,
     folder_name: String,
-) -> Result<Option<i64>, String> {
-    // Pull the raw originals from the server (best-effort — offline degrades to reconstruction), then
-    // build the archive. (A big folder's mbox is held in memory here; export is a deliberate one-off,
-    // and a streaming writer is a follow-up if it ever matters.)
+) -> Result<Option<crate::dto::ExportSummary>, String> {
     let st = state.inner().clone();
-    let default_name = format!("{}.mbox", safe_filename_stem(&folder_name));
-    let (mbox, count, _reachable) = folder_mbox_complete(st, folder_id, folder_name, true).await?;
-    if count == 0 {
-        // An empty folder isn't an error — just nothing to write. `Some(0)` lets the UI say so calmly,
-        // and there's no point opening a save dialog for an empty file.
-        return Ok(Some(0));
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        let Some(path) = pick_save_path(&default_name)? else {
-            return Ok(None); // cancelled
-        };
-        std::fs::write(&path, &mbox)
-            .map(|()| Some(count))
-            .map_err(|_| "Couldn't write that file.".to_owned())
+    // Empty folder → say so, no dialog. Checked first (like `export_account`) so an empty folder never
+    // opens a save dialog.
+    let count = with_store(st.clone(), move |store| {
+        store
+            .folder_message_count(folder_id)
+            .map_err(|_| "Couldn't read the folder to export.".to_owned())
     })
-    .await
-    .map_err(|_| "The export task stopped unexpectedly.".to_owned())?
+    .await?;
+    if count == 0 {
+        return Ok(Some(crate::dto::ExportSummary::default()));
+    }
+    // Choose the destination first, so the dialog appears immediately and a cancel costs no fetch/build.
+    let default_name = format!("{}.mbox", safe_filename_stem(&folder_name));
+    let Some(path) = tauri::async_runtime::spawn_blocking(move || pick_save_path(&default_name))
+        .await
+        .map_err(|_| "The export task stopped unexpectedly.".to_owned())??
+    else {
+        return Ok(None); // cancelled
+    };
+    let (mbox, written, text_only, _reachable) =
+        folder_mbox_complete(st, folder_id, folder_name, true).await?;
+    tauri::async_runtime::spawn_blocking(move || std::fs::write(&path, &mbox))
+        .await
+        .map_err(|_| "The export task stopped unexpectedly.".to_owned())?
+        .map_err(|_| "Couldn't write that file.".to_owned())?;
+    Ok(Some(crate::dto::ExportSummary {
+        exported: written,
+        text_only,
+    }))
 }
 
 /// Export a whole account to a folder the user picks (SEC-4) — one `.mbox` file per mail folder, so the
-/// folder structure is preserved (unlike jamming everything into a single file). Returns the total
-/// messages written, `Some(0)` if the account has none, or `None` if cancelled. Each message's raw
-/// original (attachments and all) is pulled from the server when reachable; offline it falls back to the
-/// stored envelope + body, so an export always produces a backup — a complete one when online.
+/// folder structure is preserved (unlike jamming everything into a single file). Returns an
+/// [`ExportSummary`] (messages written across all folders, and how many were text-only), an all-zero
+/// summary if the account has none, or `None` if cancelled. Each message's raw original (attachments and
+/// all) is pulled from the server when reachable; offline it falls back to the stored envelope + body.
+///
+/// **Streamed to disk:** the directory is chosen first, then each folder is built and written before the
+/// next is started — so peak memory is one folder's mbox, never every folder's at once.
 #[tauri::command]
 pub async fn export_account(
     state: tauri::State<'_, AppState>,
     account_id: i64,
-) -> Result<Option<i64>, String> {
+) -> Result<Option<crate::dto::ExportSummary>, String> {
     let st = state.inner().clone();
-    // The folder list (name for the filename + IMAP fetch, id for the build).
+    // The non-empty folders (id for the build, name for the filename + IMAP fetch). Empty folders are
+    // dropped here so no empty `.mbox` is written and an empty account is known *before* the dialog.
     let folders = with_store(st.clone(), move |store| {
-        store
+        let mut out: Vec<(i64, String)> = Vec::new();
+        for f in store
             .folders_for_account(account_id)
-            .map_err(|_| "Couldn't read your folders.".to_owned())
+            .map_err(|_| "Couldn't read your folders.".to_owned())?
+        {
+            if store
+                .folder_message_count(f.id)
+                .map_err(|_| "Couldn't read your folders.".to_owned())?
+                > 0
+            {
+                out.push((f.id, f.name));
+            }
+        }
+        Ok(out)
     })
     .await?;
-    // One folder at a time — fetch its raws, build its mbox, move on — so peak memory stays bounded to a
-    // single folder's raws, not the whole account's at once. `online` fails fast: the moment one folder's
-    // fetch finds the server unreachable, the rest skip the network and degrade to reconstruction
-    // straight away, so an offline export costs one connect attempt, not one per folder.
-    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut total = 0i64;
+    if folders.is_empty() {
+        return Ok(Some(crate::dto::ExportSummary::default()));
+    }
+    // Choose the destination up front, so the dialog appears immediately (not after a long fetch) and we
+    // can write each folder's file as it's built instead of holding them all.
+    let Some(dir) = tauri::async_runtime::spawn_blocking(pick_directory)
+        .await
+        .map_err(|_| "The export task stopped unexpectedly.".to_owned())??
+    else {
+        return Ok(None); // cancelled
+    };
+
+    // Build and write folder by folder. `online` fails fast: the moment one folder's fetch finds the
+    // server unreachable, the rest skip the network and degrade to reconstruction straight away.
+    let mut exported = 0i64;
+    let mut text_only = 0i64;
     let mut online = true;
-    for f in folders {
-        let built = folder_mbox_complete(st.clone(), f.id, f.name.clone(), online).await;
-        let (bytes, count, reachable) = match built {
+    let mut wrote_any_folder = false;
+    for (fid, fname) in folders {
+        let built = folder_mbox_complete(st.clone(), fid, fname.clone(), online).await;
+        let (bytes, written, folder_text_only, reachable) = match built {
             Ok(v) => v,
             // A store hiccup on one folder skips it, rather than losing the whole account's export.
             Err(_) => continue,
@@ -2349,45 +2386,54 @@ pub async fn export_account(
         if !reachable {
             online = false; // stop probing every remaining folder
         }
-        if count > 0 {
-            files.push((format!("{}.mbox", safe_filename_stem(&f.name)), bytes));
-            total += count;
+        if written == 0 {
+            continue;
+        }
+        let path = std::path::Path::new(&dir).join(format!("{}.mbox", safe_filename_stem(&fname)));
+        // One folder failing to write skips just that folder — same best-effort stance as a build error
+        // above, so a single bad filename or a transient I/O glitch doesn't throw away the rest of the
+        // backup. A wholesale failure (no folder wrote at all) is surfaced after the loop instead.
+        match tauri::async_runtime::spawn_blocking(move || std::fs::write(&path, &bytes)).await {
+            Ok(Ok(())) => {
+                wrote_any_folder = true;
+                exported += written;
+                text_only += folder_text_only;
+            }
+            _ => continue,
         }
     }
-    if total == 0 {
-        return Ok(Some(0));
+    // We only got here past the non-empty pre-check, so folders had mail. If *nothing* landed on disk it
+    // wasn't an empty account — it was a real failure (a full or read-only destination), and reporting a
+    // calm "no mail to export" would be a lie. Surface it.
+    if !wrote_any_folder {
+        return Err("Couldn't write the export files.".to_owned());
     }
-    tauri::async_runtime::spawn_blocking(move || {
-        let Some(dir) = pick_directory()? else {
-            return Ok(None); // cancelled
-        };
-        let base = std::path::Path::new(&dir);
-        for (name, bytes) in &files {
-            std::fs::write(base.join(name), bytes)
-                .map_err(|_| "Couldn't write the export files.".to_owned())?;
-        }
-        Ok(Some(total))
-    })
-    .await
-    .map_err(|_| "The export task stopped unexpectedly.".to_owned())?
+    Ok(Some(crate::dto::ExportSummary {
+        exported,
+        text_only,
+    }))
 }
 
 /// Assemble one folder's mbox for export (SEC-4): pull its messages' raw originals from the server
 /// (best-effort — offline yields an empty map and the build falls back to reconstruction), then frame
-/// them. Returns `(bytes, count)`. Shared by [`export_folder`] and [`export_account`].
+/// them. Returns `(bytes, written, text_only, reachable)`. Shared by [`export_folder`] and
+/// [`export_account`].
 async fn folder_mbox_complete(
     st: AppState,
     folder_id: i64,
     folder_name: String,
     try_fetch: bool,
-) -> Result<(Vec<u8>, i64, bool), String> {
-    let (account_id, uids) = with_store(st.clone(), move |store| {
+) -> Result<(Vec<u8>, i64, i64, bool), String> {
+    let (account_id, uids, uidvalidity) = with_store(st.clone(), move |store| {
         Ok((
             store
                 .account_for_folder(folder_id)
                 .map_err(|_| "Couldn't read the folder to export.".to_owned())?,
             store
                 .folder_uids(folder_id)
+                .map_err(|_| "Couldn't read the folder to export.".to_owned())?,
+            store
+                .folder_uidvalidity(folder_id)
                 .map_err(|_| "Couldn't read the folder to export.".to_owned())?,
         ))
     })
@@ -2404,6 +2450,7 @@ async fn folder_mbox_complete(
                     account_id,
                     &folder_name,
                     &uids,
+                    uidvalidity,
                 )
             })
             .await
@@ -2415,12 +2462,14 @@ async fn folder_mbox_complete(
         }
         _ => (HashMap::new(), true),
     };
-    let (bytes, count) =
+    let (bytes, written, text_only) =
         with_store(st, move |store| build_folder_mbox(store, folder_id, raws)).await?;
-    Ok((bytes, count, reachable))
+    Ok((bytes, written, text_only, reachable))
 }
 
-/// Build a folder's mbox archive, oldest-first, snoozed mail included. Returns `(bytes, count)`.
+/// Build a folder's mbox archive, oldest-first, snoozed mail included. Returns `(bytes, written,
+/// text_only)`, where `text_only` counts messages framed from the stored envelope + body because their
+/// raw original wasn't fetched — so the caller can tell the user how much of the backup is text-only.
 /// Separated from the command so it's testable without the save dialog. A single message that can't be
 /// read or built is **skipped**, not fatal — one odd message must not cost the user the whole folder.
 ///
@@ -2433,12 +2482,13 @@ fn build_folder_mbox(
     store: &Store,
     folder_id: i64,
     mut raws: std::collections::HashMap<u32, Vec<u8>>,
-) -> Result<(Vec<u8>, i64), String> {
+) -> Result<(Vec<u8>, i64, i64), String> {
     let ids = store
         .folder_message_ids(folder_id)
         .map_err(|_| "Couldn't read the folder to export.".to_owned())?;
     let mut out = Vec::new();
     let mut written = 0i64;
+    let mut text_only = 0i64;
     for id in &ids {
         let Some(header) = store.header_by_id(*id).ok().flatten() else {
             continue;
@@ -2453,6 +2503,7 @@ fn build_folder_mbox(
                 let Ok(eml) = geleit_engine::message::export_eml(&header, body.as_ref()) else {
                     continue; // couldn't rebuild this one — skip it rather than abort the whole export
                 };
+                text_only += 1; // reconstructed, not the raw original — attachments (if any) not included
                 eml
             }
         };
@@ -2469,7 +2520,7 @@ fn build_folder_mbox(
         ));
         written += 1;
     }
-    Ok((out, written))
+    Ok((out, written, text_only))
 }
 
 /// A message's date as an mbox `From `-line timestamp (asctime, UTC). Informational — mbox readers key
@@ -3059,8 +3110,13 @@ mod tests {
         s.store_body(m2, Some("From the desk of Bob."), None, Some("From"), false)
             .unwrap();
 
-        let (mbox, count) = build_folder_mbox(&s, inbox, std::collections::HashMap::new()).unwrap();
+        let (mbox, count, text_only) =
+            build_folder_mbox(&s, inbox, std::collections::HashMap::new()).unwrap();
         assert_eq!(count, 2);
+        assert_eq!(
+            text_only, 2,
+            "no raws supplied → both reconstructed (text-only)"
+        );
         let text = String::from_utf8(mbox).unwrap();
 
         // Exactly one `From ` separator per message (line-start; header `From:` has a colon, not a space).
@@ -3129,8 +3185,12 @@ mod tests {
         let mut raws = std::collections::HashMap::new();
         raws.insert(7u32, raw);
 
-        let (mbox, count) = build_folder_mbox(&s, inbox, raws).unwrap();
+        let (mbox, count, text_only) = build_folder_mbox(&s, inbox, raws).unwrap();
         assert_eq!(count, 2);
+        assert_eq!(
+            text_only, 1,
+            "uid 7 used its raw; only uid 8 fell back to reconstruction"
+        );
         let text = String::from_utf8(mbox).unwrap();
         // uid 7 was written from the raw original — the attachment part is present.
         assert!(

@@ -17,6 +17,17 @@ pub struct AccountDto {
     pub display_name: Option<String>,
 }
 
+/// The result of an mbox export (SEC-4), so the UI can tell the user not just how many messages were
+/// written but how many went out **text-only** — reconstructed from the stored envelope + body because
+/// their raw original couldn't be fetched (offline, or the server dropped them), so any attachments
+/// aren't in the file. `text_only == 0` means every message was exported complete.
+#[derive(Debug, Clone, Copy, Serialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSummary {
+    pub exported: i64,
+    pub text_only: i64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FolderDto {
     pub id: i64,
