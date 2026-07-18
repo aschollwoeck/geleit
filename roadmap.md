@@ -177,7 +177,9 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 - **S7.4/S7.5** ✅ Multiple accounts (ACC-5) + edit/remove (ACC-6) + per-account switcher (MULTI-1) +
   correct from-address on send (MULTI-2). Every per-account worker takes an explicit `account_id`;
   `current-account` prop is the source of truth; rail switcher + "+ Add account" + per-account
-  remove. *(Sync is on-demand per visible account; a background N-account scheduler is a follow-up.)*
+  remove. *(Background sync now covers **all** accounts, not just the viewed one: the scheduler sweeps
+  every account's INBOX, an IMAP IDLE watcher per account gives instant push — including for an account
+  added mid-session — and `backfill.rs` progressively backfills every account's full mailbox (SYNC-3).)*
 - **S7.6** One-click add-account onboarding flow (APP-1). ⏳ depends on OAuth (S7.1/S7.2).
 
 > **Multi-account works without OAuth** (manual IMAP/SMTP per account). The remaining M7 slices are the

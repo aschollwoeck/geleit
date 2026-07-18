@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### All your accounts stay complete in the background
+- **Every account's full mailbox now downloads in the background, not just the one you're viewing.**
+  GeleitMail progressively catches up all folders of all accounts, so a secondary account you rarely open
+  still becomes fully searchable and available offline over time — gently, one folder at a time.
+
 ### New accounts get new mail instantly
 - **An account you add starts receiving instant new-mail push right away.** Previously a newly-added
   account only checked for mail on the periodic background sync until you restarted; now it gets the same
