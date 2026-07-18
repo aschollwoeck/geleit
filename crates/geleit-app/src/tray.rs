@@ -100,7 +100,7 @@ fn enable_close_to_tray(app: &tauri::AppHandle) {
 
 /// Bring the main window back to the foreground: show it (it may be hidden to the tray), un-minimise,
 /// and focus it. Best-effort — a missing window (mid-shutdown) is simply ignored.
-fn show_main(app: &tauri::AppHandle) {
+pub(crate) fn show_main(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.unminimize();

@@ -33,6 +33,11 @@ pub trait Notifier: Send + Sync {
     /// # Errors
     /// [`NotifyError::Unavailable`] when the desktop's notification service can't be reached.
     fn notify(&self, n: &Notification) -> Result<(), NotifyError>;
+
+    /// Register what to do when the user **clicks** one of our notifications (APP-7's sibling: bring the
+    /// app forward). Called once, from the app's setup. Default: nothing — the fake, and any platform
+    /// without clickable notifications, ignores it.
+    fn set_on_activate(&self, _on_activate: Box<dyn Fn() + Send + Sync>) {}
 }
 
 /// An in-memory notifier for tests: records what would have been shown.
