@@ -85,6 +85,10 @@ async fn backfill_round(state: &AppState) {
             // Blocking + network → a worker thread. A folder that can't be reached (offline) just returns
             // an error and is left for the next round; nothing is surfaced — the user didn't ask. The
             // per-batch pause keeps the background download from starving foreground sync of the writer.
+            // Two jobs per folder: backfill older mail, and reconcile the folder against the server —
+            // remove server-deleted messages and pull read/star changes made on another device (SYNC-5).
+            // The scheduler only does this for INBOX, so this keeps *every* folder in step in the
+            // background too. Both best-effort; a failure just waits for the next round.
             let _ = tauri::async_runtime::spawn_blocking(move || {
                 geleit_engine::sync_actions::run_backfill(
                     &db,
@@ -96,6 +100,9 @@ async fn backfill_round(state: &AppState) {
                         std::thread::sleep(BETWEEN_BATCHES);
                     },
                 )
+                .ok();
+                geleit_engine::sync_actions::run_reconcile_folder(&db, &*secrets, account_id, &f)
+                    .ok();
             })
             .await;
             state.end_backfill(account_id, &folder);

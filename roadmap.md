@@ -147,9 +147,11 @@ the S1.10 gap — and holds the at-rest key the next slice needs).
 > **Model:** every action applies optimistically to the local store, then a worker writes it back over
 > IMAP; failures self-heal on the next refresh. **Follow-ups:** COPY+EXPUNGE fallback for non-MOVE servers
 > ✅ (`move_one` in `imap.rs`: `UID MOVE` when advertised, else `UID COPY` + `\Deleted` + `UID EXPUNGE`);
-> persistent offline action queue ✅ (OFF-4, `specs/offline-moves/`). **Still backlog:** bulk
-> move-to-arbitrary-folder + bulk mark-read; permanent bulk-delete in Trash; cross-client flag sync after
-> first sync.
+> persistent offline action queue ✅ (OFF-4, `specs/offline-moves/`); cross-client flag sync ✅ (the
+> scheduler reconciles INBOX flags every sweep, and the background backfill worker now runs `run_pull_flags`
+> for *every* folder, so a read/star made on another device reaches the local store account-wide, not just
+> the inbox). **Still backlog:** bulk move-to-arbitrary-folder + bulk mark-read; permanent bulk-delete in
+> Trash.
 
 ## M6 — Search ✅ COMPLETE
 **Delivers:** SEARCH-1, SEARCH-2, SEARCH-3, OFF-2.

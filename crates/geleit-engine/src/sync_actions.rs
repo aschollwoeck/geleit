@@ -384,6 +384,25 @@ pub fn run_backfill(
         .map_err(|_| "Couldn't finish catching up — will resume next refresh.".to_owned())
 }
 
+/// Reconcile a folder against the server without fetching new mail (SYNC-5) — remove server-deleted
+/// messages and pull read/star changes made on another device. The background sibling of `run_refresh`'s
+/// reconcile. The scheduler only recent-syncs INBOX; the background backfill worker calls this per folder
+/// so *every* folder stays in step, not just the inbox. Blocking + network: **worker thread.**
+pub fn run_reconcile_folder(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    folder: &str,
+) -> Result<usize, String> {
+    let store = open_store(db_path, secrets)?;
+    let config = account_imap(db_path, secrets, account_id)?;
+    runtime()?
+        .block_on(imap::reconcile_folder(
+            &config, secrets, &store, account_id, folder,
+        ))
+        .map_err(|_| "Couldn't reconcile the folder.".to_owned())
+}
+
 /// Remove `account_id` from this device: delete its keychain password, then its local mail
 /// (folders/messages/bodies cascade). Idempotent if the account is already gone. Touches the
 /// keychain (D-Bus), so **run on a worker thread.**
