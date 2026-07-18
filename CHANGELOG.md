@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### New accounts get new mail instantly
+- **An account you add starts receiving instant new-mail push right away.** Previously a newly-added
+  account only checked for mail on the periodic background sync until you restarted; now it gets the same
+  live push as your other accounts the moment it's added.
+
 ### Moves work on more mail servers
 - **Archive, delete, and move now work on servers without the IMAP `MOVE` extension.** On a provider
   that doesn't support `MOVE`, GeleitMail now files mail the portable way (copy, then remove the original)
