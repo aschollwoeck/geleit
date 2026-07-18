@@ -2941,7 +2941,7 @@ pub fn App() -> impl IntoView {
                                     <div class="setting-row divide">
                                         <div>
                                             <div class="setting-name">"Automatically check for updates"</div>
-                                            <div class="setting-desc">"Looks for a newer signed release when GeleitMail starts. Only the app version is ever sent — never your mail. Updates install only when you choose."</div>
+                                            <div class="setting-desc">"Looks for a newer signed release when GeleitMail starts. It contacts only the release server and sends nothing about you or your mail. Updates install only when you choose."</div>
                                         </div>
                                         <div class="toggle" class:on=move || auto_update.get() on:click=move |_| toggle_auto_update()><span class="knob"></span></div>
                                     </div>

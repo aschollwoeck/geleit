@@ -26,11 +26,14 @@ Adopt **`tauri-plugin-updater`** (Tauri v2, official) as a single, narrowly-scop
    Every *other* HTTP client stays banned; all telemetry/analytics SDKs stay banned (PRIV-5).
 
 2. **No user data — ever.** The check is a GET of **one static file** (a GitHub Releases `latest.json`).
-   The request carries only the app's **version** and **platform/arch** — the minimum needed to serve
-   the correct binary — plus the IP inherent to *any* network request (exactly what the existing
-   IMAP/SMTP sockets already reveal). No mail, no addresses, no account data, no identifiers, no
-   telemetry. A static feed **cannot** collect anything, and the app sends nothing bespoke. (Verified:
-   a local run showed the outbound request is a bare `GET /latest.json`, no query string.)
+   Because the endpoint is a plain URL with **no template variables** (`{{current_version}}`/`{{target}}`
+   /`{{arch}}`), the request is a bare `GET /latest.json` — it carries **nothing app-specific at all**:
+   the "is this newer?" comparison runs **on the device** after the feed is fetched. The only thing any
+   network request inherently reveals is the IP, exactly as the existing IMAP/SMTP sockets already do. No
+   version, no platform, no mail, no addresses, no account data, no identifiers, no telemetry. A static
+   feed **cannot** collect anything. (Verified: a local run showed the outbound request is a bare
+   `GET /latest.json`, no query string. *If* a templated endpoint were ever configured, version + platform
+   would appear in the URL — still no user data — but the shipped config is static.)
 
 3. **Tamper-proof.** Every update is **signed** (minisign); the public key is compiled into the binary,
    and an update whose signature doesn't verify is **refused**. So even over the network, a MITM'd or

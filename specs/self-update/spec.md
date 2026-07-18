@@ -20,11 +20,12 @@ scoped:
 - **The updater is the *only* non-IMAP/SMTP network the app makes**, and it talks to **one** endpoint: a
   static GitHub Releases feed. `reqwest` is un-banned in `deny.toml` **only** as `tauri-plugin-updater`'s
   transport, with a comment pinning it to that use.
-- **No user data is ever sent.** The check is a GET of a static file. The request conveys only the app's
-  **current version** and **platform/arch** (needed to serve the right binary) — plus the IP inherent to
-  *any* network request, exactly as the existing IMAP/SMTP connections already reveal. **No mail, no
-  addresses, no account info, no identifiers, no telemetry.** A static feed cannot collect anything, and
-  the app sends nothing bespoke.
+- **No user data is ever sent.** The check is a GET of a **static file** with no template variables, so
+  the request is a bare `GET /latest.json` conveying **nothing app-specific** — not even the version
+  (the "is this newer?" comparison runs on the device after fetching). The only thing revealed is the IP
+  inherent to *any* network request, exactly as the existing IMAP/SMTP connections already do. **No
+  version, no platform, no mail, no addresses, no account info, no identifiers, no telemetry.** A static
+  feed cannot collect anything.
 - **Tamper-proof.** Every update is **signed** (minisign) and the public key is compiled into the app;
   an update whose signature doesn't verify is refused. So even over the network, a MITM'd or forged
   update cannot install.

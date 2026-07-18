@@ -99,14 +99,14 @@ allow-wildcard-paths = true
 # deliberate, reviewed change here. If a future feature genuinely needs one, justify it.
 deny = [
     # ureq was the only HTTP client, for the Slint app's opt-in image loading (remoteimg.rs). Both are
-    # gone (M9/S9.7): "Load images" is now a CSP relaxation the OS webview honours. `reqwest` is NOT
-    # banned: it's the transport of `tauri-plugin-updater` (auto-update, ADR-0013) — its ONE sanctioned
-    # use. It must never be used directly by our code; if it appears outside the updater's tree, that's
-    # a reviewed change that has to justify itself here.
+    # gone (M9/S9.7): "Load images" is now a CSP relaxation the OS webview honours.
     { name = "ureq" },
-    # `hyper` is reqwest's HTTP engine, so it rides in with the updater exception above (ADR-0013) — the
-    # same single, signed, no-user-data egress path. Not banned for that reason; it must not be used
-    # directly by our code.
+    # `reqwest`/`hyper` are the auto-update transport (ADR-0013). They stay BANNED **except** when pulled
+    # in by `tauri-plugin-updater`'s subtree — `wrappers` scopes the exception, so if any other crate ever
+    # pulls them in (a non-updater egress path) `cargo deny check` fails and forces a reviewed decision
+    # here. This enforces "confined to the updater", rather than trusting a comment.
+    { name = "reqwest", wrappers = ["tauri-plugin-updater"] },
+    { name = "hyper", wrappers = ["hyper-rustls", "hyper-util", "reqwest"] },
     { name = "isahc" },
     { name = "surf" },
     { name = "sentry" },

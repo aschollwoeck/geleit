@@ -62,8 +62,8 @@ connection. Talking to your provider is the only part that needs the network, an
 - you **send**, or act on mail in a way that has to reach the server (archive, move, delete);
 - GeleitMail **checks for a newer version of itself** (Settings → General; on by default, and you can
   turn it off). This is the one thing it contacts that *isn't* your mail provider — a release server —
-  and it sends **only the app's version**, never your mail or anything about you. Updates are signed, and
-  install only when you choose.
+  and it sends **nothing about you or your mail** — it just fetches a public list of releases and compares
+  versions on your own device. Updates are signed, and install only when you choose.
 
 Nothing else about your mail leaves this machine.
 
