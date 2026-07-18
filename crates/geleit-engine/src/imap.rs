@@ -945,34 +945,8 @@ pub async fn sync_folder_incremental(
     let deleted: Vec<i64> = plan.deleted.iter().map(|&u| i64::from(u)).collect();
     store.delete_messages_by_uid(folder_id, &deleted)?;
 
-    // Pull read/star changes made on ANOTHER device (SYNC-5) for messages we already hold. Two cheap
-    // `UID SEARCH`es give the server's `\Seen` / `\Flagged` UID sets whatever the mailbox size — far
-    // lighter than re-fetching every message's flags — and `sync::flag_plan` keeps only what actually
-    // differs from what we hold. This is what makes "read it on my phone" drop the unread badge here.
-    // `flags_in_folder` excludes messages with an unconfirmed local change, so the pull can't undo a
-    // read the user just made here whose write-back to the server hasn't landed yet.
-    let flag_updates = {
-        let server_seen: std::collections::HashSet<u32> =
-            session.uid_search("SEEN").await?.into_iter().collect();
-        let server_flagged: std::collections::HashSet<u32> =
-            session.uid_search("FLAGGED").await?.into_iter().collect();
-        let held: Vec<crate::sync::FlagState> = store
-            .flags_in_folder(folder_id)?
-            .into_iter()
-            .map(|(uid, seen, flagged)| crate::sync::FlagState {
-                uid: uid as u32,
-                seen,
-                flagged,
-            })
-            .collect();
-        let changes = crate::sync::flag_plan(&held, &server_seen, &server_flagged);
-        let rows: Vec<(i64, bool, bool)> = changes
-            .iter()
-            .map(|c| (i64::from(c.uid), c.seen, c.flagged))
-            .collect();
-        store.apply_flag_changes(folder_id, &rows)?;
-        rows.len()
-    };
+    // Pull read/star changes made on ANOTHER device (SYNC-5) for messages we already hold.
+    let flag_updates = reconcile_flags(&mut session, store, folder_id).await?;
 
     // Fetch the most-recent `limit` new UIDs (older backfill is S2.4).
     let mut new_uids = plan.new;
@@ -1028,6 +1002,91 @@ pub async fn sync_folder_incremental(
         primed,
         flag_updates,
     })
+}
+
+/// Pull read/star changes made on ANOTHER device (SYNC-5) into the store, for the messages we already
+/// hold in `folder_id`, on an **already-selected** session. Two cheap `UID SEARCH`es give the server's
+/// `\Seen` / `\Flagged` sets whatever the mailbox size; `sync::flag_plan` keeps only what differs from
+/// what we hold. `flags_in_folder` excludes messages with an unconfirmed local change, so the pull can't
+/// undo a read the user just made here whose write-back hasn't landed. Returns how many local rows moved.
+async fn reconcile_flags(
+    session: &mut ImapSession,
+    store: &Store,
+    folder_id: i64,
+) -> Result<usize, ImapError> {
+    let server_seen: std::collections::HashSet<u32> =
+        session.uid_search("SEEN").await?.into_iter().collect();
+    let server_flagged: std::collections::HashSet<u32> =
+        session.uid_search("FLAGGED").await?.into_iter().collect();
+    let held: Vec<crate::sync::FlagState> = store
+        .flags_in_folder(folder_id)?
+        .into_iter()
+        .map(|(uid, seen, flagged)| crate::sync::FlagState {
+            uid: uid as u32,
+            seen,
+            flagged,
+        })
+        .collect();
+    let changes = crate::sync::flag_plan(&held, &server_seen, &server_flagged);
+    let rows: Vec<(i64, bool, bool)> = changes
+        .iter()
+        .map(|c| (i64::from(c.uid), c.seen, c.flagged))
+        .collect();
+    store.apply_flag_changes(folder_id, &rows)?;
+    Ok(rows.len())
+}
+
+/// Reconcile one folder against the server over a **fresh** session, **without fetching new mail** —
+/// the background sibling of [`sync_folder_incremental`]'s prune+flag steps. The scheduler only
+/// recent-syncs INBOX, so this is what keeps *every other* folder in step in the background (driven by
+/// the backfill worker, which adds new mail; this removes server-deleted mail and pulls read/star
+/// changes made elsewhere). Never fetches bodies or announces. Returns how many flag rows changed.
+/// Blocking + network: **worker thread.**
+pub async fn reconcile_folder(
+    config: &ImapConfig,
+    secrets: &dyn SecretStore,
+    store: &Store,
+    account_id: i64,
+    folder: &str,
+) -> Result<usize, ImapError> {
+    let folder_id = store.upsert_folder(account_id, folder)?;
+    let mut session = connect(config, secrets).await?;
+    let mailbox = session.select(folder).await?;
+    // UIDVALIDITY guard: unlike `sync_folder_incremental`, this path does NOT rebuild a folder whose
+    // UIDVALIDITY the server reset — so if it changed since we synced, the server's uid sets now name
+    // *different* messages than our stored uids. Matching them by number would corrupt the wrong
+    // messages, so skip; the full re-sync (on next view) clears and rebuilds the folder correctly.
+    if let (Some(prev), Some(cur)) = (store.folder_uidvalidity(folder_id)?, mailbox.uid_validity) {
+        if prev != i64::from(cur) {
+            let _ = session.logout().await; // best-effort
+            return Ok(0);
+        }
+    }
+    let result = prune_deleted_then_reconcile_flags(&mut session, store, folder_id).await;
+    let _ = session.logout().await; // best-effort
+    result
+}
+
+/// Remove messages deleted on the server **first**, then pull flag changes — the same order
+/// [`sync_folder_incremental`] uses, and the reason it matters here: without the prune, a message
+/// deleted on the server (but still local, because a rarely-opened folder isn't recent-synced) is absent
+/// from the server's `\Seen`/`\Flagged` sets, so the flag pull would flip it to unread rather than
+/// removing it. The server UID set comes from one `UID SEARCH ALL`, which is all-or-nothing (an error
+/// propagates and nothing is deleted), so a partial read can never delete a message that's still there.
+async fn prune_deleted_then_reconcile_flags(
+    session: &mut ImapSession,
+    store: &Store,
+    folder_id: i64,
+) -> Result<usize, ImapError> {
+    let server: std::collections::HashSet<u32> =
+        session.uid_search("ALL").await?.into_iter().collect();
+    let gone: Vec<i64> = store
+        .uids_in_folder(folder_id)?
+        .into_iter()
+        .filter(|u| !server.contains(&(*u as u32)))
+        .collect();
+    store.delete_messages_by_uid(folder_id, &gone)?;
+    reconcile_flags(session, store, folder_id).await
 }
 
 /// Progressively fetch the rest of a folder, newest-first, in `batch_size` chunks (envelopes+bodies

@@ -7,6 +7,11 @@
   lingering in freed memory, and the whole app got a fresh security review (no issues found in its
   no-tracking, encrypted-at-rest, and safe-mail-rendering guarantees).
 
+### Changes from your other devices sync in everywhere
+- **Read a message, star it, or delete it on your phone, and it updates in every folder — not just the
+  inbox.** The background sync already reconciled the inbox with your other devices; now it does the same
+  for all your folders, so archived and filed mail stays in step too.
+
 ### All your accounts stay complete in the background
 - **Every account's full mailbox now downloads in the background, not just the one you're viewing.**
   GeleitMail progressively catches up all folders of all accounts, so a secondary account you rarely open
