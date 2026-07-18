@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Backups now keep your attachments
+- **Exported mail includes attachments.** Exporting a folder or a whole account to `.mbox` now writes
+  each message exactly as your server holds it — attachments and all — instead of text only. When you're
+  offline it still exports the text of every message, so a backup is always complete when connected and
+  never empty-handed when not.
+
 ### Organizing works offline
 - **Archive, delete, and move mail without a connection.** Filing mail no longer needs a signal:
   Archive, Delete, mark as Spam, and Move to… now take effect instantly whether you're online or not.

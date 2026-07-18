@@ -2160,6 +2160,35 @@ impl Store {
             .optional()?)
     }
 
+    /// The account a folder belongs to, or `None` if the id is unknown — so an export can find the IMAP
+    /// account to pull raw message bytes from (SEC-4).
+    pub fn account_for_folder(&self, folder_id: i64) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT account_id FROM folder WHERE id = ?1",
+                [folder_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The IMAP uids of a folder's messages (those that have one — local-only Saved mail is skipped).
+    /// For a **complete export** (SEC-4): the uids to pull the raw originals for, so attachments are
+    /// included. Order matches [`Self::folder_message_ids`] (oldest-first) though callers use it as a set.
+    pub fn folder_uids(&self, folder_id: i64) -> Result<Vec<u32>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid FROM message WHERE folder_id = ?1 AND uid IS NOT NULL \
+             ORDER BY date ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([folder_id], |r| r.get::<_, i64>(0))?;
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|u| u as u32)
+            .collect())
+    }
+
     /// Queue a composed message for delivery (SEND-10 outbox) — the built RFC 5322 bytes plus the
     /// envelope, so it can be handed to an SMTP server later. Returns the new outbox id.
     ///
@@ -2911,6 +2940,43 @@ mod tests {
         assert_eq!(s.pending_notification_summary(inbox).unwrap().0, 0);
         assert!(s.owed_message_ids(inbox).unwrap().is_empty());
         assert!(s.unfiltered_inbox(acc).unwrap().is_empty());
+    }
+
+    #[test]
+    fn folder_uids_lists_server_messages_and_account_for_folder_resolves() {
+        // SEC-4 export: to pull raw originals we need the folder's account and its messages' uids —
+        // local-only mail (no uid) is skipped since it isn't on any server to fetch from.
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        assert_eq!(s.account_for_folder(inbox).unwrap(), Some(acc));
+        assert_eq!(s.account_for_folder(9999).unwrap(), None);
+
+        for (uid, date) in [(Some(5i64), 200i64), (Some(3), 100)] {
+            s.upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid,
+                    date: Some(date),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        // A local-only Saved message (no uid) must not appear — nothing to fetch from a server.
+        s.upsert_message(
+            acc,
+            inbox,
+            &NewMessage {
+                uid: None,
+                date: Some(300),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Oldest-first by date, uids only.
+        assert_eq!(s.folder_uids(inbox).unwrap(), vec![3u32, 5]);
     }
 
     #[test]

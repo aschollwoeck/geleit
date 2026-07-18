@@ -211,6 +211,36 @@ pub fn run_fetch_attachment(
     Ok((att.filename, att.data))
 }
 
+/// Fetch the raw originals of a folder's messages for a **complete export** (SEC-4), keyed by uid.
+///
+/// **Best-effort by design.** Attachment bytes aren't stored locally, so a faithful backup has to pull
+/// each message from the server — but an export must still work offline. So this never errors:
+/// - `Some(map)` — the server was reached; the map holds the raw RFC 5322 messages it returned
+///   (attachments included). It may be partial or empty if the server dropped some.
+/// - `None` — the server was **unreachable** (couldn't connect, or the account has no IMAP config). The
+///   caller falls back to reconstruction *and* can stop trying for the rest of a whole-account export,
+///   so an offline export costs one connect attempt, not one per folder.
+///
+/// Blocking + network: **worker thread.**
+#[must_use]
+pub fn run_fetch_folder_raws(
+    db_path: &str,
+    secrets: &dyn SecretStore,
+    account_id: i64,
+    folder: &str,
+    uids: &[u32],
+) -> Option<std::collections::HashMap<u32, Vec<u8>>> {
+    if uids.is_empty() {
+        return Some(std::collections::HashMap::new());
+    }
+    let config = account_imap(db_path, secrets, account_id).ok()?;
+    let rt = runtime().ok()?;
+    // An error here means the server wasn't reachable (connect failed or timed out) — `None`, so the
+    // caller degrades and, for an account export, stops probing every remaining folder.
+    rt.block_on(imap::fetch_raw_batch(&config, secrets, folder, uids))
+        .ok()
+}
+
 /// Permanently delete one message by UID (ORG-2). Blocking + network: **worker thread.**
 pub fn run_delete_permanently(
     db_path: &str,
