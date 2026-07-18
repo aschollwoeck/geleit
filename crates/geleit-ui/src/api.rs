@@ -201,6 +201,12 @@ struct ExportArgs {
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct MoveRuleArgs {
+    id: i64,
+    up: bool,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AddRuleArgs {
     account_id: i64,
     field: String,
@@ -655,6 +661,11 @@ pub async fn add_rule(
 /// Delete a rule.
 pub async fn delete_rule(id: i64) -> Result<(), String> {
     call("delete_rule", &IdArgs { id }).await
+}
+
+/// Move a rule up or down its evaluation order (ORG-8; first-match-wins priority).
+pub async fn move_rule(id: i64, up: bool) -> Result<(), String> {
+    call("move_rule", &MoveRuleArgs { id, up }).await
 }
 
 /// Run the account's rules over its whole inbox now (ORG-8); returns how many messages were acted on.

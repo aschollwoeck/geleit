@@ -395,6 +395,9 @@ iframe.mail { flex: 1; width: 100%; border: 0; background: #fff; }
 .rule-row { display: flex; align-items: center; gap: 12px; padding: 9px 12px; background: var(--surface-raised); border: 1px solid var(--divider); border-radius: var(--radius-sm); }
 .rule-text { font-size: 13px; color: var(--text); min-width: 0; overflow-wrap: anywhere; }
 .rule-row .remove-link { flex: 0 0 auto; }
+.rule-move { flex: 0 0 auto; cursor: pointer; color: var(--text-muted); font-size: 14px; line-height: 1;
+  padding: 2px 5px; border-radius: var(--radius-sm); user-select: none; }
+.rule-move:hover { background: var(--surface); color: var(--text); }
 .rule-add { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--divider); }
 .rule-add-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--text-muted); }
 .rule-add-line .folder-input { width: auto; margin: 0; }

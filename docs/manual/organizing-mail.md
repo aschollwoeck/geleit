@@ -115,7 +115,8 @@ contains **newsletter** → move to **Reading**, mark read"*), and you can **Del
 
 New mail is sorted **as it arrives**, while GeleitMail is checking your mail — so a rule fires on the next
 sync, not the instant you write it, and (since rules run here on your device) not while GeleitMail is
-closed. If two rules could match the same message, the **first** one wins.
+closed. If two rules could match the same message, the **first** one wins — use the **↑ ↓** buttons on a
+rule to change which comes first.
 
 To tidy the mail already sitting in your inbox, choose **Run on inbox now** — it applies your rules to
 everything that's there.

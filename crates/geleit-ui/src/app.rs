@@ -1158,6 +1158,19 @@ pub fn App() -> impl IntoView {
             }
         });
     };
+    // Move a rule up/down its priority order (ORG-8, first-match-wins), then reload the list.
+    let move_rule_action = move |id: i64, up: bool| {
+        let Some(aid) = account.get_untracked() else {
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            if let Err(e) = api::move_rule(id, up).await {
+                error.set(Some(e));
+            } else if let Ok(rs) = api::list_rules(aid).await {
+                rules_list.set(rs);
+            }
+        });
+    };
     let run_rules_now_action = move || {
         let Some(aid) = account.get_untracked() else {
             return;
@@ -2965,7 +2978,7 @@ pub fn App() -> impl IntoView {
                                 // Rules (ORG-8)
                                 <Show when=move || settings_tab.get() == "rules">
                                     <div style="font-size:13px;color:var(--text-muted)">
-                                        "Rules sort new mail as it arrives — move it to a folder, mark it read, or star it. They run on this device when GeleitMail checks your mail. The first rule a message matches wins."
+                                        "Rules sort new mail as it arrives — move it to a folder, mark it read, or star it. They run on this device when GeleitMail checks your mail. The first rule a message matches wins — use ↑ ↓ to set which comes first."
                                     </div>
                                     // Existing rules, as sentences.
                                     <div style="display:flex;flex-direction:column;gap:8px;margin-top:16px">
@@ -2978,6 +2991,8 @@ pub fn App() -> impl IntoView {
                                                 view! {
                                                     <div class="rule-row">
                                                         <span class="rule-text">{rule_sentence(&r)}</span>
+                                                        <span class="rule-move" title="Higher priority" on:click=move |_| move_rule_action(id, true)>"\u{2191}"</span>
+                                                        <span class="rule-move" title="Lower priority" on:click=move |_| move_rule_action(id, false)>"\u{2193}"</span>
                                                         <span class="remove-link" on:click=move |_| delete_rule_action(id)>"Delete"</span>
                                                     </div>
                                                 }
