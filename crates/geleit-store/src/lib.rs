@@ -1387,6 +1387,16 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// How many messages a folder holds — for the export to skip empty folders and know an account is
+    /// empty before opening a save dialog, without reading every id into memory.
+    pub fn folder_message_count(&self, folder_id: i64) -> Result<i64, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM message WHERE folder_id = ?1",
+            [folder_id],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn messages_in_folder(
         &self,
         folder_id: i64,
@@ -2940,6 +2950,27 @@ mod tests {
         assert_eq!(s.pending_notification_summary(inbox).unwrap().0, 0);
         assert!(s.owed_message_ids(inbox).unwrap().is_empty());
         assert!(s.unfiltered_inbox(acc).unwrap().is_empty());
+    }
+
+    #[test]
+    fn folder_message_count_counts_all_messages() {
+        let s = Store::open_in_memory().unwrap();
+        let acc = s.add_account("a@example.com", None).unwrap();
+        let inbox = s.upsert_folder(acc, "INBOX").unwrap();
+        assert_eq!(s.folder_message_count(inbox).unwrap(), 0);
+        for uid in [Some(1i64), Some(2), None] {
+            s.upsert_message(
+                acc,
+                inbox,
+                &NewMessage {
+                    uid,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(s.folder_message_count(inbox).unwrap(), 3); // local-only (no uid) counts too
+        assert_eq!(s.folder_message_count(9999).unwrap(), 0); // unknown folder
     }
 
     #[test]

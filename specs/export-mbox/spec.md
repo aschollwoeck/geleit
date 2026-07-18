@@ -61,6 +61,26 @@ message's own date.
   server, and the loop then skips the network for every remaining folder — so an offline whole-account
   export costs one connect attempt, not one per folder. A store error on a single folder skips just that
   folder, never the whole account.
+- A **UIDVALIDITY guard**: `fetch_raw_batch` compares the server's current UIDVALIDITY to the value the
+  folder was synced at; on a mismatch (the server reset its UIDs since sync) the stored uids now name
+  *different* messages, so it fetches nothing and the build reconstructs — never splicing the wrong
+  message's content into the archive.
+
+## Honest by count
+
+The export reports an [`ExportSummary`] (`{ exported, text_only }`): how many messages were written, and
+how many went out **text-only** — reconstructed because their raw couldn't be fetched, so any attachments
+aren't in the file. The toast (`view::export_message`) reads *"Exported 42 messages"* when every message
+was complete, and *"Exported 42 messages · 3 text-only (attachments not saved)"* when some weren't — so a
+degraded backup is never silently passed off as a full one.
+
+## Streamed to disk
+
+`export_account` chooses the destination directory **first**, then builds and writes each folder's
+`.mbox` before starting the next — so peak memory is one folder's mbox, not every folder's at once (it
+used to accumulate them all). Empty folders are skipped up front (`store::folder_message_count`), so an
+empty account is known before any dialog and no empty file is written. (Per-message streaming *within* a
+folder remains a follow-up — one folder's mbox is still built in memory.)
 
 ## Out of scope (named)
 
@@ -70,14 +90,13 @@ and attachment-included export were follow-ups, now both shipped.)*
 
 ## Known limitations (named honestly)
 
-- **The count doesn't distinguish complete from degraded.** The toast says *"Exported N messages"* — true
-  in number, but it doesn't say how many fell back to text-only (a partial server failure, or offline).
-  Surfacing *"N exported, M text-only"* is a follow-up; the export is never silently *empty*, only
-  possibly text-only for some messages.
-- **No UIDVALIDITY recheck.** The raw fetch trusts the stored uids; if the server reset UIDVALIDITY since
-  the last sync, a uid could name a different message. Rare, and shared with the existing single-attachment
-  save path (`fetch_raw_message`); a UIDVALIDITY guard across both is a separate follow-up. Streaming the
-  mbox to disk (rather than building it in memory) also remains a named follow-up.
+- **Per-message streaming within a folder** isn't done: one folder's mbox is still assembled in memory
+  before it's written. The whole-account export no longer accumulates *every* folder (see "Streamed to
+  disk"), so the bound is one folder, not the account — but a single enormous folder still builds in RAM.
+- The **single-attachment save path** (`fetch_raw_message`, READ-8) does **not** yet share the export's
+  UIDVALIDITY guard; a guard across both is a small follow-up.
+- *(Resolved this slice: the text-only count is now surfaced, and the export applies a UIDVALIDITY guard —
+  see above.)*
 
 ## Acceptance criteria
 

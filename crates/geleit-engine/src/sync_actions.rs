@@ -229,6 +229,7 @@ pub fn run_fetch_folder_raws(
     account_id: i64,
     folder: &str,
     uids: &[u32],
+    expected_uidvalidity: Option<i64>,
 ) -> Option<std::collections::HashMap<u32, Vec<u8>>> {
     if uids.is_empty() {
         return Some(std::collections::HashMap::new());
@@ -237,8 +238,14 @@ pub fn run_fetch_folder_raws(
     let rt = runtime().ok()?;
     // An error here means the server wasn't reachable (connect failed or timed out) — `None`, so the
     // caller degrades and, for an account export, stops probing every remaining folder.
-    rt.block_on(imap::fetch_raw_batch(&config, secrets, folder, uids))
-        .ok()
+    rt.block_on(imap::fetch_raw_batch(
+        &config,
+        secrets,
+        folder,
+        uids,
+        expected_uidvalidity,
+    ))
+    .ok()
 }
 
 /// Permanently delete one message by UID (ORG-2). Blocking + network: **worker thread.**

@@ -13,6 +13,16 @@ pub struct Account {
     pub display_name: Option<String>,
 }
 
+/// Result of an mbox export (SEC-4): how many messages were written, and how many of those went out
+/// **text-only** (reconstructed from stored text because their raw original couldn't be fetched, so any
+/// attachments aren't in the file). `text_only == 0` ⇒ every message was exported complete.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSummary {
+    pub exported: i64,
+    pub text_only: i64,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Folder {
     pub id: i64,
@@ -736,8 +746,12 @@ pub async fn save_eml(id: i64) -> Result<bool, String> {
     call("save_eml", &IdArgs { id }).await
 }
 
-/// Export a folder to an mbox file (SEC-4). `Some(count)` written, or `None` if cancelled.
-pub async fn export_folder(folder_id: i64, folder_name: String) -> Result<Option<i64>, String> {
+/// Export a folder to an mbox file (SEC-4). `Some(summary)` when written (an all-zero summary if the
+/// folder is empty), or `None` if cancelled.
+pub async fn export_folder(
+    folder_id: i64,
+    folder_name: String,
+) -> Result<Option<ExportSummary>, String> {
     call(
         "export_folder",
         &ExportArgs {
@@ -748,9 +762,9 @@ pub async fn export_folder(folder_id: i64, folder_name: String) -> Result<Option
     .await
 }
 
-/// Export a whole account — one mbox per folder into a chosen directory (SEC-4). `Some(total)` messages
-/// written, `Some(0)` if empty, `None` if cancelled.
-pub async fn export_account(account_id: i64) -> Result<Option<i64>, String> {
+/// Export a whole account — one mbox per folder into a chosen directory (SEC-4). `Some(summary)` written
+/// (all-zero if empty), `None` if cancelled.
+pub async fn export_account(account_id: i64) -> Result<Option<ExportSummary>, String> {
     call("export_account", &AccountArgs { account_id }).await
 }
 
