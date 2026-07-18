@@ -93,8 +93,9 @@ and attachment-included export were follow-ups, now both shipped.)*
 - **Per-message streaming within a folder** isn't done: one folder's mbox is still assembled in memory
   before it's written. The whole-account export no longer accumulates *every* folder (see "Streamed to
   disk"), so the bound is one folder, not the account — but a single enormous folder still builds in RAM.
-- The **single-attachment save path** (`fetch_raw_message`, READ-8) does **not** yet share the export's
-  UIDVALIDITY guard; a guard across both is a small follow-up.
+- The **single-attachment save path** (`fetch_raw_message`, READ-8) now shares the same UIDVALIDITY guard
+  (via `store::folder_uidvalidity_by_name`): a stale uid after a server reset refuses the fetch rather
+  than saving the wrong message's attachment.
 - *(Resolved this slice: the text-only count is now surfaced, and the export applies a UIDVALIDITY guard —
   see above.)*
 
