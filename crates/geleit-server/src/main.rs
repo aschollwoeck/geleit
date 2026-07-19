@@ -73,6 +73,14 @@ async fn main() {
     let (events, _) = broadcast::channel::<SseEvent>(256);
     let shell: Arc<dyn Shell> = Arc::new(ServerShell::new(events.clone()));
 
+    // Background auto-sync, same as the desktop host (ADR-0014): the scheduler (periodic sweep +
+    // notifications + badge), the per-account IMAP IDLE watchers, and the full-mailbox backfill — all
+    // host-agnostic now, spawned here on axum's own tokio runtime.
+    let (scheduler, idle, backfill) = geleit_host::worker::futures(state.clone(), shell.clone());
+    tokio::spawn(scheduler);
+    tokio::spawn(idle);
+    tokio::spawn(backfill);
+
     let ctx = AppCtx {
         state,
         shell,

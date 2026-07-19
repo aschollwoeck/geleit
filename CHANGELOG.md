@@ -10,8 +10,10 @@
   visit `http://127.0.0.1:8080`. This is the groundwork for GeleitMail on more platforms; the desktop
   app is unchanged.
   - *Note:* run the desktop app **or** the web server against a given mailbox, not both at once.
-    Background auto-sync in the web version and browser-native file downloads are coming next; for now
-    press Refresh, and file dialogs open on the server's own desktop.
+    Browser-native file downloads are coming next; for now file dialogs open on the server's own desktop.
+  - **The web version now keeps your mail up to date on its own** — the same background sync as the
+    desktop app (periodic checks, instant IMAP push for new mail, and the gradual full-mailbox
+    download) runs in the server, so new mail and notifications arrive without pressing Refresh.
 
 ### Move several messages to a folder at once
 - **The multi-select bar now has a "Move to folder" button.** Select a batch of messages and move them

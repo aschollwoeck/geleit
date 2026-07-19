@@ -4,18 +4,18 @@
 //! occluded window — which is exactly the case this feature exists for — and the frontend only knows
 //! the account you're *looking at*, while the host can just ask the store for all of them.
 //!
-//! Every sync goes through [`crate::ipc::sync_folder_once`], so it takes the folder's sync lock and
+//! Every sync goes through [`crate::commands::sync_folder_once`], so it takes the folder's sync lock and
 //! can never run over a Refresh the user pressed (or a previous tick that overran).
 //!
 //! The **decisions** (how long to wait, what counts as a failure, which accounts to try) are pure and
 //! live in [`crate::schedule`], where they are unit-tested. This file is the glue that acts on them.
 
-use crate::ipc::AppState;
-use crate::notify::{self, QuietHours, Verdict, COLLAPSE_AT};
-use crate::schedule::{backoff, should_try, sweep_verdict};
+use super::notify::{self, QuietHours, Verdict, COLLAPSE_AT};
+use super::schedule::{backoff, should_try, sweep_verdict};
+use crate::{AppState, Shell};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
-use tauri::{Emitter, Manager};
 
 /// How many messages we read to build the notification's *text*. Only the senders' names come from
 /// these; the **count** is asked of the store, because a mailbox back from a week away needs a true
@@ -41,47 +41,41 @@ fn interval_override() -> Option<Duration> {
     None
 }
 
-/// Start the scheduler. Runs for the life of the app on Tauri's async runtime.
-pub(crate) fn spawn(app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        let fast = interval_override();
-        let wake = app.state::<AppState>().wake_sync();
+/// Run the scheduler loop. Runs for the life of the host, which spawns it on its own runtime.
+pub async fn run(state: AppState, shell: Arc<dyn Shell>) {
+    let fast = interval_override();
+    let wake = state.wake_sync();
 
-        let mut tick: u64 = 0;
-        let mut failures: u32 = 0;
-        let mut account_failures: HashMap<i64, u32> = HashMap::new();
+    let mut tick: u64 = 0;
+    let mut failures: u32 = 0;
+    let mut account_failures: HashMap<i64, u32> = HashMap::new();
 
-        sleep_or_wake(fast.unwrap_or(FIRST_SWEEP_DELAY), &wake).await;
-        loop {
-            let (changed, verdict) = sweep(&app, tick, &mut account_failures).await;
-            // Refresh the badge whenever the count could have moved: a successful sweep (mail read on
-            // another device comes back `\Seen`, so the count should fall for that too) OR a local
-            // snooze resurfacing — which happens even when every account is offline, and a failed
-            // verdict must not swallow.
-            if verdict.is_ok() || changed > 0 {
-                crate::ipc::set_badge(
-                    &crate::ipc::TauriShell::new(app.clone()),
-                    app.state::<AppState>().inner(),
-                )
-                .await;
-            }
-            if changed > 0 {
-                // Tell the UI to re-list — for new mail, a flag pulled from another device, or a
-                // resurfaced snooze. It goes through the same `request` epoch as every other re-list,
-                // so it can never clobber a search being typed or a folder just switched to.
-                let _ = app.emit("mail-arrived", changed as i64);
-            }
-            // A failed sweep is ordinary — the machine sleeps, the wifi drops. Never surface it: an
-            // error the user didn't ask for, about a sync they didn't start, is noise. It only feeds
-            // the backoff.
-            match verdict {
-                Ok(()) => failures = 0,
-                Err(()) => failures = failures.saturating_add(1),
-            }
-            tick = tick.wrapping_add(1);
-            sleep_or_wake(fast.unwrap_or_else(|| backoff(failures)), &wake).await;
+    sleep_or_wake(fast.unwrap_or(FIRST_SWEEP_DELAY), &wake).await;
+    loop {
+        let (changed, verdict) = sweep(&state, tick, &mut account_failures).await;
+        // Refresh the badge whenever the count could have moved: a successful sweep (mail read on
+        // another device comes back `\Seen`, so the count should fall for that too) OR a local
+        // snooze resurfacing — which happens even when every account is offline, and a failed
+        // verdict must not swallow.
+        if verdict.is_ok() || changed > 0 {
+            crate::commands::set_badge(shell.as_ref(), &state).await;
         }
-    });
+        if changed > 0 {
+            // Tell the UI to re-list — for new mail, a flag pulled from another device, or a
+            // resurfaced snooze. It goes through the same `request` epoch as every other re-list,
+            // so it can never clobber a search being typed or a folder just switched to.
+            shell.emit("mail-arrived", serde_json::json!(changed as i64));
+        }
+        // A failed sweep is ordinary — the machine sleeps, the wifi drops. Never surface it: an
+        // error the user didn't ask for, about a sync they didn't start, is noise. It only feeds
+        // the backoff.
+        match verdict {
+            Ok(()) => failures = 0,
+            Err(()) => failures = failures.saturating_add(1),
+        }
+        tick = tick.wrapping_add(1);
+        sleep_or_wake(fast.unwrap_or_else(|| backoff(failures)), &wake).await;
+    }
 }
 
 /// Wait for `delay` — **or** until something says the network is probably back.
@@ -107,12 +101,12 @@ async fn sleep_or_wake(delay: Duration, wake: &tokio::sync::Notify) {
 /// because a snooze resurfacing is a local event that must refresh the UI even when every account is
 /// offline; `verdict` is `Err` only when every account we *tried* failed, and drives the backoff.
 async fn sweep(
-    app: &tauri::AppHandle,
+    state: &AppState,
     tick: u64,
     account_failures: &mut HashMap<i64, u32>,
 ) -> (usize, Result<(), ()>) {
-    let state = app.state::<AppState>().inner().clone();
-    let Ok(accounts) = crate::ipc::account_ids(&state).await else {
+    let state = state.clone();
+    let Ok(accounts) = crate::commands::account_ids(&state).await else {
         return (0, Err(()));
     };
 
@@ -120,7 +114,7 @@ async fn sweep(
     // regardless of connectivity (even a sweep where every account is skipped must still resurface).
     // A resurfaced message is marked owed a notification, so the per-account `announce` below picks it
     // up; and it counts as a change, so the badge refreshes and the UI re-lists.
-    let mut changed = crate::ipc::resurface_snoozes(&state).await;
+    let mut changed = crate::commands::resurface_snoozes(&state).await;
     let (mut failed, mut tried) = (0usize, 0usize);
     for account_id in &accounts {
         let so_far = account_failures.get(account_id).copied().unwrap_or(0);
@@ -135,19 +129,19 @@ async fn sweep(
         // Drain any read/star changes queued for this account (SYNC-5) before pulling — a change made
         // offline reaches the server here, and going out first means the sync's flag pull sees a
         // server that already agrees rather than a stale one.
-        crate::ipc::flush_flags(&state, *account_id).await;
+        crate::commands::flush_flags(&state, *account_id).await;
         // Push any moves made while offline (OFF-4): a message Archived / Trashed / Moved without a
         // connection reaches the server now. One that lands leaves its source folder and reappears in
         // the target, so the list is stale — count it as a change.
-        if crate::ipc::flush_moves(&state, *account_id).await > 0 {
+        if crate::commands::flush_moves(&state, *account_id).await > 0 {
             changed += 1;
         }
         // Send anything waiting in the outbox (SEND-10): mail composed while offline goes out now that
         // we've reached the server. A message that goes out lands in Sent, so the list is stale too.
-        if crate::ipc::flush_outbox(&state, *account_id).await > 0 {
+        if crate::commands::flush_outbox(&state, *account_id).await > 0 {
             changed += 1;
         }
-        match crate::ipc::sync_folder_once(&state, *account_id, "INBOX").await {
+        match crate::commands::sync_folder_once(&state, *account_id, "INBOX").await {
             Ok(outcome) => {
                 account_failures.remove(account_id); // recovered
                                                      // A re-list is due if mail arrived OR a flag was pulled from another device — either
@@ -159,7 +153,7 @@ async fn sweep(
                 // files a message to a folder or marks it read should keep it out of the notification
                 // (you don't want a popup for mail a rule just tidied away), and moves/flags make the
                 // on-screen list stale.
-                if crate::ipc::apply_rules(&state, *account_id).await > 0 {
+                if crate::commands::apply_rules(&state, *account_id).await > 0 {
                     changed += 1;
                 }
                 // Tell the user — from the **store**, not from this sync's diff. A message the backfill
@@ -191,17 +185,19 @@ pub(crate) async fn announce(state: &AppState, account_id: i64) {
     // the handful of messages we sample for the senders' names: telling the user "50 new messages"
     // when 300 arrived, and then telling them "50 new messages" again five minutes later about older
     // mail, is exactly the storm collapsing exists to prevent.
-    let Ok((total, Some(max_id))) = crate::ipc::pending_summary(state, account_id).await else {
+    let Ok((total, Some(max_id))) = crate::commands::pending_summary(state, account_id).await
+    else {
         return; // nothing owed, or the store is busy — the debt survives either way
     };
-    let Ok(sample) = crate::ipc::pending_notifications(state, account_id, NOTIFY_SAMPLE).await
+    let Ok(sample) = crate::commands::pending_notifications(state, account_id, NOTIFY_SAMPLE).await
     else {
         return;
     };
 
-    let enabled = crate::ipc::bool_setting(state, "notify", true).await;
-    let per_account = crate::ipc::bool_setting(state, &notify::account_key(account_id), true).await;
-    let quiet = crate::ipc::string_setting(state, "quiet_hours")
+    let enabled = crate::commands::bool_setting(state, "notify", true).await;
+    let per_account =
+        crate::commands::bool_setting(state, &notify::account_key(account_id), true).await;
+    let quiet = crate::commands::string_setting(state, "quiet_hours")
         .await
         .and_then(|raw| QuietHours::parse(&raw))
         .is_some_and(|q| q.contains(local_minutes()));
@@ -213,7 +209,7 @@ pub(crate) async fn announce(state: &AppState, account_id: i64) {
         // Switched off: the mail is not owed at all. Keeping the debt would mean that turning
         // notifications on greets the user with every message that arrived while they were off.
         Verdict::Drop => {
-            let _ = crate::ipc::settle(state, account_id, max_id).await;
+            let _ = crate::commands::settle(state, account_id, max_id).await;
         }
         Verdict::Announce => {
             let Some(n) = notify::summarize(&sample, total as usize, COLLAPSE_AT) else {
@@ -223,7 +219,7 @@ pub(crate) async fn announce(state: &AppState, account_id: i64) {
             // is an async task on Tauri's runtime. It is also the one call here with no timeout — a
             // notification daemon that is slow to start would otherwise stall a runtime thread.
             let notifier = state.notifier.clone();
-            let shown = tauri::async_runtime::spawn_blocking(move || notifier.notify(&n))
+            let shown = tokio::task::spawn_blocking(move || notifier.notify(&n))
                 .await
                 .is_ok_and(|r| r.is_ok());
             // A desktop with no notification service (a session that hasn't finished starting, say) is
@@ -232,7 +228,7 @@ pub(crate) async fn announce(state: &AppState, account_id: i64) {
             if shown {
                 // Settled only now, and only up to the message we actually told them about: mail that
                 // arrived while the notification was being raised has a higher id and keeps its debt.
-                let _ = crate::ipc::settle(state, account_id, max_id).await;
+                let _ = crate::commands::settle(state, account_id, max_id).await;
             }
         }
     }
@@ -249,7 +245,7 @@ fn local_minutes() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::announce;
-    use crate::ipc::AppState;
+    use crate::AppState;
     use geleit_platform::notify::FakeNotifier;
     use geleit_platform::secret::InMemorySecretStore;
     use geleit_store::NewMessage;
@@ -292,7 +288,7 @@ mod tests {
     }
 
     async fn still_owed(state: &AppState, account_id: i64) -> i64 {
-        crate::ipc::pending_summary(state, account_id)
+        crate::commands::pending_summary(state, account_id)
             .await
             .expect("summary")
             .0
@@ -340,7 +336,7 @@ mod tests {
         let (state, _dir, acc) = mailbox(fake.clone());
 
         // Quiet hours, all day: silent — but the mail is still owed, so it is announced in the morning.
-        geleit_host::commands::set_setting_for_test(&state, "quiet_hours", "00:00-23:59").await;
+        crate::commands::set_setting_for_test(&state, "quiet_hours", "00:00-23:59").await;
         announce(&state, acc).await;
         assert!(fake.sent().is_empty(), "quiet hours are quiet");
         assert_eq!(
@@ -351,8 +347,8 @@ mod tests {
 
         // Switched off: silent, and the debt goes with it — otherwise turning notifications back on
         // greets the user with every message that arrived while they were off.
-        geleit_host::commands::set_setting_for_test(&state, "quiet_hours", "").await;
-        geleit_host::commands::set_setting_for_test(&state, "notify", "0").await;
+        crate::commands::set_setting_for_test(&state, "quiet_hours", "").await;
+        crate::commands::set_setting_for_test(&state, "notify", "0").await;
         announce(&state, acc).await;
         assert!(fake.sent().is_empty());
         assert_eq!(still_owed(&state, acc).await, 0, "not owed at all");
@@ -362,8 +358,12 @@ mod tests {
     async fn an_account_the_user_muted_is_silent_while_the_others_are_not() {
         let fake = Arc::new(FakeNotifier::new());
         let (state, _dir, acc) = mailbox(fake.clone());
-        geleit_host::commands::set_setting_for_test(&state, &crate::notify::account_key(acc), "0")
-            .await;
+        crate::commands::set_setting_for_test(
+            &state,
+            &crate::worker::notify::account_key(acc),
+            "0",
+        )
+        .await;
 
         announce(&state, acc).await;
         assert!(fake.sent().is_empty(), "this mailbox was muted");

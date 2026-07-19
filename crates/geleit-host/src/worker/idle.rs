@@ -10,9 +10,8 @@
 //! this file is the glue that resolves each account's config, reconnects with backoff when the
 //! connection drops, and stops cleanly when an account is removed or its server has no IDLE.
 
-use crate::ipc::AppState;
+use crate::AppState;
 use std::time::Duration;
-use tauri::Manager;
 
 /// Wait this long before the first IDLE attempt, so it doesn't fight the app's own boot sync.
 const FIRST_DELAY: Duration = Duration::from_secs(5);
@@ -26,43 +25,45 @@ const RECONNECT_MAX: Duration = Duration::from_secs(5 * 60);
 /// An account **added while the app is running** gets its watcher at once via [`watch_new_account`], so
 /// it no longer waits for the next launch for instant push — the poll was always its safety net, and now
 /// isn't its only fast path.
-pub(crate) fn spawn(app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(FIRST_DELAY).await;
-        let state = app.state::<AppState>().inner().clone();
-        let Ok(accounts) = crate::ipc::account_ids(&state).await else {
-            return;
-        };
-        for account_id in accounts {
-            start_watch(app.clone(), account_id);
-        }
-    });
-}
-
-/// Start watching an account that was **just added**, so it gets instant push without a restart. A
-/// no-op if it's already watched (re-configuring an existing account keeps its one watcher).
-pub(crate) fn watch_new_account(app: &tauri::AppHandle, account_id: i64) {
-    start_watch(app.clone(), account_id);
-}
-
-/// Spawn the watcher for `account_id` — but only if one isn't already running, so an account is never
-/// watched by two tasks (double connections, double wakes).
-fn start_watch(app: tauri::AppHandle, account_id: i64) {
-    let Some(cancel) = app.state::<AppState>().inner().claim_idle_watch(account_id) else {
-        return; // already watched
+pub async fn run(state: AppState) {
+    tokio::time::sleep(FIRST_DELAY).await;
+    let Ok(accounts) = crate::commands::account_ids(&state).await else {
+        return;
     };
-    tauri::async_runtime::spawn(async move { watch_account(app, account_id, cancel).await });
+    for account_id in accounts {
+        // We're inside a spawned task here (a live tokio runtime), so spawning each watcher directly
+        // is fine — `watch_new_account` hands back the future and this loop drives it onto the runtime.
+        if let Some(watcher) = watch_new_account(&state, account_id) {
+            tokio::spawn(watcher);
+        }
+    }
+}
+
+/// Prepare an IDLE watcher for an account that was **just added**, so it gets instant push without a
+/// restart — returning the watcher future for the caller to spawn, or `None` if it's already watched
+/// (which is how an account is never watched by two tasks: double connections, double wakes).
+///
+/// Deliberately **spawn-agnostic**: it does not touch any runtime itself, so a host can call it from a
+/// command handler and spawn the result on *its own* executor (`tauri::async_runtime::spawn` on the
+/// desktop, `tokio::spawn` on the web host) without assuming an ambient tokio runtime is present.
+#[must_use]
+pub fn watch_new_account(
+    state: &AppState,
+    account_id: i64,
+) -> Option<impl std::future::Future<Output = ()> + Send + 'static> {
+    let cancel = state.claim_idle_watch(account_id)?; // already watched → nothing to spawn
+    let state = state.clone();
+    Some(async move { watch_account(state, account_id, cancel).await })
 }
 
 /// Keep an IDLE connection to one account's INBOX alive, reconnecting with backoff when it drops, until
 /// `cancel` fires (the account was removed). `cancel` is also the slot token, so freeing the slot on exit
 /// can't evict a replacement watcher that reused this id.
 async fn watch_account(
-    app: tauri::AppHandle,
+    state: AppState,
     account_id: i64,
     cancel: std::sync::Arc<tokio::sync::Notify>,
 ) {
-    let state = app.state::<AppState>().inner().clone();
     // However this task leaves (cancelled, account gone, no server IDLE), free *its own* slot so the
     // account can be watched again if it's re-added.
     struct Release {
@@ -85,7 +86,7 @@ async fn watch_account(
         // Resolve the account's config on a worker (it opens the encrypted store). Gone → stop the
         // task; the account was removed.
         let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
-        let config = tauri::async_runtime::spawn_blocking(move || {
+        let config = tokio::task::spawn_blocking(move || {
             geleit_engine::sync_actions::account_imap(&db, &*secrets, account_id)
         })
         .await;

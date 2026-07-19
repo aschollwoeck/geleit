@@ -19,14 +19,10 @@ use geleit_host::dto::{
 };
 pub use geleit_host::AppState;
 
-// Worker helpers — the background tasks and the mail origin reach the core through these. Signatures
-// are unchanged from when they lived here, so their callers need no edits (except `set_badge`, which
-// now takes a `Shell`).
-pub use geleit_host::commands::{
-    account_ids, apply_rules, bool_setting, flush_flags, flush_moves, flush_outbox, message_html,
-    pending_notifications, pending_summary, resurface_snoozes, set_badge, settle, string_setting,
-    sync_folder_once,
-};
+// The two host helpers the desktop shell still reaches directly: `bool_setting` (update.rs, the
+// auto-update opt-out) and `message_html` (mailproto, the mail:// origin). The background workers used
+// to need the rest, but they now live in geleit-host and call the core directly (ADR-0014).
+pub use geleit_host::commands::{bool_setting, message_html};
 
 /// The desktop host's [`Shell`](geleit_host::Shell): a live `AppHandle` to emit events on and to hang
 /// the unread badge from.
@@ -202,7 +198,6 @@ pub async fn refresh(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn add_account(
-    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     email: String,
     display_name: String,
@@ -231,7 +226,11 @@ pub async fn add_account(
         allow_invalid_certs,
     )
     .await?;
-    crate::idle::watch_new_account(&app, account_id);
+    // Give the new account instant IMAP IDLE push right away — spawn its watcher on Tauri's runtime.
+    // Idempotent (`None` if already watched); the background poll covers it regardless.
+    if let Some(watcher) = geleit_host::worker::idle::watch_new_account(state.inner(), account_id) {
+        tauri::async_runtime::spawn(watcher);
+    }
     Ok(account_id)
 }
 

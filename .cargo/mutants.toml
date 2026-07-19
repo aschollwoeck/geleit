@@ -35,7 +35,7 @@ exclude_globs = [
     "**/geleit-app/src/main.rs",
     # idle.rs: the IMAP IDLE watcher — a long-lived tokio task per account needing a live server; its
     # only decision (reconnect backoff) is trivial and its effect (wake the scheduler) is glue.
-    "**/geleit-app/src/idle.rs",
+    "**/geleit-host/src/worker/idle.rs",
     # update.rs: auto-update glue over tauri-plugin-updater — needs a live feed + a real signed artifact;
     # the version comparison is the plugin's, so there's no logic of ours to mutate here.
     "**/geleit-app/src/update.rs",
@@ -45,11 +45,11 @@ exclude_globs = [
     # scheduler.rs: the background-sync loop — a tokio task needing a live AppHandle, an IMAP server
     # and a clock; nothing here can run under mutants. Its DECISIONS (backoff, sweep verdict, the
     # per-account retry cadence) are split into `schedule.rs`, which STAYS mutation-tested.
-    "**/geleit-app/src/scheduler.rs",
+    "**/geleit-host/src/worker/scheduler.rs",
     # backfill.rs: the background full-mailbox backfill loop — same shape as scheduler.rs (a tokio task
     # over a live AppHandle + IMAP server, driving `run_backfill`); its only real logic is the
     # single-flight guard, which is unit-tested on `AppState` in ipc.rs.
-    "**/geleit-app/src/backfill.rs",
+    "**/geleit-host/src/worker/backfill.rs",
     # mailproto::handle: protocol glue needing a live Tauri UriSchemeContext; its pure helpers
     # (csp/placeholder/html_response) are unit-tested.
     "**/geleit-app/src/mailproto.rs",
