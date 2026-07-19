@@ -2488,12 +2488,10 @@ fn mbox_when(date: Option<i64>) -> String {
         )
 }
 
-/// Save a message's `index`-th attachment to disk (READ-8). The bytes aren't stored locally, so this
-/// fetches the raw message from the server on demand (`BODY.PEEK[]`), extracts the part, and writes
-/// it via a native save dialog. Returns whether a file was written (`false` = cancelled).
-/// The bytes + a suggested filename of message `message_id`'s `index`-th attachment, fetched from the
-/// server (READ-8). The reusable core shared by the desktop's save dialog ([`save_attachment`]) and the
-/// web host's download route.
+/// The bytes + a suggested filename of message `message_id`'s `index`-th attachment. The bytes aren't
+/// stored locally, so this fetches the raw message from the server on demand (`BODY.PEEK[]`) and
+/// extracts the part (READ-8). The reusable core shared by the desktop's save dialog
+/// ([`save_attachment`]) and the web host's download route.
 pub async fn attachment_bytes(
     state: &AppState,
     message_id: i64,
@@ -2538,6 +2536,9 @@ pub async fn attachment_bytes(
     Ok((bytes, default_name))
 }
 
+/// Save a message's `index`-th attachment to disk via a native save dialog (READ-8). Fetches the bytes
+/// with [`attachment_bytes`], then asks where to write them. Returns whether a file was written
+/// (`false` = the user cancelled the dialog).
 pub async fn save_attachment(
     state: &AppState,
     message_id: i64,

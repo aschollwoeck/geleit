@@ -79,7 +79,22 @@ window.geleitUploadFiles = function () {
     input.multiple = true;
     input.style.display = 'none';
     let settled = false;
-    const done = function (fn, v) { if (!settled) { settled = true; input.remove(); fn(v); } };
+    const onFocus = function () {
+      // Fallback for browsers without the input `cancel` event (pre-2023): closing the OS dialog
+      // returns focus to the window. Give `change` a moment to fire first; if nothing was picked and
+      // we haven't settled, treat it as a cancel so the composer never hangs awaiting this promise.
+      setTimeout(function () {
+        if (!settled && (!input.files || input.files.length === 0)) { done(resolve, []); }
+      }, 400);
+    };
+    const done = function (fn, v) {
+      if (!settled) {
+        settled = true;
+        window.removeEventListener('focus', onFocus, true);
+        input.remove();
+        fn(v);
+      }
+    };
     input.addEventListener('cancel', function () { done(resolve, []); });
     input.addEventListener('change', async function () {
       try {
@@ -98,6 +113,7 @@ window.geleitUploadFiles = function () {
         done(reject, String((e && e.message) || e));
       }
     });
+    window.addEventListener('focus', onFocus, true);
     document.body.appendChild(input);
     input.click();
   });
