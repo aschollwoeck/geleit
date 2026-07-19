@@ -87,13 +87,8 @@ async fn main() {
         );
         std::process::exit(1);
     }
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let dist = std::env::var("GELEIT_DIST")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(manifest).join("../geleit-app/dist"));
-    let web = std::env::var("GELEIT_WEB")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(manifest).join("web"));
+    let dist = asset_dir("GELEIT_DIST", "dist", "../geleit-app/dist");
+    let web = asset_dir("GELEIT_WEB", "web", "web");
 
     // Clear any files a previous run left in the staging dir (abandoned uploads / built exports).
     geleit_host::commands::clear_staging();
@@ -166,6 +161,23 @@ async fn main() {
         })
         .await
         .expect("server error");
+}
+
+/// Locate a runtime asset directory (`dist`/`web`). Order: the env override, then a dir next to the
+/// executable (the packaged layout — `geleit-server` beside `dist/` and `web/`), then a path relative
+/// to the crate for `cargo run` from the source tree.
+fn asset_dir(env_var: &str, name: &str, dev_relative: &str) -> PathBuf {
+    if let Ok(p) = std::env::var(env_var) {
+        return PathBuf::from(p);
+    }
+    if let Some(beside_exe) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.join(name)))
+        .filter(|p| p.is_dir())
+    {
+        return beside_exe;
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(dev_relative)
 }
 
 /// The secret store. Release builds always use the OS keychain. Debug builds honour

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-07-19
+
 ### GeleitMail in your browser (self-hosted)
 - **You can now run GeleitMail as a local web app, alongside the desktop version.** Start the bundled
   server on your own machine and open GeleitMail in any browser — same interface, same mail, same
