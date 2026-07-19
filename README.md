@@ -64,6 +64,36 @@ cargo run -p geleit-server             # http://127.0.0.1:8080  (GELEIT_PORT / G
 The web host needs none of the webview/tray system libraries above. Run the desktop app **or** the web
 server against a given `GELEIT_DB`, not both at once (SQLite is single-writer).
 
+By default it binds `127.0.0.1` only, so it's reachable from that machine alone and needs no login.
+
+#### Reaching it across your network (opt-in)
+
+To open GeleitMail from another device on your LAN (e.g. your phone), bind a non-loopback address and
+set a password — the server **refuses to start** on a non-loopback bind without one, so your mailbox is
+never served to the network unauthenticated:
+
+```sh
+GELEIT_BIND=0.0.0.0 GELEIT_PASSWORD='choose-a-strong-one' cargo run -p geleit-server
+```
+
+Every request then needs HTTP Basic auth (the browser prompts once; any username, that password).
+
+**Put HTTPS in front.** Basic auth sends the password base64-encoded — safe over HTTPS, sniffable over
+plain HTTP — so terminate TLS with a reverse proxy on the LAN. A whole [Caddy](https://caddyserver.com)
+config is:
+
+```
+mail.example.lan {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+Run `geleit-server` on `127.0.0.1:8080` (the default bind — no `GELEIT_BIND`) with `GELEIT_PASSWORD`
+set, and let Caddy face the network; Caddy fetches/renews the cert and forwards to the app, which still
+enforces the password. To reach it from *outside* your network, prefer a VPN or a tunnel (e.g.
+[Tailscale](https://tailscale.com)) over port-forwarding — it's one shared password and single-user, not
+a public service.
+
 ## Credits
 
 The desktop shell is [Tauri](https://tauri.app) (Apache-2.0 / MIT) and the interface is
