@@ -236,7 +236,9 @@ async fn download_staged(
 ) -> Response {
     let name = params.get("name").map_or("export.mbox", String::as_str);
     match geleit_host::commands::take_staged(&token) {
-        Ok(bytes) => file_download(bytes, name, "application/mbox"),
+        // A forced download either way (Content-Disposition), so the exact type is cosmetic; octet-stream
+        // covers both a folder's `.mbox` and a whole account's `.zip`.
+        Ok(bytes) => file_download(bytes, name, "application/octet-stream"),
         Err(msg) => (StatusCode::NOT_FOUND, msg).into_response(),
     }
 }

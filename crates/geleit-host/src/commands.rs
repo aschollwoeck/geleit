@@ -2666,6 +2666,121 @@ pub async fn stage_folder_export(
     })
 }
 
+/// Zip a set of `(name, bytes)` entries into one archive (deflate). Blocking — run on a worker.
+fn build_zip(entries: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut cursor);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, bytes) in entries {
+            zip.start_file(name, opts)
+                .and_then(|()| zip.write_all(&bytes).map_err(Into::into))
+                .map_err(|_| "Couldn't build the export archive.".to_owned())?;
+        }
+        zip.finish()
+            .map_err(|_| "Couldn't build the export archive.".to_owned())?;
+    }
+    Ok(cursor.into_inner())
+}
+
+/// Build a whole account's export and stage it for a browser download (SEC-4) — the web host's
+/// counterpart to [`export_account`]'s per-folder save. One `.mbox` per non-empty folder, zipped into a
+/// single archive. Returns the summary + a one-shot staging token (`None` if the account is empty).
+///
+/// Unlike the desktop's streamed-to-disk export, this holds the folders' mboxes + the zip in memory —
+/// fine for a personal mailbox, the one place this differs; a truly huge account is a streaming follow-up.
+pub async fn stage_account_export(
+    state: &AppState,
+    account_id: i64,
+) -> Result<crate::dto::StagedExport, String> {
+    let st = state.clone();
+    let (folders, email) = with_store(st.clone(), move |store| {
+        let mut out: Vec<(i64, String)> = Vec::new();
+        for f in store
+            .folders_for_account(account_id)
+            .map_err(|_| "Couldn't read your folders.".to_owned())?
+        {
+            if store
+                .folder_message_count(f.id)
+                .map_err(|_| "Couldn't read your folders.".to_owned())?
+                > 0
+            {
+                out.push((f.id, f.name));
+            }
+        }
+        let email = store
+            .list_accounts()
+            .ok()
+            .and_then(|a| a.into_iter().find(|acc| acc.id == account_id))
+            .map(|acc| acc.email);
+        Ok((out, email))
+    })
+    .await?;
+    let filename = format!(
+        "{}.zip",
+        safe_filename_stem(email.as_deref().unwrap_or("mailbox"))
+    );
+    if folders.is_empty() {
+        return Ok(crate::dto::StagedExport {
+            summary: crate::dto::ExportSummary::default(),
+            token: None,
+            filename,
+        });
+    }
+
+    // Fetch each folder's mbox (best-effort, same online fail-fast as the desktop export), collecting
+    // them under unique entry names for the zip.
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let (mut exported, mut text_only, mut online) = (0i64, 0i64, true);
+    for (fid, fname) in folders {
+        let Ok((bytes, written, folder_text_only, reachable)) =
+            folder_mbox_complete(st.clone(), fid, fname.clone(), online).await
+        else {
+            continue; // a store hiccup on one folder skips it, not the whole export
+        };
+        if !reachable {
+            online = false; // stop probing every remaining folder
+        }
+        if written == 0 {
+            continue;
+        }
+        let base = safe_filename_stem(&fname);
+        let mut name = format!("{base}.mbox");
+        let mut n = 2;
+        while used.contains(&name) {
+            name = format!("{base} ({n}).mbox"); // two folders sanitizing to one name don't collide
+            n += 1;
+        }
+        used.insert(name.clone());
+        entries.push((name, bytes));
+        exported += written;
+        text_only += folder_text_only;
+    }
+    // Non-empty account but nothing built = a real failure, not "no mail" (mirrors `export_account`).
+    if entries.is_empty() {
+        return Err("Couldn't build the export.".to_owned());
+    }
+
+    let zip = tokio::task::spawn_blocking(move || build_zip(entries))
+        .await
+        .map_err(|_| "The export task stopped unexpectedly.".to_owned())??;
+    let (token, _path) =
+        tokio::task::spawn_blocking(move || stage_bytes("account-export.zip", &zip))
+            .await
+            .map_err(|_| "The export task stopped unexpectedly.".to_owned())??;
+    Ok(crate::dto::StagedExport {
+        summary: crate::dto::ExportSummary {
+            exported,
+            text_only,
+        },
+        token: Some(token),
+        filename,
+    })
+}
+
 /// Open a `.eml` file from disk (READ-10): pick a file, parse it, store it in the account's local
 /// **Saved** folder, and return the new message id so the UI can switch there and open it. Returns
 /// `None` if the user cancelled. No network — the file is parsed and rendered like any synced mail.

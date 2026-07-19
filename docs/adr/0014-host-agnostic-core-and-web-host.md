@@ -89,14 +89,15 @@ Tauri-owned module a second host would have to copy.
   reusable byte-generation (`eml_bytes`/`attachment_bytes`/`stage_upload`) lives in `geleit-host`, so
   the desktop's native-dialog path and the web's HTTP path share one implementation. `api.rs` picks the
   path via a `geleitIsWeb` shim, so the UI call sites are unchanged.
-- **Folder export on the web — done.** A folder's mbox is built + staged, and the invoke returns the
-  export summary (which the UI toasts) plus a one-shot `/download/staged/<token>` URL the browser fetches
-  (deleted on read). Staged files (uploads + built exports) share a temp dir wiped at startup
-  (`clear_staging`) so abandoned ones don't accumulate. **Account** export stays desktop-only — it's one
-  mbox *per folder* with no single browser download, so on the web it returns a "use per-folder export /
-  the desktop app" message rather than popping a `zenity` dialog on the server.
+- **Export on the web — done, both scopes.** A folder's mbox (or a whole account's folders zipped into
+  one archive — `zip`, already in the tree) is built + staged, and the invoke returns the export summary
+  (which the UI toasts) plus a one-shot `/download/staged/<token>` URL the browser fetches (deleted on
+  read). Staged files (uploads + built exports) share a temp dir GC'd at startup for anything older than
+  a day (`clear_staging`) — recent enough that a compose attachment survives a restart. Downloads carry
+  an RFC 6266 `filename*` so umlaut/CJK names save correctly. The account zip holds the folders' mboxes
+  in memory (fine for a personal mailbox; a streamed zip is the follow-up for a huge account).
 - **Deferred, tracked (not silently dropped):**
-  - Whole-account export as a web download (a `.zip`, so a follow-up); `open_eml_file` on the web.
+  - `open_eml_file` on the web (native open dialog); a streamed account zip for very large mailboxes.
   - A strict app-document CSP is set as an HTTP header (`script-src 'self' 'wasm-unsafe-eval'`, etc.);
     tightening it to match the Tauri config exactly is polish.
 

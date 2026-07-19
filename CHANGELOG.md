@@ -12,9 +12,9 @@
   - *Note:* run the desktop app **or** the web server against a given mailbox, not both at once.
   - **Saving and attaching files works the browser way in the web version.** Save a message or an
     attachment and it downloads through your browser; attach files to a message and they upload from the
-    browser's file picker — no dialogs popping up on the server. **Exporting a folder** downloads its
-    `.mbox` through the browser too. (Exporting a *whole account* — one file per folder — is still
-    desktop-only for now; export folders one at a time in the web version.)
+    browser's file picker — no dialogs popping up on the server. **Exporting** a folder downloads its
+    `.mbox`, and exporting a whole account downloads a single `.zip` (one `.mbox` per folder), both
+    straight through the browser.
   - **The web version now keeps your mail up to date on its own** — the same background sync as the
     desktop app (periodic checks, instant IMAP push for new mail, and the gradual full-mailbox
     download) runs in the server, so new mail and notifications arrive without pressing Refresh.
