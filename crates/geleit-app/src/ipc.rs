@@ -158,18 +158,31 @@ cmd!(move_rule(id: i64, up: bool) -> Result<(), String>);
 // --- No-state: dialogs, snooze presets, dev seams ------------------------------------------------
 cmd_nostate!(snooze_presets() -> Result<Vec<SnoozePresetDto>, String>);
 cmd_nostate!(pick_files() -> Result<Vec<String>, String>);
+#[cfg(debug_assertions)]
 cmd_nostate!(dev_open_message() -> Option<i64>);
+#[cfg(debug_assertions)]
 cmd_nostate!(dev_load_images() -> bool);
+#[cfg(debug_assertions)]
 cmd_nostate!(dev_compose() -> Option<String>);
+#[cfg(debug_assertions)]
 cmd_nostate!(dev_unified() -> bool);
+#[cfg(debug_assertions)]
 cmd_nostate!(dev_setup() -> bool);
+#[cfg(debug_assertions)]
 cmd_nostate!(dev_settings() -> Option<String>);
+#[cfg(debug_assertions)]
 cmd_nostate!(dev_search() -> Option<String>);
+#[cfg(debug_assertions)]
 cmd_nostate!(dev_trash() -> Option<String>);
+#[cfg(debug_assertions)]
 cmd_nostate!(dev_compose_to() -> Option<String>);
+#[cfg(debug_assertions)]
 cmd_nostate!(dev_drafts() -> bool);
+#[cfg(debug_assertions)]
 cmd_nostate!(dev_resume() -> bool);
+#[cfg(debug_assertions)]
 cmd_nostate!(dev_select() -> Option<String>);
+#[cfg(debug_assertions)]
 cmd_nostate!(dev_folder() -> Option<String>);
 
 // --- Commands that emit or set the badge ---------------------------------------------------------

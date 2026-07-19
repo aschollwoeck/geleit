@@ -35,6 +35,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      # Release turns off `debug_assertions`, so a `#[cfg(debug_assertions)]` mismatch (e.g. a dev-only
+      # seam referenced from non-gated code) only breaks the release build — which otherwise runs just
+      # at package/tag time. A `check --release` is cheap (no codegen/LTO) and catches that class here.
+      - name: Release check (release-only cfg gates)
+        run: cargo check --release --workspace
       - name: Build the Leptos frontend (wasm)
         run: ./scripts/build-ui.sh --release
       - name: Boundary (engine must not depend on UI)
