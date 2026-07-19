@@ -2603,11 +2603,26 @@ pub fn take_staged(token: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// Wipe any files left in the staging dir by a previous run (best-effort) — called once at startup so
-/// abandoned uploads/exports don't accumulate across restarts.
+/// How long a staged file may sit unused before startup GC reclaims it. Long enough that a compose
+/// draft with an uploaded attachment, resumed within a day of a server restart, still finds its file.
+const STAGING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Reclaim staged files older than [`STAGING_MAX_AGE`] (best-effort) — called once at startup so
+/// abandoned uploads/exports don't accumulate, while a *recent* upload a saved draft still points at
+/// survives a restart. Files whose mtime can't be read are left alone (conservative).
 pub fn clear_staging() {
-    if let Ok(entries) = std::fs::read_dir(staging_dir()) {
-        for entry in entries.flatten() {
+    let Some(cutoff) = std::time::SystemTime::now().checked_sub(STAGING_MAX_AGE) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(staging_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|mtime| mtime < cutoff);
+        if old {
             let _ = std::fs::remove_file(entry.path());
         }
     }

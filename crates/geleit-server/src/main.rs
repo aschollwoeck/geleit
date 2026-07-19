@@ -253,18 +253,36 @@ async fn upload(Query(params): Query<HashMap<String, String>>, body: Bytes) -> R
 }
 
 /// A file download: the bytes plus a `Content-Disposition: attachment` with a header-safe filename (any
-/// quote/backslash/newline stripped so the name can't break out of the header).
+/// header-safe: an ASCII `filename="…"` fallback (quote/backslash/newline/non-ASCII stripped so it
+/// can't break out of the quoted string) plus an RFC 6266 `filename*=UTF-8''…` that carries the real
+/// name percent-encoded — so a message or folder with umlauts/CJK (e.g. `Entwürfe.mbox`) downloads with
+/// its correct name in modern browsers, and a sane ASCII name everywhere else.
 fn file_download(bytes: Vec<u8>, filename: &str, content_type: &str) -> Response {
-    let safe: String = filename
+    let ascii: String = filename
         .chars()
-        .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n'))
+        .filter(|c| c.is_ascii() && !matches!(c, '"' | '\\' | '\r' | '\n'))
         .collect();
+    let ascii = if ascii.trim().is_empty() {
+        "download".to_owned()
+    } else {
+        ascii
+    };
+    // RFC 6266 filename*: percent-encode the UTF-8 bytes, keeping only the RFC 5987 attr-chars.
+    let mut star = String::from("UTF-8''");
+    for b in filename.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            star.push(b as char);
+        } else {
+            star.push('%');
+            star.push_str(&format!("{b:02X}"));
+        }
+    }
     (
         [
             (header::CONTENT_TYPE, content_type.to_owned()),
             (
                 header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{safe}\""),
+                format!("attachment; filename=\"{ascii}\"; filename*={star}"),
             ),
         ],
         bytes,
