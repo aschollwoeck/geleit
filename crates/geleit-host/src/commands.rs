@@ -2557,23 +2557,98 @@ pub async fn save_attachment(
     .map_err(|_| "The save task stopped unexpectedly.".to_owned())?
 }
 
-/// Stage uploaded attachment bytes to a private temp file and return its path — the web host's
-/// counterpart to the native file picker ([`pick_files`]), since a browser has no local paths to hand
-/// [`send_message`]. Files land in a temp dir the OS reclaims; the name is sanitized and made unique so
-/// two uploads of the same filename don't collide. Only reached over the web host's `/upload` route.
-pub fn stage_upload(name: &str, bytes: &[u8]) -> Result<String, String> {
+/// Where the web host stages files the OS temp dir reclaims: uploaded compose attachments (read back by
+/// [`send_message`]) and built exports awaiting a browser download. [`clear_staging`] wipes leftovers
+/// from a previous run at startup.
+fn staging_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("geleit-staging")
+}
+
+/// Write `bytes` to a uniquely-named file in the staging dir; returns `(token, full_path)`. `token` is
+/// the bare basename — a handle the web host serves back at `/download/staged/<token>` — and the name
+/// is sanitized + made unique so two files with the same name don't collide.
+fn stage_bytes(name: &str, bytes: &[u8]) -> Result<(String, std::path::PathBuf), String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join("geleit-uploads");
-    std::fs::create_dir_all(&dir).map_err(|_| "Couldn't stage the upload.".to_owned())?;
+    let dir = staging_dir();
+    std::fs::create_dir_all(&dir).map_err(|_| "Couldn't stage the file.".to_owned())?;
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let path = dir.join(format!("{stamp}-{seq}-{}", safe_attachment_filename(name)));
-    std::fs::write(&path, bytes).map_err(|_| "Couldn't stage the upload.".to_owned())?;
+    let token = format!("{stamp}-{seq}-{}", safe_attachment_filename(name));
+    let path = dir.join(&token);
+    std::fs::write(&path, bytes).map_err(|_| "Couldn't stage the file.".to_owned())?;
+    Ok((token, path))
+}
+
+/// Stage uploaded attachment bytes and return the on-disk path — the web host's counterpart to the
+/// native file picker ([`pick_files`]), since a browser has no local paths to hand [`send_message`].
+/// Only reached over the web host's `/upload` route.
+pub fn stage_upload(name: &str, bytes: &[u8]) -> Result<String, String> {
+    let (_token, path) = stage_bytes(name, bytes)?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// Read a staged export back by its `token` and delete it — downloads are served exactly once. The
+/// token must be a bare filename (no path separators / `..`), so a crafted token can't escape staging.
+pub fn take_staged(token: &str) -> Result<Vec<u8>, String> {
+    if token.is_empty() || token.contains(['/', '\\']) || token.contains("..") {
+        return Err("No such download.".to_owned());
+    }
+    let path = staging_dir().join(token);
+    let bytes = std::fs::read(&path).map_err(|_| "That download has expired.".to_owned())?;
+    let _ = std::fs::remove_file(&path); // one-shot; a failed unlink is fine (OS temp cleanup covers it)
+    Ok(bytes)
+}
+
+/// Wipe any files left in the staging dir by a previous run (best-effort) — called once at startup so
+/// abandoned uploads/exports don't accumulate across restarts.
+pub fn clear_staging() {
+    if let Ok(entries) = std::fs::read_dir(staging_dir()) {
+        for entry in entries.flatten() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Build a folder's mbox export and stage it for a browser download (SEC-4) — the web host's
+/// counterpart to [`export_folder`]'s native save. Returns the summary + the one-shot staging token
+/// (`None` when the folder is empty, so there's nothing to download) + the filename to save it as.
+pub async fn stage_folder_export(
+    state: &AppState,
+    folder_id: i64,
+    folder_name: String,
+) -> Result<crate::dto::StagedExport, String> {
+    let st = state.clone();
+    let filename = format!("{}.mbox", safe_filename_stem(&folder_name));
+    let count = with_store(st.clone(), move |store| {
+        store
+            .folder_message_count(folder_id)
+            .map_err(|_| "Couldn't read the folder to export.".to_owned())
+    })
+    .await?;
+    if count == 0 {
+        return Ok(crate::dto::StagedExport {
+            summary: crate::dto::ExportSummary::default(),
+            token: None,
+            filename,
+        });
+    }
+    let (mbox, written, text_only, _reachable) =
+        folder_mbox_complete(st, folder_id, folder_name, true).await?;
+    let (token, _path) = tokio::task::spawn_blocking(move || stage_bytes("export.mbox", &mbox))
+        .await
+        .map_err(|_| "The export task stopped unexpectedly.".to_owned())??;
+    Ok(crate::dto::StagedExport {
+        summary: crate::dto::ExportSummary {
+            exported: written,
+            text_only,
+        },
+        token: Some(token),
+        filename,
+    })
 }
 
 /// Open a `.eml` file from disk (READ-10): pick a file, parse it, store it in the account's local

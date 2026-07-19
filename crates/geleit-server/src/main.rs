@@ -91,6 +91,8 @@ async fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(manifest).join("web"));
 
+    // Clear any files a previous run left in the staging dir (abandoned uploads / built exports).
+    geleit_host::commands::clear_staging();
     // The at-rest key + credentials live in the OS keychain, exactly as the desktop host (SEC-1/2).
     let state = AppState::new(db_path, secret_store());
     let (events, _) = broadcast::channel::<SseEvent>(256);
@@ -123,6 +125,7 @@ async fn main() {
             "/download/attachment/{message_id}/{index}",
             get(download_attachment),
         )
+        .route("/download/staged/{token}", get(download_staged))
         .route("/upload", post(upload))
         .fallback(static_file)
         // The auth gate wraps every route (static, downloads, SSE, invoke). No-op when no password is
@@ -222,6 +225,19 @@ async fn download_attachment(
     match geleit_host::commands::attachment_bytes(&ctx.state, message_id, index).await {
         Ok((bytes, name)) => file_download(bytes, &name, "application/octet-stream"),
         Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+    }
+}
+
+/// `GET /download/staged/<token>?name=<f>` — a folder export the invoke step built and staged, served
+/// once as a browser download (the file is deleted on read).
+async fn download_staged(
+    Path(token): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let name = params.get("name").map_or("export.mbox", String::as_str);
+    match geleit_host::commands::take_staged(&token) {
+        Ok(bytes) => file_download(bytes, name, "application/mbox"),
+        Err(msg) => (StatusCode::NOT_FOUND, msg).into_response(),
     }
 }
 

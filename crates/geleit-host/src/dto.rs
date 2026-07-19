@@ -28,6 +28,17 @@ pub struct ExportSummary {
     pub text_only: i64,
 }
 
+/// A folder export the web host has built and staged for a browser download (SEC-4). `token` is the
+/// one-shot handle the browser fetches at `/download/staged/<token>` (`None` when the folder is empty,
+/// so there's nothing to download); `filename` is what the browser saves it as.
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StagedExport {
+    pub summary: ExportSummary,
+    pub token: Option<String>,
+    pub filename: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FolderDto {
     pub id: i64,
