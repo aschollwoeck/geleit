@@ -17,7 +17,7 @@ mod dispatch;
 mod shell;
 
 use axum::body::Bytes;
-use axum::extract::{Path, Query, RawQuery, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, RawQuery, State};
 use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -45,6 +45,10 @@ use tokio_stream::StreamExt;
 const APP_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; \
      style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; \
      connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'";
+
+/// Body cap for the file-upload routes (compose attachments, imported `.eml`) — generous enough for
+/// real mail attachments, which most providers cap around 25 MB anyway.
+const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 
 /// Shared across every request. All fields are cheap to clone (the state's heavy bits are `Arc`s).
 #[derive(Clone)]
@@ -126,8 +130,17 @@ async fn main() {
             get(download_attachment),
         )
         .route("/download/staged/{token}", get(download_staged))
-        .route("/upload", post(upload))
-        .route("/import-eml", post(import_eml))
+        // The upload routes carry file bytes (compose attachments, imported .eml), which routinely
+        // exceed axum's 2 MB default — a photo or PDF attachment would otherwise 413. Lift the cap on
+        // just these two; every other route keeps the small default.
+        .route(
+            "/upload",
+            post(upload).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        .route(
+            "/import-eml",
+            post(import_eml).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
         .fallback(static_file)
         // The auth gate wraps every route (static, downloads, SSE, invoke). No-op when no password is
         // set; otherwise a browser must present a matching HTTP Basic credential.
