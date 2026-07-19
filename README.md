@@ -50,6 +50,20 @@ GELEIT_DB="$HOME/geleit.db" ./target/release/geleit-app
 `packaging/package-linux.sh` builds a release tarball; pushing a `v*` tag builds and attaches it to a
 GitHub Release.
 
+### Web version (self-hosted, localhost)
+
+GeleitMail can also run as a local web app you open in a browser (ADR-0014). The engine runs in the
+`geleit-server` process on your own machine; the browser talks HTTP to it. It binds `127.0.0.1` only,
+so nothing else can reach it and your mail never leaves your hardware.
+
+```sh
+./scripts/build-ui.sh                  # build the WASM UI into dist/ (the server serves it)
+cargo run -p geleit-server             # http://127.0.0.1:8080  (GELEIT_PORT / GELEIT_DB to override)
+```
+
+The web host needs none of the webview/tray system libraries above. Run the desktop app **or** the web
+server against a given `GELEIT_DB`, not both at once (SQLite is single-writer).
+
 ## Credits
 
 The desktop shell is [Tauri](https://tauri.app) (Apache-2.0 / MIT) and the interface is

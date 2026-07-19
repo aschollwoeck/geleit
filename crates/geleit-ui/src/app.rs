@@ -2877,7 +2877,7 @@ pub fn App() -> impl IntoView {
                                 {if body.is_html {
                                     Either::Left(view! {
                                         <iframe class="mail" sandbox="allow-popups allow-popups-to-escape-sandbox"
-                                            src=move || if load_images.get() { format!("mail://localhost/{id}?images=1") } else { format!("mail://localhost/{id}") }></iframe>
+                                            src=move || api::mail_url(id, load_images.get())></iframe>
                                     })
                                 } else {
                                     Either::Right(view! {

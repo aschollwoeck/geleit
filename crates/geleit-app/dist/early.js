@@ -39,3 +39,9 @@ window.geleitOnMailArrived = function (cb) {
 window.geleitOnUpdateAvailable = function (cb) {
   window.__TAURI__.event.listen('update-available', function (e) { cb(e.payload); });
 };
+
+// The reading pane asks for a message's HTML URL through this shim (kept host-specific for the same
+// npm-free reason). On the desktop that's the `mail://` custom scheme, served on its own origin.
+window.geleitMailUrl = function (id, images) {
+  return 'mail://localhost/' + id + (images ? '?images=1' : '');
+};

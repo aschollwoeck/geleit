@@ -106,7 +106,11 @@ deny = [
     # pulls them in (a non-updater egress path) `cargo deny check` fails and forces a reviewed decision
     # here. This enforces "confined to the updater", rather than trusting a comment.
     { name = "reqwest", wrappers = ["tauri-plugin-updater"] },
-    { name = "hyper", wrappers = ["hyper-rustls", "hyper-util", "reqwest"] },
+    # `hyper` also backs `axum`, the localhost web host (ADR-0014). That is an HTTP *server* — inbound
+    # only, bound to 127.0.0.1, no egress — which is a different thing from the outbound HTTP *clients*
+    # this list bans (the ban exists to stop silent egress/telemetry, not to forbid serving our own UI).
+    # Scoped to `axum` so any *other* new hyper parent still trips the check and forces a review here.
+    { name = "hyper", wrappers = ["hyper-rustls", "hyper-util", "reqwest", "axum"] },
     { name = "isahc" },
     { name = "surf" },
     { name = "sentry" },
