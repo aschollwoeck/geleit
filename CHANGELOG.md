@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Move several messages to a folder at once
+- **The multi-select bar now has a "Move to folder" button.** Select a batch of messages and move them
+  all into any folder in one go, with the same Undo window as bulk Archive and Delete.
+
 ### Under the hood: tighter secret handling
 - **Your encryption key and passwords are wiped from memory as soon as they're used**, instead of
   lingering in freed memory, and the whole app got a fresh security review (no issues found in its

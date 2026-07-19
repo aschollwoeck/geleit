@@ -225,6 +225,7 @@ pub fn App() -> impl IntoView {
     let rail_collapsed = RwSignal::new(false);
     let acct_menu = RwSignal::new(false);
     let move_menu = RwSignal::new(false);
+    let bulk_move_menu = RwSignal::new(false); // the bulk-selection "Move to folder" dropdown
     let compose = RwSignal::new(Option::<ComposeDraft>::None);
     let current_draft_id = RwSignal::new(Option::<i64>::None); // the saved draft being edited, if any
                                                                // The provider's draft being continued (a message id). Saving or sending removes it from the
@@ -895,6 +896,34 @@ pub fn App() -> impl IntoView {
         }));
         toast.set(Some(toast_text));
     };
+
+    // Move every selected message into the named folder under one deferred Undo window — the bulk
+    // sibling of the reading pane's "Move…". Same machinery as `bulk_move`, just a folder target
+    // instead of a role.
+    let bulk_move_folder = move |name: String| {
+        let ids: Vec<i64> = selected.get_untracked().into_iter().collect();
+        if ids.is_empty() {
+            return;
+        }
+        commit_pending();
+        open.set(None);
+        selected.set(HashSet::new());
+        select_anchor.set(None);
+        bulk_move_menu.set(false);
+        let toast_text = format!("{} moved", ids.len());
+        pending.set(Some(PendingMove {
+            ids,
+            to: MoveTo::Folder(name),
+        }));
+        toast.set(Some(toast_text));
+    };
+    // Close the bulk "Move to folder" dropdown whenever the selection empties (the bulk bar itself
+    // hides then), so it never reappears already-open the next time messages are selected.
+    Effect::new(move |_| {
+        if selected.get().is_empty() {
+            bulk_move_menu.set(false);
+        }
+    });
 
     // Mark every selected message unread — an immediate per-message write-back (like the single-row
     // action; there's no deferred Undo for read-state, matching the reading-pane "Unread").
@@ -2553,10 +2582,26 @@ pub fn App() -> impl IntoView {
                         <span class="bulk-count">{move || format!("{} selected", selected.get().len())}</span>
                         <span class="icon-btn" title="Archive" on:click=move |_| bulk_move("archive", "archived")>{icon(icons::ARCHIVE)}</span>
                         <span class="icon-btn danger" title="Delete" on:click=move |_| bulk_move("trash", "deleted")>{icon(icons::TRASH)}</span>
+                        <span style="position:relative">
+                            <span class="icon-btn" title="Move to folder" on:click=move |_| bulk_move_menu.update(|o| *o = !*o)>{icon(icons::MOVE)}</span>
+                            <Show when=move || bulk_move_menu.get()>
+                                <div class="menu" style="left:0;top:34px;width:180px">
+                                    <For each=move || folders.get() key=|f| f.id let:f>
+                                        {
+                                            let target = f.name.clone();
+                                            let label = f.name.clone();
+                                            view! {
+                                                <div class="menu-item" on:click=move |_| bulk_move_folder(target.clone())>{label}</div>
+                                            }
+                                        }
+                                    </For>
+                                </div>
+                            </Show>
+                        </span>
                         <span class="icon-btn" title="Mark read" on:click=move |_| bulk_mark_read()>{icon(icons::MAILOPEN)}</span>
                         <span class="icon-btn" title="Mark unread" on:click=move |_| bulk_mark_unread()>{icon(icons::UNREAD)}</span>
                         <span class="icon-btn" title="Snooze" on:click=move |_| open_snooze_menu(selected.get_untracked().into_iter().collect())>{icon(icons::SNOOZE)}</span>
-                        <span class="icon-btn" title="Clear selection" on:click=move |_| { selected.set(HashSet::new()); select_anchor.set(None); }>{icon(icons::CLOSE)}</span>
+                        <span class="icon-btn" title="Clear selection" on:click=move |_| { selected.set(HashSet::new()); select_anchor.set(None); bulk_move_menu.set(false); }>{icon(icons::CLOSE)}</span>
                     </div>
                 </Show>
                 <Show when=move || refreshing.get() || catchup.get().is_some() || drafts_loading.get() || draft_busy.get()>
