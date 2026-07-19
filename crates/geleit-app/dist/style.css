@@ -259,8 +259,16 @@ a:hover { color: var(--accent); }
 .splitter {
   width: 7px; flex: none; cursor: col-resize; background: transparent;
   border-left: 1px solid var(--divider); margin-left: -1px; position: relative; z-index: 10;
+  /* Claim the horizontal gesture so a touch drag resizes instead of the browser hijacking it to
+     pan/scroll (which would fire pointercancel and abort the resize mid-drag). */
+  touch-action: none;
 }
-.splitter:hover { background: var(--accent-quiet); border-left-color: var(--accent); }
+.splitter:hover, .splitter.dragging { background: var(--accent-quiet); border-left-color: var(--accent); }
+/* During a splitter drag: drop the reading-pane iframe's pointer-events so it can't swallow the move/up
+   (pointer capture already re-targets them, but a cross-origin iframe is the one place that can leak),
+   and suppress text selection across the whole gesture. */
+.app.resizing .mail { pointer-events: none; }
+.app.resizing { cursor: col-resize; user-select: none; }
 
 /* ============ READING PANE ============ */
 .read { position: relative; flex: 1; background: var(--surface-reading); overflow-y: auto; min-width: 0; }

@@ -191,6 +191,11 @@ fn provider_servers(
     })
 }
 
+/// The message-list column's resize bounds (px): narrow enough to stay compact, wide enough that the
+/// reading pane never collapses.
+const SPLIT_MIN: f64 = 280.0;
+const SPLIT_MAX: f64 = 720.0;
+
 #[component]
 pub fn App() -> impl IntoView {
     // ---- data ----
@@ -226,6 +231,21 @@ pub fn App() -> impl IntoView {
     let acct_menu = RwSignal::new(false);
     let move_menu = RwSignal::new(false);
     let bulk_move_menu = RwSignal::new(false); // the bulk-selection "Move to folder" dropdown
+                                               // ---- resizable list | reading splitter ----
+                                               // The message-list column width (drives the CSS `--list-w`), and the in-progress drag as
+                                               // `(start client-x, width at drag start)`. Persisted so the layout survives a restart.
+    let list_w = RwSignal::new(380.0_f64); // matches the CSS `--list-w` default
+    let splitter_drag = RwSignal::new(Option::<(f64, f64)>::None);
+    leptos::task::spawn_local(async move {
+        if let Ok(Some(v)) = api::get_setting("list_w").await {
+            if let Ok(px) = v.parse::<f64>() {
+                // Don't clobber a drag the user started before this async read resolved.
+                if splitter_drag.get_untracked().is_none() {
+                    list_w.set(px.clamp(SPLIT_MIN, SPLIT_MAX));
+                }
+            }
+        }
+    });
     let compose = RwSignal::new(Option::<ComposeDraft>::None);
     let current_draft_id = RwSignal::new(Option::<i64>::None); // the saved draft being edited, if any
                                                                // The provider's draft being continued (a message id). Saving or sending removes it from the
@@ -2351,7 +2371,11 @@ pub fn App() -> impl IntoView {
     };
 
     view! {
-        <div class="app">
+        <div
+            class="app"
+            class:resizing=move || splitter_drag.get().is_some()
+            style=move || format!("--list-w:{}px", list_w.get())
+        >
             // ============ RAIL ============
             <nav class="rail" class:collapsed=move || rail_collapsed.get()>
                 <Show
@@ -2799,7 +2823,39 @@ pub fn App() -> impl IntoView {
                 </div>
             </div>
 
-            <div class="splitter"></div>
+            // Capture the pointer on press so every move/up lands here for the whole drag — including
+            // over the reading pane's sandboxed <iframe>, which would otherwise swallow the events and
+            // freeze the drag the instant the cursor crossed into it (the `.resizing` class also drops
+            // the iframe's pointer-events as a second line of defence). Works for mouse and touch.
+            <div
+                class="splitter"
+                class:dragging=move || splitter_drag.get().is_some()
+                on:pointerdown=move |e: web_sys::PointerEvent| {
+                    e.prevent_default();
+                    // Capture is wasm-only runtime plumbing; the host build (CI coverage) skips it.
+                    #[cfg(target_arch = "wasm32")]
+                    if let Some(el) = e.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) {
+                        let _ = el.set_pointer_capture(e.pointer_id());
+                    }
+                    splitter_drag.set(Some((e.client_x() as f64, list_w.get_untracked())));
+                }
+                on:pointermove=move |e: web_sys::PointerEvent| {
+                    if let Some((start_x, start_w)) = splitter_drag.get_untracked() {
+                        let w = (start_w + e.client_x() as f64 - start_x).clamp(SPLIT_MIN, SPLIT_MAX);
+                        list_w.set(w);
+                    }
+                }
+                on:pointerup=move |_| {
+                    if splitter_drag.get_untracked().is_some() {
+                        splitter_drag.set(None);
+                        let w = list_w.get_untracked() as i64;
+                        leptos::task::spawn_local(async move {
+                            let _ = api::set_setting("list_w", &w.to_string()).await;
+                        });
+                    }
+                }
+                on:pointercancel=move |_| splitter_drag.set(None)
+            ></div>
 
             // ============ READING ============
             <div class="read" class:has-mail=move || open.get().is_some_and(|b| b.is_html)>
