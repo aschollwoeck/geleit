@@ -17,8 +17,11 @@
 # and (b) SIGPIPE from `grep -q` cannot hide a real match (no pipeline in the `if`).
 set -euo pipefail
 
-UI_CRATES=("geleit-app" "geleit-ui")
-ENGINE_CRATES=("geleit-core" "geleit-platform" "geleit-store" "geleit-engine")
+# The hosts + the frontend: the engine-side crates must not depend on any of these.
+UI_CRATES=("geleit-app" "geleit-server" "geleit-ui")
+# The engine-side, UI-agnostic crates. geleit-host is the host-agnostic command core (ADR-0014): it
+# holds logic both hosts share, so it must stay as free of any host/UI as the engine crates it sits on.
+ENGINE_CRATES=("geleit-core" "geleit-platform" "geleit-store" "geleit-engine" "geleit-host")
 
 fail=0
 deps_of() { cargo tree --package "$1" --edges normal --prefix none | awk '{print $1}'; }

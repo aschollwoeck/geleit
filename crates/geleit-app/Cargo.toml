@@ -14,8 +14,12 @@ publish = false
 # `scripts/build-ui.sh` into `dist/`, which Tauri serves as static assets.
 
 [dependencies]
+# The host-agnostic core (ADR-0014): AppState + every command's logic. This crate is now just the
+# Tauri adapter over it.
+geleit-host = { path = "../geleit-host" }
 geleit-core = { path = "../geleit-core" }
 geleit-store = { path = "../geleit-store" }
+# Still a direct dep: the background workers (scheduler/idle/backfill) drive the engine's sync actions.
 geleit-engine = { path = "../geleit-engine" }
 geleit-platform = { path = "../geleit-platform" }
 # `tray-icon`: the persistent system-tray presence (NOTIF-4). On Linux this links libayatana-appindicator3
@@ -47,7 +51,7 @@ tempfile = "3"
 
 [features]
 # Forwarded to the engine for self-signed dev servers; never enable in a release build.
-dangerous-tls = ["geleit-engine/dangerous-tls"]
+dangerous-tls = ["geleit-engine/dangerous-tls", "geleit-host/dangerous-tls"]
 
 # Tauri's generated glue carries `#[allow(unsafe_code)]`, and the workspace's `forbid` cannot be
 # overridden — so we `deny` here instead. Our own code never allows unsafe.

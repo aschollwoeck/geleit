@@ -362,6 +362,24 @@ extern "C" {
     fn geleit_on_mail_arrived(cb: &wasm_bindgen::JsValue);
     #[wasm_bindgen(js_name = geleitOnUpdateAvailable)]
     fn geleit_on_update_available(cb: &wasm_bindgen::JsValue);
+    #[wasm_bindgen(js_name = geleitMailUrl)]
+    fn geleit_mail_url(id: i64, images: bool) -> String;
+}
+
+/// The URL the reading-pane iframe points at for message `id`'s sanitized HTML. Where that HTML is
+/// served is host-specific — the Tauri shell has it on the `mail://` origin, the web host at
+/// `/mail/<id>` on its own origin — so the host's shim decides and the UI stays host-agnostic. Both
+/// keep the message on an origin the iframe can't reach back from (S9.2).
+pub fn mail_url(id: i64, images: bool) -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        geleit_mail_url(id, images)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = images;
+        format!("mail://localhost/{id}")
+    }
 }
 
 /// Call a shell command and decode its reply. Errors come back as the shell's calm, PII-free strings.

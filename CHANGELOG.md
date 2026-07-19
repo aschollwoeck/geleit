@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### GeleitMail in your browser (self-hosted)
+- **You can now run GeleitMail as a local web app, alongside the desktop version.** Start the bundled
+  server on your own machine and open GeleitMail in any browser — same interface, same mail, same
+  encrypted store. It listens only on your own computer (`127.0.0.1`), so nothing else on the network
+  can reach it and your mail never leaves your hardware. Run `cargo run -p geleit-server` (dev) and
+  visit `http://127.0.0.1:8080`. This is the groundwork for GeleitMail on more platforms; the desktop
+  app is unchanged.
+  - *Note:* run the desktop app **or** the web server against a given mailbox, not both at once.
+    Background auto-sync in the web version and browser-native file downloads are coming next; for now
+    press Refresh, and file dialogs open on the server's own desktop.
+
 ### Move several messages to a folder at once
 - **The multi-select bar now has a "Move to folder" button.** Select a batch of messages and move them
   all into any folder in one go, with the same Undo window as bulk Archive and Delete.

@@ -1,0 +1,35 @@
+[package]
+name = "geleit-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The host-agnostic core (ADR-0014). Holds `AppState` and every IPC command's *logic*, so both hosts
+# — the Tauri desktop shell (`geleit-app`) and the localhost web server (`geleit-server`) — drive the
+# exact same code and can never diverge. Depends on the engine crates, never on a UI or a host: the
+# four host-specific concerns (emit an event, set the unread badge) are injected through the [`Shell`]
+# trait, the same dependency-injection the store already uses for secrets and notifications.
+[dependencies]
+geleit-core = { path = "../geleit-core" }
+geleit-store = { path = "../geleit-store" }
+geleit-engine = { path = "../geleit-engine" }
+geleit-platform = { path = "../geleit-platform" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# spawn_blocking for the blocking SQLite calls (P1: never block the caller's async runtime). The host
+# provides the runtime; we only need the API, which lives behind "rt".
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+# The user's local time-of-day, for snooze presets + quiet hours. Same crate the app already pulled.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# Forwarded to the engine for self-signed dev servers (live Dovecot tests); never in a release build.
+dangerous-tls = ["geleit-engine/dangerous-tls"]
+
+[lints]
+workspace = true

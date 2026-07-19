@@ -59,7 +59,11 @@ pub(crate) fn spawn(app: tauri::AppHandle) {
             // snooze resurfacing — which happens even when every account is offline, and a failed
             // verdict must not swallow.
             if verdict.is_ok() || changed > 0 {
-                crate::ipc::set_badge(&app, app.state::<AppState>().inner()).await;
+                crate::ipc::set_badge(
+                    &crate::ipc::TauriShell::new(app.clone()),
+                    app.state::<AppState>().inner(),
+                )
+                .await;
             }
             if changed > 0 {
                 // Tell the UI to re-list — for new mail, a flag pulled from another device, or a
@@ -336,7 +340,7 @@ mod tests {
         let (state, _dir, acc) = mailbox(fake.clone());
 
         // Quiet hours, all day: silent — but the mail is still owed, so it is announced in the morning.
-        crate::ipc::set_setting_for_test(&state, "quiet_hours", "00:00-23:59").await;
+        geleit_host::commands::set_setting_for_test(&state, "quiet_hours", "00:00-23:59").await;
         announce(&state, acc).await;
         assert!(fake.sent().is_empty(), "quiet hours are quiet");
         assert_eq!(
@@ -347,8 +351,8 @@ mod tests {
 
         // Switched off: silent, and the debt goes with it — otherwise turning notifications back on
         // greets the user with every message that arrived while they were off.
-        crate::ipc::set_setting_for_test(&state, "quiet_hours", "").await;
-        crate::ipc::set_setting_for_test(&state, "notify", "0").await;
+        geleit_host::commands::set_setting_for_test(&state, "quiet_hours", "").await;
+        geleit_host::commands::set_setting_for_test(&state, "notify", "0").await;
         announce(&state, acc).await;
         assert!(fake.sent().is_empty());
         assert_eq!(still_owed(&state, acc).await, 0, "not owed at all");
@@ -358,7 +362,8 @@ mod tests {
     async fn an_account_the_user_muted_is_silent_while_the_others_are_not() {
         let fake = Arc::new(FakeNotifier::new());
         let (state, _dir, acc) = mailbox(fake.clone());
-        crate::ipc::set_setting_for_test(&state, &crate::notify::account_key(acc), "0").await;
+        geleit_host::commands::set_setting_for_test(&state, &crate::notify::account_key(acc), "0")
+            .await;
 
         announce(&state, acc).await;
         assert!(fake.sent().is_empty(), "this mailbox was muted");

@@ -5,8 +5,12 @@ members = [
     "crates/geleit-platform",
     "crates/geleit-store",
     "crates/geleit-engine",
-    # geleit-app is the Tauri shell + IPC seam (M9, ADR-0012); geleit-ui is its Leptos frontend.
+    # geleit-host is the host-agnostic core: AppState + the command logic behind the IPC seam, shared
+    # by every host (ADR-0014). geleit-app is the Tauri desktop host; geleit-server is the localhost
+    # web host; geleit-ui is the Leptos frontend both serve.
+    "crates/geleit-host",
     "crates/geleit-app",
+    "crates/geleit-server",
     "crates/geleit-ui",
 ]
 # Throwaway feasibility spikes are standalone crates, kept out of the workspace so

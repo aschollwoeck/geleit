@@ -15,14 +15,12 @@
 //! Runs alongside the Slint `geleit-app` until S9.7's teardown, so the shipped app keeps working
 //! throughout the migration.
 mod backfill;
-mod dto;
 mod idle;
 mod ipc;
 mod mailproto;
 mod notify;
 mod schedule;
 mod scheduler;
-mod snooze;
 mod tray;
 mod update;
 

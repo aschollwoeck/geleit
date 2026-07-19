@@ -54,6 +54,22 @@ exclude_globs = [
     # (csp/placeholder/html_response) are unit-tested.
     "**/geleit-app/src/mailproto.rs",
 
+    # --- geleit-host is the host-agnostic command core (ADR-0014) — the former geleit-app/src/ipc.rs.
+    # commands.rs: the same blocking-store command glue ipc.rs held (open the DB, run a query, hit the
+    # network); its mutants survive spuriously for the same reason. The PURE logic it's driven by lives
+    # in geleit-host/src/dto.rs + snooze.rs, which STAY mutation-tested. (The `AppState` single-flight /
+    # sync-lock guards are unit-tested in commands.rs's own tests.)
+    "**/geleit-host/src/commands.rs",
+
+    # --- geleit-server is the localhost web host (ADR-0014). Its glue mirrors the Tauri host's.
+    # main.rs: axum route/static/CSP wiring — no logic to mutate.
+    "**/geleit-server/src/main.rs",
+    # dispatch.rs: the command-name → geleit-host routing match (the analogue of Tauri's
+    # generate_handler!); pure plumbing, and the logic it forwards to is tested in geleit-host.
+    "**/geleit-server/src/dispatch.rs",
+    # shell.rs: the Shell impl — a broadcast send per event; single-line glue.
+    "**/geleit-server/src/shell.rs",
+
     # --- geleit-ui is the Leptos frontend. Its view/IPC code can't run under mutants (no webview);
     # --- the pure display logic lives in geleit-ui/src/view.rs and STAYS covered.
     "**/geleit-ui/src/app.rs", # Leptos view declaration + event wiring
