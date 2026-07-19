@@ -17,6 +17,18 @@ fn de<T: DeserializeOwned>(v: Value) -> Result<T, String> {
     serde_json::from_value(v).map_err(|_| "The mailbox got an unexpected request.".to_owned())
 }
 
+/// Turn a staged export into the `{ summary, url }` reply the UI's `export_*` expects: the download URL
+/// (`null` when nothing was staged), with the one query char the filename sanitizer can leave — a space.
+fn staged_reply(e: geleit_host::dto::StagedExport) -> Value {
+    let url = e.token.as_ref().map(|t| {
+        format!(
+            "/download/staged/{t}?name={}",
+            e.filename.replace(' ', "%20")
+        )
+    });
+    serde_json::json!({ "summary": e.summary, "url": url })
+}
+
 /// Run one command. `Ok(json)` is the command's reply (unit → JSON `null`); `Err(msg)` is its calm
 /// error string, which the HTTP layer returns as a non-2xx body for the shim to throw.
 #[allow(clippy::too_many_lines)]
@@ -286,14 +298,16 @@ pub async fn dispatch(
         // sanitizer into a query value, so encoding it is enough.
         "stage_folder_export" => {
             let a: ExportArgs = de(args)?;
-            let e = c::stage_folder_export(state, a.folder_id, a.folder_name).await?;
-            let url = e.token.as_ref().map(|t| {
-                format!(
-                    "/download/staged/{t}?name={}",
-                    e.filename.replace(' ', "%20")
-                )
-            });
-            j!(serde_json::json!({ "summary": e.summary, "url": url }))
+            j!(staged_reply(
+                c::stage_folder_export(state, a.folder_id, a.folder_name).await?
+            ))
+        }
+        // The web whole-account export: one .mbox per folder zipped into a single browser download.
+        "stage_account_export" => {
+            let a: AccountArgs = de(args)?;
+            j!(staged_reply(
+                c::stage_account_export(state, a.account_id).await?
+            ))
         }
         "export_account" => {
             let a: AccountArgs = de(args)?;

@@ -829,16 +829,16 @@ pub async fn export_folder(
 }
 
 /// Export a whole account — one mbox per folder (SEC-4). Desktop writes them into a chosen directory;
-/// the web version can't yet (it's a multi-file export with no single browser download), so there it
-/// points the user at per-folder export instead of popping a dialog on the server.
+/// the web host zips them into one archive it streams as a browser download, reporting the same summary.
 pub async fn export_account(account_id: i64) -> Result<Option<ExportSummary>, String> {
     #[cfg(target_arch = "wasm32")]
     if geleit_is_web() {
-        return Err(
-            "Whole-account export isn't in the web version yet — export folders one at a time, or use \
-             the desktop app."
-                .to_owned(),
-        );
+        let staged: StagedDownload =
+            call("stage_account_export", &AccountArgs { account_id }).await?;
+        if let Some(url) = &staged.url {
+            geleit_download(url);
+        }
+        return Ok(Some(staged.summary));
     }
     call("export_account", &AccountArgs { account_id }).await
 }
