@@ -239,7 +239,10 @@ pub fn App() -> impl IntoView {
     leptos::task::spawn_local(async move {
         if let Ok(Some(v)) = api::get_setting("list_w").await {
             if let Ok(px) = v.parse::<f64>() {
-                list_w.set(px.clamp(SPLIT_MIN, SPLIT_MAX));
+                // Don't clobber a drag the user started before this async read resolved.
+                if splitter_drag.get_untracked().is_none() {
+                    list_w.set(px.clamp(SPLIT_MIN, SPLIT_MAX));
+                }
             }
         }
     });
