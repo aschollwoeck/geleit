@@ -127,6 +127,7 @@ async fn main() {
         )
         .route("/download/staged/{token}", get(download_staged))
         .route("/upload", post(upload))
+        .route("/import-eml", post(import_eml))
         .fallback(static_file)
         // The auth gate wraps every route (static, downloads, SSE, invoke). No-op when no password is
         // set; otherwise a browser must present a matching HTTP Basic credential.
@@ -250,6 +251,23 @@ async fn upload(Query(params): Query<HashMap<String, String>>, body: Bytes) -> R
     let name = params.get("name").map_or("upload", String::as_str);
     match geleit_host::commands::stage_upload(name, &body) {
         Ok(path) => axum::Json(serde_json::json!({ "path": path })).into_response(),
+        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+    }
+}
+
+/// `POST /import-eml?accountId=<n>` — parse an uploaded `.eml` (the raw bytes are the body) into the
+/// account's local Saved folder; returns the new message id (or `null`). The web host's counterpart to
+/// the desktop's native "open mail file" dialog.
+async fn import_eml(
+    State(ctx): State<AppCtx>,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Response {
+    let Some(account_id) = params.get("accountId").and_then(|s| s.parse::<i64>().ok()) else {
+        return (StatusCode::BAD_REQUEST, "Missing account.").into_response();
+    };
+    match geleit_host::commands::import_eml_bytes(&ctx.state, account_id, body.to_vec()).await {
+        Ok(id) => axum::Json(serde_json::json!(id)).into_response(),
         Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
     }
 }

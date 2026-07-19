@@ -118,3 +118,47 @@ window.geleitUploadFiles = function () {
     input.click();
   });
 };
+
+// Open a single .eml from the browser: pick it, upload the bytes to /import-eml, and resolve with the
+// new message id the server parsed it into (or null on cancel, so the UI doesn't hang).
+window.geleitUploadEml = function (accountId) {
+  return new Promise(function (resolve, reject) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.eml,message/rfc822';
+    input.style.display = 'none';
+    let settled = false;
+    const onFocus = function () {
+      setTimeout(function () {
+        if (!settled && (!input.files || input.files.length === 0)) { done(resolve, null); }
+      }, 400);
+    };
+    const done = function (fn, v) {
+      if (!settled) {
+        settled = true;
+        window.removeEventListener('focus', onFocus, true);
+        input.remove();
+        fn(v);
+      }
+    };
+    input.addEventListener('cancel', function () { done(resolve, null); });
+    input.addEventListener('change', async function () {
+      const file = (input.files || [])[0];
+      if (!file) { done(resolve, null); return; }
+      try {
+        const res = await fetch('/import-eml?accountId=' + encodeURIComponent(accountId), {
+          method: 'POST',
+          headers: { 'content-type': 'message/rfc822' },
+          body: await file.arrayBuffer(),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        done(resolve, await res.json());
+      } catch (e) {
+        done(reject, String((e && e.message) || e));
+      }
+    });
+    window.addEventListener('focus', onFocus, true);
+    document.body.appendChild(input);
+    input.click();
+  });
+};

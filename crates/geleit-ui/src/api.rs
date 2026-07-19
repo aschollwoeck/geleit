@@ -373,6 +373,8 @@ extern "C" {
     fn geleit_download(url: &str);
     #[wasm_bindgen(js_name = geleitUploadFiles, catch)]
     async fn geleit_upload_files() -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(js_name = geleitUploadEml, catch)]
+    async fn geleit_upload_eml(account_id: i64) -> Result<JsValue, JsValue>;
 }
 
 /// The URL the reading-pane iframe points at for message `id`'s sanitized HTML. Where that HTML is
@@ -846,6 +848,16 @@ pub async fn export_account(account_id: i64) -> Result<Option<ExportSummary>, St
 /// Open a `.eml` file into the account's local Saved folder; returns the new message id (or `None`
 /// if cancelled) so the caller can switch to Saved and open it.
 pub async fn open_eml_file(account_id: i64) -> Result<Option<i64>, String> {
+    #[cfg(target_arch = "wasm32")]
+    if geleit_is_web() {
+        // Browser file picker → upload the .eml bytes → server parses it into Saved and returns the id
+        // (or null if cancelled).
+        let raw = geleit_upload_eml(account_id)
+            .await
+            .map_err(|e| js_error_text(&e))?;
+        return serde_wasm_bindgen::from_value(raw)
+            .map_err(|_| "Couldn't open that file.".to_owned());
+    }
     call("open_eml_file", &AccountArgs { account_id }).await
 }
 

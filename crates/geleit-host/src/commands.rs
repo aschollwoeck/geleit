@@ -2792,6 +2792,17 @@ pub async fn open_eml_file(state: &AppState, account_id: i64) -> Result<Option<i
     let Some(bytes) = bytes else {
         return Ok(None); // cancelled
     };
+    import_eml_bytes(state, account_id, bytes).await
+}
+
+/// Parse `.eml` bytes and store the message in the account's local **Saved** folder, returning its new
+/// id (READ-10). The reusable core shared by the desktop's [`open_eml_file`] (which reads the file via a
+/// native dialog) and the web host's `/import-eml` upload route. No network — parsed like any synced mail.
+pub async fn import_eml_bytes(
+    state: &AppState,
+    account_id: i64,
+    bytes: Vec<u8>,
+) -> Result<Option<i64>, String> {
     with_store(state.clone(), move |store| {
         let eml = geleit_engine::message::parse_eml(&bytes);
         let folder = store
