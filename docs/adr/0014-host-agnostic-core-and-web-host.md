@@ -96,8 +96,16 @@ Tauri-owned module a second host would have to copy.
   a day (`clear_staging`) — recent enough that a compose attachment survives a restart. Downloads carry
   an RFC 6266 `filename*` so umlaut/CJK names save correctly. The account zip holds the folders' mboxes
   in memory (fine for a personal mailbox; a streamed zip is the follow-up for a huge account).
+- **Open a `.eml` on the web — done.** The browser picks a `.eml` and uploads it to `POST /import-eml`,
+  which parses it into the account's Saved folder (`import_eml_bytes`, shared with the desktop's native
+  open dialog) and returns the new message id. This closes the last web feature gap — the web host now
+  does everything the desktop does.
 - **Deferred, tracked (not silently dropped):**
-  - `open_eml_file` on the web (native open dialog); a streamed account zip for very large mailboxes.
+  - A *streamed* account zip for very large mailboxes (the current one builds in memory); an exact
+    app-CSP match with the desktop (the web keeps `style-src 'unsafe-inline'` for the UI's inline
+    `style=` attributes, which real browsers — unlike WebKitGTK — enforce); a cross-process DB lock
+    (low value: SQLite WAL is already multi-process-safe, so this would only tidy the double-sync churn
+    if the desktop app and the server are pointed at one mailbox at once).
   - A strict app-document CSP is set as an HTTP header (`script-src 'self' 'wasm-unsafe-eval'`, etc.);
     tightening it to match the Tauri config exactly is polish.
 

@@ -51,3 +51,4 @@ window.geleitMailUrl = function (id, images) {
 window.geleitIsWeb = function () { return false; };
 window.geleitDownload = function () {};
 window.geleitUploadFiles = function () { return Promise.resolve([]); };
+window.geleitUploadEml = function () { return Promise.resolve(null); };
