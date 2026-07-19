@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### The list / reading divider actually resizes now
+- **Drag the divider between the message list and the reading pane to resize them.** It always showed a
+  resize cursor but did nothing; now it works (mouse and touch), stays out of the reading pane's way,
+  and remembers the width you chose.
+
 ## 0.2.0 — 2026-07-19
 
 ### GeleitMail in your browser (self-hosted)
