@@ -54,10 +54,18 @@ Tauri-owned module a second host would have to copy.
    unchanged except one host-specific detail — the reading-pane iframe URL — which now goes through a
    host-provided JS shim (`geleitMailUrl`), the same npm-free shim pattern as `geleitInvoke`.
 
-5. **Localhost-only, no auth (for now).** The server **binds `127.0.0.1`**, so nothing else on the
-   machine can reach it and no login is needed on day one. It reuses the OS keychain and the same
-   encrypted store as the desktop host, so a self-hosted GeleitMail keeps every byte of mail on the
-   operator's own hardware. LAN access + TLS + a login token are a deliberate later, opt-in slice.
+5. **Localhost by default; LAN access is opt-in and authenticated.** The server **binds `127.0.0.1`**
+   out of the box, so nothing else on the machine can reach it and no login is needed — the common case.
+   It reuses the OS keychain and the same encrypted store as the desktop host, so a self-hosted
+   GeleitMail keeps every byte of mail on the operator's own hardware. Reaching it across a LAN is opt-in
+   via `GELEIT_BIND` + `GELEIT_PASSWORD`: a single shared password over HTTP Basic (single-user), gated
+   by a **fail-safe** — a non-loopback bind with no password **refuses to start**, so the mailbox is
+   never served to the network unauthenticated. Basic is cleartext-equivalent, so TLS is required off
+   localhost; per **topology A** it is terminated by a reverse proxy (Caddy/nginx) rather than built in
+   (no `rustls` dependency, real auto-renewed certs) — the app stays plain HTTP on loopback behind it.
+   Auth is one `axum` middleware layer over the whole router; the browser attaches the credential to
+   every request itself, so the WASM UI needed **zero** changes. Internet exposure is a VPN/tunnel
+   recommendation (Tailscale), not port-forwarding.
 
 ## Consequences
 

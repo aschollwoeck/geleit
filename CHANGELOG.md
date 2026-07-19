@@ -17,6 +17,10 @@
   - **The web version now keeps your mail up to date on its own** — the same background sync as the
     desktop app (periodic checks, instant IMAP push for new mail, and the gradual full-mailbox
     download) runs in the server, so new mail and notifications arrive without pressing Refresh.
+  - **You can open the web version from another device on your network, safely.** Set a bind address
+    and a password and GeleitMail becomes reachable from your phone or laptop with a login prompt;
+    without a password it refuses to leave your own machine, so it's never exposed unprotected. Put
+    it behind an HTTPS reverse proxy for the LAN (see the README).
 
 ### Move several messages to a folder at once
 - **The multi-select bar now has a "Move to folder" button.** Select a batch of messages and move them

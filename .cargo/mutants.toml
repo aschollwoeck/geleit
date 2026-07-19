@@ -69,6 +69,10 @@ exclude_globs = [
     "**/geleit-server/src/dispatch.rs",
     # shell.rs: the Shell impl — a broadcast send per event; single-line glue.
     "**/geleit-server/src/shell.rs",
+    # auth.rs: the HTTP Basic middleware — request/response glue that can't run without a live request
+    # flow. Its pure helpers (`request_password` header parse, `constant_time_eq`) are unit-tested in
+    # the file's own `#[cfg(test)]` module.
+    "**/geleit-server/src/auth.rs",
 
     # --- geleit-ui is the Leptos frontend. Its view/IPC code can't run under mutants (no webview);
     # --- the pure display logic lives in geleit-ui/src/view.rs and STAYS covered.

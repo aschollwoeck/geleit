@@ -18,6 +18,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 # Wrap a broadcast receiver as a Stream for the SSE endpoint (the one push channel to the browser).
 tokio-stream = { version = "0.1", features = ["sync"] }
 axum = "0.8"
+# Decode the HTTP Basic `Authorization` header for optional LAN auth (already in the tree).
+base64 = "0.22"
 
 [features]
 # Forwarded to the host/engine for self-signed dev servers (live Dovecot tests); never in release.

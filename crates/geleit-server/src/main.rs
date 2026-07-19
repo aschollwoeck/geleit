@@ -12,6 +12,7 @@
 //! access + TLS + a login token are a later, opt-in slice. It is otherwise the desktop host's twin —
 //! same `AppState`, same store, same keychain — so a self-hosted GeleitMail keeps every byte of mail
 //! on the operator's own hardware.
+mod auth;
 mod dispatch;
 mod shell;
 
@@ -21,12 +22,13 @@ use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{middleware, Router};
 use geleit_host::{AppState, Shell};
 use geleit_platform::os_secret::OsSecretStore;
 use geleit_platform::secret::SecretStore;
 use shell::{ServerShell, SseEvent};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -61,6 +63,26 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(8080);
+    // Bind loopback by default (localhost-only, no auth). Reaching the app across a LAN is opt-in via
+    // GELEIT_BIND=0.0.0.0 + GELEIT_PASSWORD (ADR-0014, topology A: put HTTPS in front with a proxy).
+    let bind_ip: IpAddr = std::env::var("GELEIT_BIND")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let password: auth::AuthState = std::env::var("GELEIT_PASSWORD")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| Arc::from(s.as_str()));
+    // Fail-safe: never expose the mailbox to the network with no auth. A non-loopback bind without a
+    // password refuses to start rather than silently serving everyone's mail to the whole subnet.
+    if !bind_ip.is_loopback() && password.is_none() {
+        eprintln!(
+            "geleit-server: refusing to bind {bind_ip} with no GELEIT_PASSWORD — that would serve \
+             your mailbox to the network with no auth. Set GELEIT_PASSWORD (and terminate TLS with a \
+             reverse proxy, see the README), or leave GELEIT_BIND unset for localhost-only."
+        );
+        std::process::exit(1);
+    }
     let manifest = env!("CARGO_MANIFEST_DIR");
     let dist = std::env::var("GELEIT_DIST")
         .map(PathBuf::from)
@@ -103,13 +125,24 @@ async fn main() {
         )
         .route("/upload", post(upload))
         .fallback(static_file)
+        // The auth gate wraps every route (static, downloads, SSE, invoke). No-op when no password is
+        // set; otherwise a browser must present a matching HTTP Basic credential.
+        .layer(middleware::from_fn_with_state(
+            password.clone(),
+            auth::require_auth,
+        ))
         .with_state(ctx);
 
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = SocketAddr::from((bind_ip, port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap_or_else(|e| panic!("GeleitMail web host could not bind {addr}: {e}"));
-    println!("GeleitMail web host on http://{addr}  (Ctrl-C to stop)");
+    let auth_note = if password.is_some() {
+        "auth: HTTP Basic"
+    } else {
+        "auth: off (localhost)"
+    };
+    println!("GeleitMail web host on http://{addr}  ({auth_note}, Ctrl-C to stop)");
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
