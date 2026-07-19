@@ -21,9 +21,8 @@
 //! backfill* (never their recent mail, which the scheduler keeps fresh regardless) — acceptable for a
 //! background job; interleaving accounts is a possible refinement.
 
-use crate::ipc::AppState;
+use crate::AppState;
 use std::time::Duration;
-use tauri::Manager;
 
 /// Wait before the first pass, so it doesn't fight the app's boot sync (the scheduler's first sweep, at
 /// 30s, is what populates each account's folder list this pass reads).
@@ -58,20 +57,17 @@ fn round_override() -> Option<Duration> {
 }
 
 /// Start the backfill worker. Runs for the life of the app on Tauri's async runtime.
-pub(crate) fn spawn(app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(FIRST_DELAY).await;
-        loop {
-            let state = app.state::<AppState>().inner().clone();
-            backfill_round(&state).await;
-            tokio::time::sleep(round_override().unwrap_or(ROUND_INTERVAL)).await;
-        }
-    });
+pub async fn run(state: AppState) {
+    tokio::time::sleep(FIRST_DELAY).await;
+    loop {
+        backfill_round(&state).await;
+        tokio::time::sleep(round_override().unwrap_or(ROUND_INTERVAL)).await;
+    }
 }
 
 /// One pass over every account's every server folder, backfilling each in turn.
 async fn backfill_round(state: &AppState) {
-    let Ok(accounts) = crate::ipc::account_ids(state).await else {
+    let Ok(accounts) = crate::commands::account_ids(state).await else {
         return;
     };
     for account_id in accounts {
@@ -89,7 +85,7 @@ async fn backfill_round(state: &AppState) {
             // remove server-deleted messages and pull read/star changes made on another device (SYNC-5).
             // The scheduler only does this for INBOX, so this keeps *every* folder in step in the
             // background too. Both best-effort; a failure just waits for the next round.
-            let _ = tauri::async_runtime::spawn_blocking(move || {
+            let _ = tokio::task::spawn_blocking(move || {
                 geleit_engine::sync_actions::run_backfill(
                     &db,
                     &*secrets,
@@ -115,7 +111,7 @@ async fn backfill_round(state: &AppState) {
 /// nothing to backfill and would fail a `SELECT`, so it's left out.
 async fn server_folders(state: &AppState, account_id: i64) -> Vec<String> {
     let (db, secrets) = (state.db_path.clone(), state.secrets.clone());
-    tauri::async_runtime::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let Ok(store) = geleit_engine::localstore::open_store(&db, &*secrets) else {
             return Vec::new();
         };

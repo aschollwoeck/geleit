@@ -240,9 +240,7 @@ pub async fn dispatch(
         // --- account lifecycle -------------------------------------------------------------------
         "add_account" => {
             let a: AccountFormArgs = de(args)?;
-            // The host core adds + first-syncs the account; instant-IDLE is the desktop shell's
-            // side-effect (the server's background workers cover it in a later slice).
-            j!(c::add_account(
+            let id = c::add_account(
                 state,
                 a.email,
                 a.display_name,
@@ -256,7 +254,13 @@ pub async fn dispatch(
                 a.signature,
                 a.allow_invalid_certs,
             )
-            .await?)
+            .await?;
+            // Give the new account instant IMAP IDLE push right away, same as the desktop shell — spawn
+            // its watcher on axum's runtime. Idempotent (`None` if already watched); the poll covers it.
+            if let Some(watcher) = geleit_host::worker::idle::watch_new_account(state, id) {
+                tokio::spawn(watcher);
+            }
+            j!(id)
         }
         "remove_account" => {
             let a: AccountArgs = de(args)?;

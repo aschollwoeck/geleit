@@ -14,13 +14,8 @@
 //!
 //! Runs alongside the Slint `geleit-app` until S9.7's teardown, so the shipped app keeps working
 //! throughout the migration.
-mod backfill;
-mod idle;
 mod ipc;
 mod mailproto;
-mod notify;
-mod schedule;
-mod scheduler;
 mod tray;
 mod update;
 
@@ -310,12 +305,18 @@ fn main() {
                     }));
             }
             // Mail arrives on its own from here — the host polls, so it keeps working while the UI
-            // sits idle (a webview throttles timers in a hidden window).
-            scheduler::spawn(app.handle().clone());
-            idle::spawn(app.handle().clone());
+            // sits idle (a webview throttles timers in a hidden window). The workers are host-agnostic
+            // now (geleit-host::worker, ADR-0014); the desktop shell spawns them on Tauri's runtime and
+            // hands the scheduler a TauriShell to emit `mail-arrived` + set the window/tray badge.
+            let state = app.state::<AppState>().inner().clone();
+            let shell: Arc<dyn geleit_host::Shell> =
+                Arc::new(ipc::TauriShell::new(app.handle().clone()));
+            let (scheduler, idle, backfill) = geleit_host::worker::futures(state, shell);
+            tauri::async_runtime::spawn(scheduler);
+            tauri::async_runtime::spawn(idle);
             // Progressively pull every account's older mail down in the background (SYNC-3), so search
             // and offline reading become complete for all accounts, not just the one being viewed.
-            backfill::spawn(app.handle().clone());
+            tauri::async_runtime::spawn(backfill);
             // Look for a newer signed release once, shortly after boot (unless the user opted out).
             update::spawn(app.handle().clone());
             Ok(())

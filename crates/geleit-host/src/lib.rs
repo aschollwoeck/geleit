@@ -13,6 +13,7 @@ pub mod commands;
 pub mod dto;
 pub mod shell;
 pub mod snooze;
+pub mod worker;
 
 pub use commands::AppState;
 pub use shell::{NullShell, Shell};

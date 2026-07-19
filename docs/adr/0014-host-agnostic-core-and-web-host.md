@@ -69,10 +69,13 @@ Tauri-owned module a second host would have to copy.
 - **Operational constraint:** SQLite is single-writer, so a given store is opened by **either** the
   desktop app **or** the server, not both at once. Documented, not yet enforced (a startup lock-check
   is a later slice).
+- **Background workers now run in both hosts (done):** the scheduler, per-account IMAP IDLE watchers,
+  and the full-mailbox backfill moved into `geleit-host::worker`, each a host-agnostic `run(state, …)`
+  loop the host spawns on its own runtime (desktop via `tauri::async_runtime::spawn`, web via
+  `tokio::spawn`). Only the scheduler needs a `Shell` (to emit `mail-arrived` + set the badge); IDLE and
+  backfill need only `AppState`. The web host therefore auto-syncs and pushes new mail over SSE with no
+  manual Refresh — live-verified against local Dovecot.
 - **Deferred, tracked (not silently dropped):**
-  - Background workers (scheduler/idle/backfill) don't yet run in the server, so the web host relies on
-    manual Refresh until they are parametrised over `Shell` (next slice). Push events already flow over
-    SSE from a Refresh.
   - Native file I/O over the web (`pick_files`→upload, `save_*`/`export_*`→download): the dialog
     commands currently pop `zenity`/`kdialog` on the server's own desktop, which *works on localhost*
     but is not a real web experience — replaced in a later slice.
