@@ -16,7 +16,7 @@ mod dispatch;
 mod shell;
 
 use axum::body::Bytes;
-use axum::extract::{Path, RawQuery, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -26,6 +26,7 @@ use geleit_host::{AppState, Shell};
 use geleit_platform::os_secret::OsSecretStore;
 use geleit_platform::secret::SecretStore;
 use shell::{ServerShell, SseEvent};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -93,6 +94,14 @@ async fn main() {
         .route("/invoke/{cmd}", post(invoke))
         .route("/mail/{id}", get(mail))
         .route("/events", get(events_stream))
+        // Web-native file I/O (ADR-0014): the browser downloads generated files and uploads compose
+        // attachments, instead of the native zenity/kdialog dialogs the desktop host uses.
+        .route("/download/eml/{id}", get(download_eml))
+        .route(
+            "/download/attachment/{message_id}/{index}",
+            get(download_attachment),
+        )
+        .route("/upload", post(upload))
         .fallback(static_file)
         .with_state(ctx);
 
@@ -159,6 +168,57 @@ async fn mail(State(ctx): State<AppCtx>, Path(id): Path<i64>, RawQuery(q): RawQu
             ),
         ],
         body,
+    )
+        .into_response()
+}
+
+/// `GET /download/eml/<id>` — a message rebuilt as a `.eml`, served as a browser download.
+async fn download_eml(State(ctx): State<AppCtx>, Path(id): Path<i64>) -> Response {
+    match geleit_host::commands::eml_bytes(&ctx.state, id).await {
+        Ok((bytes, name)) => file_download(bytes, &name, "message/rfc822"),
+        Err(msg) => (StatusCode::NOT_FOUND, msg).into_response(),
+    }
+}
+
+/// `GET /download/attachment/<message_id>/<index>` — an attachment fetched from the server, served as
+/// a browser download.
+async fn download_attachment(
+    State(ctx): State<AppCtx>,
+    Path((message_id, index)): Path<(i64, usize)>,
+) -> Response {
+    match geleit_host::commands::attachment_bytes(&ctx.state, message_id, index).await {
+        Ok((bytes, name)) => file_download(bytes, &name, "application/octet-stream"),
+        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+    }
+}
+
+/// `POST /upload?name=<filename>` — stage a compose attachment the browser uploaded (the raw file bytes
+/// are the body), returning `{ "path": "…" }` for `send_message` to read. The desktop host uses the
+/// native picker instead.
+async fn upload(Query(params): Query<HashMap<String, String>>, body: Bytes) -> Response {
+    let name = params.get("name").map_or("upload", String::as_str);
+    match geleit_host::commands::stage_upload(name, &body) {
+        Ok(path) => axum::Json(serde_json::json!({ "path": path })).into_response(),
+        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+    }
+}
+
+/// A file download: the bytes plus a `Content-Disposition: attachment` with a header-safe filename (any
+/// quote/backslash/newline stripped so the name can't break out of the header).
+fn file_download(bytes: Vec<u8>, filename: &str, content_type: &str) -> Response {
+    let safe: String = filename
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n'))
+        .collect();
+    (
+        [
+            (header::CONTENT_TYPE, content_type.to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{safe}\""),
+            ),
+        ],
+        bytes,
     )
         .into_response()
 }

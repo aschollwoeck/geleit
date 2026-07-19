@@ -75,10 +75,16 @@ Tauri-owned module a second host would have to copy.
   `tokio::spawn`). Only the scheduler needs a `Shell` (to emit `mail-arrived` + set the badge); IDLE and
   backfill need only `AppState`. The web host therefore auto-syncs and pushes new mail over SSE with no
   manual Refresh — live-verified against local Dovecot.
+- **Web-native file I/O — the common flows are done:** `save_eml`, `save_attachment`, and `pick_files`
+  (compose attachments) go through the browser on the web host — downloads via `GET /download/…` with
+  `Content-Disposition`, uploads via `POST /upload` into a staged temp path `send_message` reads. The
+  reusable byte-generation (`eml_bytes`/`attachment_bytes`/`stage_upload`) lives in `geleit-host`, so
+  the desktop's native-dialog path and the web's HTTP path share one implementation. `api.rs` picks the
+  path via a `geleitIsWeb` shim, so the UI call sites are unchanged. Still deferred: **folder/account
+  *export*** on the web (they return a summary that doesn't map to a single browser download — a `.zip`
+  is the likely answer; they keep working via `zenity` on localhost meanwhile), and `open_eml_file`.
 - **Deferred, tracked (not silently dropped):**
-  - Native file I/O over the web (`pick_files`→upload, `save_*`/`export_*`→download): the dialog
-    commands currently pop `zenity`/`kdialog` on the server's own desktop, which *works on localhost*
-    but is not a real web experience — replaced in a later slice.
+  - Folder/account export as a web download (see above); a staged uploads GC (sent messages' temp files).
   - A strict app-document CSP is set as an HTTP header (`script-src 'self' 'wasm-unsafe-eval'`, etc.);
     tightening it to match the Tauri config exactly is polish.
 

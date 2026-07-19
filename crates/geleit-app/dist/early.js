@@ -45,3 +45,9 @@ window.geleitOnUpdateAvailable = function (cb) {
 window.geleitMailUrl = function (id, images) {
   return 'mail://localhost/' + id + (images ? '?images=1' : '');
 };
+
+// The desktop uses native file dialogs (invoke commands), never the browser download/upload path — so
+// `geleitIsWeb` is false and these two are inert stubs that only exist so the WASM binds them.
+window.geleitIsWeb = function () { return false; };
+window.geleitDownload = function () {};
+window.geleitUploadFiles = function () { return Promise.resolve([]); };

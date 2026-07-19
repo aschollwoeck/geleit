@@ -2202,12 +2202,11 @@ fn pick_save_path(default_name: &str) -> Result<Option<String>, String> {
     Err("No file picker found — install zenity or kdialog.".to_owned())
 }
 
-/// Save an open message to disk as a `.eml` file (READ-10). Rebuilds RFC 822 bytes from what's stored
-/// (no network), asks where to save via a native dialog, and writes. Returns whether a file was
-/// written (`false` = the user cancelled the dialog).
-pub async fn save_eml(state: &AppState, id: i64) -> Result<bool, String> {
-    // Read the header + body and build the bytes on the store thread.
-    let (bytes, default_name) = with_store(state.clone(), move |store| {
+/// The `.eml` bytes + a suggested filename for message `id` (READ-10) — rebuilt from what's stored, no
+/// network. The reusable core shared by the desktop's save dialog ([`save_eml`]) and the web host's
+/// download route.
+pub async fn eml_bytes(state: &AppState, id: i64) -> Result<(Vec<u8>, String), String> {
+    with_store(state.clone(), move |store| {
         let header = store
             .header_by_id(id)
             .map_err(|_| "Couldn't load the message to save.".to_owned())?
@@ -2220,7 +2219,14 @@ pub async fn save_eml(state: &AppState, id: i64) -> Result<bool, String> {
         );
         Ok((bytes, name))
     })
-    .await?;
+    .await
+}
+
+/// Save an open message to disk as a `.eml` file (READ-10). Rebuilds RFC 822 bytes from what's stored
+/// (no network), asks where to save via a native dialog, and writes. Returns whether a file was
+/// written (`false` = the user cancelled the dialog).
+pub async fn save_eml(state: &AppState, id: i64) -> Result<bool, String> {
+    let (bytes, default_name) = eml_bytes(state, id).await?;
     tokio::task::spawn_blocking(move || {
         let Some(path) = pick_save_path(&default_name)? else {
             return Ok(false); // cancelled
@@ -2485,11 +2491,14 @@ fn mbox_when(date: Option<i64>) -> String {
 /// Save a message's `index`-th attachment to disk (READ-8). The bytes aren't stored locally, so this
 /// fetches the raw message from the server on demand (`BODY.PEEK[]`), extracts the part, and writes
 /// it via a native save dialog. Returns whether a file was written (`false` = cancelled).
-pub async fn save_attachment(
+/// The bytes + a suggested filename of message `message_id`'s `index`-th attachment, fetched from the
+/// server (READ-8). The reusable core shared by the desktop's save dialog ([`save_attachment`]) and the
+/// web host's download route.
+pub async fn attachment_bytes(
     state: &AppState,
     message_id: i64,
     index: usize,
-) -> Result<bool, String> {
+) -> Result<(Vec<u8>, String), String> {
     let st = state.clone();
     // Resolve the server location + account and the stored default name on the store thread.
     let plan = with_store(st.clone(), move |store| {
@@ -2526,6 +2535,15 @@ pub async fn save_attachment(
             .or(meta_name)
             .unwrap_or_else(|| format!("attachment-{}", index + 1)),
     );
+    Ok((bytes, default_name))
+}
+
+pub async fn save_attachment(
+    state: &AppState,
+    message_id: i64,
+    index: usize,
+) -> Result<bool, String> {
+    let (bytes, default_name) = attachment_bytes(state, message_id, index).await?;
     tokio::task::spawn_blocking(move || {
         let Some(path) = pick_save_path(&default_name)? else {
             return Ok(false); // cancelled
@@ -2536,6 +2554,25 @@ pub async fn save_attachment(
     })
     .await
     .map_err(|_| "The save task stopped unexpectedly.".to_owned())?
+}
+
+/// Stage uploaded attachment bytes to a private temp file and return its path — the web host's
+/// counterpart to the native file picker ([`pick_files`]), since a browser has no local paths to hand
+/// [`send_message`]. Files land in a temp dir the OS reclaims; the name is sanitized and made unique so
+/// two uploads of the same filename don't collide. Only reached over the web host's `/upload` route.
+pub fn stage_upload(name: &str, bytes: &[u8]) -> Result<String, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join("geleit-uploads");
+    std::fs::create_dir_all(&dir).map_err(|_| "Couldn't stage the upload.".to_owned())?;
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = dir.join(format!("{stamp}-{seq}-{}", safe_attachment_filename(name)));
+    std::fs::write(&path, bytes).map_err(|_| "Couldn't stage the upload.".to_owned())?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 /// Open a `.eml` file from disk (READ-10): pick a file, parse it, store it in the account's local
