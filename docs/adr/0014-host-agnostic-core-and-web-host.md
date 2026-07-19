@@ -88,11 +88,15 @@ Tauri-owned module a second host would have to copy.
   `Content-Disposition`, uploads via `POST /upload` into a staged temp path `send_message` reads. The
   reusable byte-generation (`eml_bytes`/`attachment_bytes`/`stage_upload`) lives in `geleit-host`, so
   the desktop's native-dialog path and the web's HTTP path share one implementation. `api.rs` picks the
-  path via a `geleitIsWeb` shim, so the UI call sites are unchanged. Still deferred: **folder/account
-  *export*** on the web (they return a summary that doesn't map to a single browser download — a `.zip`
-  is the likely answer; they keep working via `zenity` on localhost meanwhile), and `open_eml_file`.
+  path via a `geleitIsWeb` shim, so the UI call sites are unchanged.
+- **Folder export on the web — done.** A folder's mbox is built + staged, and the invoke returns the
+  export summary (which the UI toasts) plus a one-shot `/download/staged/<token>` URL the browser fetches
+  (deleted on read). Staged files (uploads + built exports) share a temp dir wiped at startup
+  (`clear_staging`) so abandoned ones don't accumulate. **Account** export stays desktop-only — it's one
+  mbox *per folder* with no single browser download, so on the web it returns a "use per-folder export /
+  the desktop app" message rather than popping a `zenity` dialog on the server.
 - **Deferred, tracked (not silently dropped):**
-  - Folder/account export as a web download (see above); a staged uploads GC (sent messages' temp files).
+  - Whole-account export as a web download (a `.zip`, so a follow-up); `open_eml_file` on the web.
   - A strict app-document CSP is set as an HTTP header (`script-src 'self' 'wasm-unsafe-eval'`, etc.);
     tightening it to match the Tauri config exactly is polish.
 

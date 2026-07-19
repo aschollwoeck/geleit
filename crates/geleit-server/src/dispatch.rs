@@ -281,6 +281,20 @@ pub async fn dispatch(
             let a: ExportArgs = de(args)?;
             j!(c::export_folder(state, a.folder_id, a.folder_name).await?)
         }
+        // The web export: build + stage the folder's mbox, hand back the summary + the download URL the
+        // browser should fetch (`null` when the folder is empty). Only a space can survive the filename
+        // sanitizer into a query value, so encoding it is enough.
+        "stage_folder_export" => {
+            let a: ExportArgs = de(args)?;
+            let e = c::stage_folder_export(state, a.folder_id, a.folder_name).await?;
+            let url = e.token.as_ref().map(|t| {
+                format!(
+                    "/download/staged/{t}?name={}",
+                    e.filename.replace(' ', "%20")
+                )
+            });
+            j!(serde_json::json!({ "summary": e.summary, "url": url }))
+        }
         "export_account" => {
             let a: AccountArgs = de(args)?;
             j!(c::export_account(state, a.account_id).await?)

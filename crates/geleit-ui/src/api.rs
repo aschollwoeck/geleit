@@ -787,12 +787,37 @@ pub async fn save_eml(id: i64) -> Result<bool, String> {
     call("save_eml", &IdArgs { id }).await
 }
 
-/// Export a folder to an mbox file (SEC-4). `Some(summary)` when written (an all-zero summary if the
-/// folder is empty), or `None` if cancelled.
+/// A staged folder export the web host built: the summary to toast + the URL the browser should fetch
+/// to download it (`None` when the folder was empty, so there's nothing to download).
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct StagedDownload {
+    summary: ExportSummary,
+    url: Option<String>,
+}
+
+/// Export a folder to an mbox file (SEC-4). Desktop writes it via a save dialog (`Some(summary)`, or
+/// `None` if cancelled); the web host builds + stages it and streams it as a browser download,
+/// reporting the same summary.
 pub async fn export_folder(
     folder_id: i64,
     folder_name: String,
 ) -> Result<Option<ExportSummary>, String> {
+    #[cfg(target_arch = "wasm32")]
+    if geleit_is_web() {
+        let staged: StagedDownload = call(
+            "stage_folder_export",
+            &ExportArgs {
+                folder_id,
+                folder_name,
+            },
+        )
+        .await?;
+        if let Some(url) = &staged.url {
+            geleit_download(url);
+        }
+        return Ok(Some(staged.summary));
+    }
     call(
         "export_folder",
         &ExportArgs {
@@ -803,9 +828,18 @@ pub async fn export_folder(
     .await
 }
 
-/// Export a whole account — one mbox per folder into a chosen directory (SEC-4). `Some(summary)` written
-/// (all-zero if empty), `None` if cancelled.
+/// Export a whole account — one mbox per folder (SEC-4). Desktop writes them into a chosen directory;
+/// the web version can't yet (it's a multi-file export with no single browser download), so there it
+/// points the user at per-folder export instead of popping a dialog on the server.
 pub async fn export_account(account_id: i64) -> Result<Option<ExportSummary>, String> {
+    #[cfg(target_arch = "wasm32")]
+    if geleit_is_web() {
+        return Err(
+            "Whole-account export isn't in the web version yet — export folders one at a time, or use \
+             the desktop app."
+                .to_owned(),
+        );
+    }
     call("export_account", &AccountArgs { account_id }).await
 }
 
