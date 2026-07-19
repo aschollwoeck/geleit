@@ -364,6 +364,15 @@ extern "C" {
     fn geleit_on_update_available(cb: &wasm_bindgen::JsValue);
     #[wasm_bindgen(js_name = geleitMailUrl)]
     fn geleit_mail_url(id: i64, images: bool) -> String;
+    // File I/O differs by host: the desktop uses native dialogs (invoke commands); the web host
+    // downloads generated files and uploads compose attachments through the browser. These shims let
+    // the file commands below pick the right path, keeping the UI's call sites identical.
+    #[wasm_bindgen(js_name = geleitIsWeb)]
+    fn geleit_is_web() -> bool;
+    #[wasm_bindgen(js_name = geleitDownload)]
+    fn geleit_download(url: &str);
+    #[wasm_bindgen(js_name = geleitUploadFiles, catch)]
+    async fn geleit_upload_files() -> Result<JsValue, JsValue>;
 }
 
 /// The URL the reading-pane iframe points at for message `id`'s sanitized HTML. Where that HTML is
@@ -754,13 +763,27 @@ pub async fn delete_draft(id: i64) -> Result<(), String> {
     call("delete_draft", &IdArgs { id }).await
 }
 
-/// Open a native file picker and return the chosen paths (empty if cancelled).
+/// Choose files to attach (empty if cancelled). Desktop opens the native picker; the web host opens the
+/// browser's file dialog, uploads each file, and returns the staged server paths — either way, paths for
+/// `send_message` to read.
 pub async fn pick_files() -> Result<Vec<String>, String> {
+    #[cfg(target_arch = "wasm32")]
+    if geleit_is_web() {
+        let raw = geleit_upload_files().await.map_err(|e| js_error_text(&e))?;
+        return serde_wasm_bindgen::from_value(raw)
+            .map_err(|_| "Couldn't attach that file.".to_owned());
+    }
     call("pick_files", &NoArgs {}).await
 }
 
-/// Save an open message to disk as a `.eml`. `Ok(false)` if the user cancelled the save dialog.
+/// Save an open message to disk as a `.eml`. `Ok(false)` if the user cancelled the desktop save dialog.
+/// On the web host it streams as a browser download, so `Ok(true)` there means the download started.
 pub async fn save_eml(id: i64) -> Result<bool, String> {
+    #[cfg(target_arch = "wasm32")]
+    if geleit_is_web() {
+        geleit_download(&format!("/download/eml/{id}"));
+        return Ok(true);
+    }
     call("save_eml", &IdArgs { id }).await
 }
 
@@ -792,8 +815,14 @@ pub async fn open_eml_file(account_id: i64) -> Result<Option<i64>, String> {
     call("open_eml_file", &AccountArgs { account_id }).await
 }
 
-/// Save a message's `index`-th attachment to disk (fetched on demand). `Ok(false)` if cancelled.
+/// Save a message's `index`-th attachment to disk (fetched on demand). `Ok(false)` if cancelled on the
+/// desktop; on the web host it streams as a browser download (`Ok(true)` = the download started).
 pub async fn save_attachment(message_id: i64, index: usize) -> Result<bool, String> {
+    #[cfg(target_arch = "wasm32")]
+    if geleit_is_web() {
+        geleit_download(&format!("/download/attachment/{message_id}/{index}"));
+        return Ok(true);
+    }
     call("save_attachment", &SaveAttachmentArgs { message_id, index }).await
 }
 

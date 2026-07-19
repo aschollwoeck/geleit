@@ -54,3 +54,67 @@ window.geleitOnUpdateAvailable = function (cb) {
 window.geleitMailUrl = function (id, images) {
   return '/mail/' + id + (images ? '?images=1' : '');
 };
+
+// File I/O is web-native here (there are no native dialogs): downloads go through the browser, and
+// compose attachments are uploaded from the browser's file picker.
+window.geleitIsWeb = function () { return true; };
+
+// Trigger a browser download of a server-generated file. The server sets Content-Disposition (so the
+// filename comes from there); the empty `download` attr just marks it as a download, not navigation.
+window.geleitDownload = function (url) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+};
+
+// Open the browser file picker, upload each chosen file to /upload, and resolve with the staged server
+// paths (what send_message expects). Resolves empty on cancel, so the composer never hangs waiting.
+window.geleitUploadFiles = function () {
+  return new Promise(function (resolve, reject) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.style.display = 'none';
+    let settled = false;
+    const onFocus = function () {
+      // Fallback for browsers without the input `cancel` event (pre-2023): closing the OS dialog
+      // returns focus to the window. Give `change` a moment to fire first; if nothing was picked and
+      // we haven't settled, treat it as a cancel so the composer never hangs awaiting this promise.
+      setTimeout(function () {
+        if (!settled && (!input.files || input.files.length === 0)) { done(resolve, []); }
+      }, 400);
+    };
+    const done = function (fn, v) {
+      if (!settled) {
+        settled = true;
+        window.removeEventListener('focus', onFocus, true);
+        input.remove();
+        fn(v);
+      }
+    };
+    input.addEventListener('cancel', function () { done(resolve, []); });
+    input.addEventListener('change', async function () {
+      try {
+        const paths = [];
+        for (const f of Array.from(input.files || [])) {
+          const res = await fetch('/upload?name=' + encodeURIComponent(f.name), {
+            method: 'POST',
+            headers: { 'content-type': 'application/octet-stream' },
+            body: await f.arrayBuffer(),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          paths.push((await res.json()).path);
+        }
+        done(resolve, paths);
+      } catch (e) {
+        done(reject, String((e && e.message) || e));
+      }
+    });
+    window.addEventListener('focus', onFocus, true);
+    document.body.appendChild(input);
+    input.click();
+  });
+};
