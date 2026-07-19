@@ -41,9 +41,11 @@ pub async fn require_auth(State(password): State<AuthState>, req: Request, next:
 /// well-formed. Returns `None` (→ 401) for a missing/malformed header rather than erroring.
 fn request_password(req: &Request) -> Option<String> {
     let header = req.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
-    let b64 = header
-        .strip_prefix("Basic ")
-        .or_else(|| header.strip_prefix("basic "))?;
+    // The auth-scheme token is case-insensitive (RFC 7617), so accept `Basic`/`basic`/`BASIC`/…
+    let (scheme, b64) = header.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
         .ok()?;
@@ -117,6 +119,20 @@ mod tests {
             request_password(&req_with_auth(Some("Basic !!!not-base64"))),
             None
         );
+        assert_eq!(request_password(&req_with_auth(Some("Basic"))), None); // no space/credentials
+    }
+
+    #[test]
+    fn the_scheme_token_is_case_insensitive() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode("u:pw");
+        for scheme in ["Basic", "basic", "BASIC", "BaSiC"] {
+            let r = req_with_auth(Some(&format!("{scheme} {b64}")));
+            assert_eq!(
+                request_password(&r).as_deref(),
+                Some("pw"),
+                "scheme {scheme}"
+            );
+        }
     }
 
     #[test]
